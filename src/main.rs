@@ -6,7 +6,6 @@
 #![no_std]
 #![no_main]
 
-mod bus;
 mod devices;
 mod oled_demo;
 
@@ -15,7 +14,7 @@ use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::Peri;
 use embassy_time::Timer;
 
-use defmt::{error, info, unwrap};
+use defmt::{error, info, unwrap, warn};
 use rp235x_hal::{self as hal};
 
 use embassy_rp::bind_interrupts;
@@ -26,11 +25,8 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::PioWs2812Program;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
 use embassy_usb::{Builder, Config};
-use embassy_usb::class::midi::{MidiClass, Sender};
-
+use embassy_usb::class::midi::{MidiClass, Receiver, Sender};
 use embassy_rp::gpio::{Level, Output};
-use embedded_hal_bus::i2c::CriticalSectionDevice;
-use embedded_hal::i2c::I2c as _; 
 
 bind_interrupts!(struct Irqs {
     I2C1_IRQ => I2cInterruptHandler<I2C1>;
@@ -51,9 +47,6 @@ macro_rules! make_static {
 
 
 use cortex_m::asm;
-use embedded_graphics::pixelcolor::BinaryColor;
-use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use portable_atomic::{AtomicU8, Ordering};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -69,34 +62,32 @@ static EXECUTOR0: StaticCell<embassy_executor::Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<embassy_executor::Executor> = StaticCell::new();
 
 // 診断用：Core1起動確認フラグ
+#[allow(dead_code)]
 static CORE1_ALIVE: AtomicU8 = AtomicU8::new(0);
 
 // 診断用LED点滅周期（ms）
+#[allow(dead_code)]
 static DELAY_MS: AtomicU8 = AtomicU8::new(100);
 
 // 進捗表示用ステージ（USBログが取れない場合の切り分け用）
 // LEDは「ステージ回数だけ点滅 → 少し待つ」を繰り返します。
 // 250/251 はエラー（高速点滅）。
+#[allow(dead_code)]
 static STAGE: AtomicU8 = AtomicU8::new(0);
 
-// XIAO系のユーザーLEDは「アクティブLow」（Lowで点灯）のことがあります。
-// もしLEDが「光りっぱなし/全く変化しない」場合は、ここを true にして再確認してください。
-const LED_ACTIVE_LOW: bool = false;
-
 fn led_on(led: &mut Output<'static>) {
-    if LED_ACTIVE_LOW {
-        led.set_low();
-    } else {
-        led.set_high();
-    }
+    led.set_high();
 }
 
 fn led_off(led: &mut Output<'static>) {
-    if LED_ACTIVE_LOW {
-        led.set_high();
-    } else {
-        led.set_low();
-    }
+    led.set_low();
+}
+
+#[allow(dead_code)]
+enum Fatal {
+    ProbeFail,
+    InitFail,
+    FlushFail,
 }
 
 fn delay_ms_blocking(ms: u32) {
@@ -105,13 +96,7 @@ fn delay_ms_blocking(ms: u32) {
     asm::delay(ms.saturating_mul(150_000));
 }
 
-
-enum Fatal {
-    ProbeFail,
-    InitFail,
-    FlushFail,
-}
-
+#[allow(dead_code)]
 fn fatal_blink_forever(led: &mut Output<'static>, stage: u8, kind: Fatal) -> ! {
     STAGE.store(stage, Ordering::Relaxed);
     loop {
@@ -148,47 +133,6 @@ fn fatal_blink_forever(led: &mut Output<'static>, stage: u8, kind: Fatal) -> ! {
             }
         }
     }
-}
-
-fn blink_nibble(led: &mut Output<'static>, nibble: u8) {
-    let n = nibble & 0x0F;
-    if n == 0 {
-        led_on(led);
-        delay_ms_blocking(500);
-        led_off(led);
-        delay_ms_blocking(300);
-        return;
-    }
-    for _ in 0..n {
-        led_on(led);
-        delay_ms_blocking(80);
-        led_off(led);
-        delay_ms_blocking(120);
-    }
-    delay_ms_blocking(250);
-}
-
-fn blink_addr_forever(led: &mut Output<'static>, stage: u8, addr: u8) -> ! {
-    // 表示: 上位4bit → 下位4bit を繰り返す
-    STAGE.store(stage, Ordering::Relaxed);
-    loop {
-        blink_nibble(led, addr >> 4);
-        blink_nibble(led, addr);
-        delay_ms_blocking(900);
-    }
-}
-
-fn scan_first_i2c_addr(i2c_bus: &'static bus::i2c::I2c1Bus) -> Option<u8> {
-    // 一般的な7bitアドレス範囲をスキャン
-    let mut dev = CriticalSectionDevice::new(i2c_bus);
-    for addr in 0x08u8..=0x77u8 {
-        // embassy-rp は 0-length write をエラーにするため 1byte 送る
-        // I2Cデバイスに影響が出にくいよう、SSD1306のNOP(0xE3)を使う
-        if dev.write(addr, &[0x00, 0xE3]).is_ok() {
-            return Some(addr);
-        }
-    }
-    None
 }
 
 #[cortex_m_rt::entry]
@@ -250,13 +194,14 @@ fn main() -> ! {
     );
 
     let usb = builder.build();
-    let (sender, _reader) = class.split();
+    let (sender, receiver) = class.split();
 
     // Core0もExecutorを回す（必須）
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
         spawner.spawn(unwrap!(usb_task(usb)));
         spawner.spawn(unwrap!(midi_task(sender)));
+        spawner.spawn(unwrap!(midi_rx_task(receiver)));
         // Neopixel on D0 (GP26)
         spawner.spawn(unwrap!(neopixel_task(common, sm0, p.DMA_CH0, p.PIN_26, ws2812_program)));
     });
@@ -291,8 +236,9 @@ async fn neopixel_task(
     loop {
         for i in 0..NUM_LEDS {
             let color = wheel(j.wrapping_add(i as i32 * 256 / NUM_LEDS as i32) as u8);
-            // Convert RGB8 to RGBW (White is 0 for rainbow effect)
-            data[i] = RGBW { r: color.r, g: color.g, b: color.b, a: smart_leds::White(0) };
+            // Convert RGB8 to RGBW (White is controlled by MIDI)
+            let w = 0;//WHITE_LEVEL.load(Ordering::Relaxed);
+            data[i] = RGBW { r: color.r, g: color.g, b: color.b, a: smart_leds::White(w) };
         }
         ws2812.write(&data).await;
         
@@ -324,6 +270,44 @@ async fn midi_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         Timer::after_millis(500).await;
         
         pitch = if pitch < 72 { pitch + 1 } else { 60 };
+    }
+}
+
+#[embassy_executor::task]
+async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
+    info!("MIDI RX task started");
+    let mut buf = [0; 64];
+
+    loop {
+        match receiver.read_packet(&mut buf).await {
+            Ok(n) => {
+                for packet in buf[0..n].chunks(4) {
+                    if packet.len() == 4 {
+                        let status = packet[1];
+                        let _note = packet[2];
+                        let velocity = packet[3];
+
+                        // Note On (Channel 0-15)
+                        if (status & 0xF0) == 0x90 {
+                            if velocity > 0 {
+                                // Turn on White
+                                //WHITE_LEVEL.store(255, Ordering::Relaxed);
+                            } else {
+                                // Note On with vel 0 is Note Off
+                                //WHITE_LEVEL.store(0, Ordering::Relaxed);
+                            }
+                        }
+                        // Note Off
+                        else if (status & 0xF0) == 0x80 {
+                            //WHITE_LEVEL.store(0, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            Err(_e) => {
+                warn!("Error reading MIDI packet");
+            }
+        }
     }
 }
 
@@ -391,53 +375,4 @@ async fn heartbeat_task(mut led: Output<'static>) {
         embassy_time::Timer::after_millis(200).await; // 200msで高速点滅（動作確認用）
     }
 }
-
-// Core1: OLED demo loop (like C++ loop1())
-#[embassy_executor::task]
-async fn oled_task(i2c_bus: &'static bus::i2c::I2c1Bus, addr: u8) {
-    // 診断：oled_task起動 → 80ms点滅
-    DELAY_MS.store(80, Ordering::Relaxed);
-    
-    info!("Core1: oled_task started, addr=0x{:02X}", addr);
-    
-    // Wait for Core1 to be fully initialized
-    embassy_time::Timer::after_millis(100).await;
-    
-    info!("Core1: Creating I2C device");
-    let i2c_dev = CriticalSectionDevice::new(i2c_bus);
-    
-    info!("Core1: Initializing OLED");
-    let mut oled = match devices::ssd1306::Oled::new_at(i2c_dev, addr) {
-        Ok(o) => {
-            info!("Core1: OLED init OK");
-            o
-        }
-        Err(_) => {
-            error!("Core1: OLED init failed");
-            // Initialization failed on Core1 - just loop forever
-            loop {
-                embassy_time::Timer::after_millis(1000).await;
-            }
-        }
-    };
-
-    info!("Core1: Drawing white screen");
-    // シンプルな白画面を表示
-    oled.clear();
-    let style = PrimitiveStyle::with_fill(BinaryColor::On);
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
-        .into_styled(style)
-        .draw(oled.display());
-    
-    match oled.flush() {
-        Ok(_) => info!("Core1: White screen flush OK"),
-        Err(_) => error!("Core1: Flush failed"),
-    }
-    
-    // 白画面を保持
-    loop {
-        embassy_time::Timer::after_millis(1000).await;
-    }
-}
-
 // End of file

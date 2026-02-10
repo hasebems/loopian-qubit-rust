@@ -17,6 +17,7 @@ pub struct OledDemo {
     anim_x: u8,
 }
 
+#[allow(dead_code)]
 pub fn draw_bringup_screen<I2C>(oled: &mut Oled<I2C>) -> Result<(), DispErr>
 where
     I2C: embedded_hal::i2c::I2c,
