@@ -1,9 +1,9 @@
 **/*.rs.bk
 .#*
 .gdb_history
-Cargo.lock
 target/
 ref/
+.gitignore
 .DS_Store
 
 # editor files
