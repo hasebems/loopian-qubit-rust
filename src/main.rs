@@ -10,23 +10,23 @@ mod devices;
 mod oled_demo;
 
 use embassy_executor::Executor;
-use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::Peri;
+use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_time::Timer;
 
 use defmt::{error, info, unwrap, warn};
 use rp235x_hal::{self as hal};
 
 use embassy_rp::bind_interrupts;
+use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
+use embassy_rp::gpio::{Level, Output};
+use embassy_rp::i2c::{self, Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};
 use embassy_rp::peripherals::{DMA_CH0, I2C1, PIO0, USB};
-use embassy_rp::i2c::{self, I2c, Config as I2cConfig, InterruptHandler as I2cInterruptHandler};
-use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::PioWs2812Program;
-use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
-use embassy_usb::{Builder, Config};
+use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_usb::class::midi::{MidiClass, Receiver, Sender};
-use embassy_rp::gpio::{Level, Output};
+use embassy_usb::{Builder, Config};
 
 bind_interrupts!(struct Irqs {
     I2C1_IRQ => I2cInterruptHandler<I2C1>;
@@ -35,16 +35,15 @@ bind_interrupts!(struct Irqs {
     DMA_IRQ_0 => DmaInterruptHandler<DMA_CH0>;
 });
 
-
-
 macro_rules! make_static {
     ($t:ty, $val:expr) => {{
         static STATIC_CELL: StaticCell<$t> = StaticCell::new();
         #[allow(unused_unsafe)]
-        unsafe { STATIC_CELL.init($val) }
+        unsafe {
+            STATIC_CELL.init($val)
+        }
     }};
 }
-
 
 use cortex_m::asm;
 use portable_atomic::{AtomicU8, Ordering};
@@ -175,15 +174,18 @@ fn main() -> ! {
     let i2c = I2c::new_async(p.I2C1, p.PIN_7, p.PIN_6, Irqs, i2c_config);
 
     // PIO / Neopixel
-    let Pio { mut common, sm0, .. } = Pio::new(p.PIO0, Irqs);
-    let ws2812_program = make_static!(PioWs2812Program<'static, PIO0>, PioWs2812Program::new(&mut common));
+    let Pio {
+        mut common, sm0, ..
+    } = Pio::new(p.PIO0, Irqs);
+    let ws2812_program = make_static!(
+        PioWs2812Program<'static, PIO0>,
+        PioWs2812Program::new(&mut common)
+    );
 
     // Core1起動
     spawn_core1(
         p.CORE1,
-
         unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
-
         move || {
             let executor1 = EXECUTOR1.init(Executor::new());
             executor1.run(|spawner| {
@@ -203,7 +205,13 @@ fn main() -> ! {
         spawner.spawn(unwrap!(midi_task(sender)));
         spawner.spawn(unwrap!(midi_rx_task(receiver)));
         // Neopixel on D0 (GP26)
-        spawner.spawn(unwrap!(neopixel_task(common, sm0, p.DMA_CH0, p.PIN_26, ws2812_program)));
+        spawner.spawn(unwrap!(neopixel_task(
+            common,
+            sm0,
+            p.DMA_CH0,
+            p.PIN_26,
+            ws2812_program
+        )));
     });
 }
 
@@ -215,20 +223,19 @@ async fn neopixel_task(
     pin: Peri<'static, embassy_rp::peripherals::PIN_26>,
     program: &'static PioWs2812Program<'static, PIO0>,
 ) {
-
     use devices::ws2812::wheel;
     use embassy_rp::pio_programs::ws2812::RgbwPioWs2812;
-    use smart_leds::RGBW;
     use embassy_time::Ticker;
+    use smart_leds::RGBW;
 
     info!("Neopixel task started (GP26 / RGBW)");
-    
+
     // RgbwPioWs2812 is needed for RGBW
     let mut ws2812 = RgbwPioWs2812::new(&mut common, sm, dma, Irqs, pin, program);
 
     let mut ticker = Ticker::every(embassy_time::Duration::from_millis(20));
     let mut j: i32 = 0;
-    
+
     // LEDの数
     const NUM_LEDS: usize = 6;
     let mut data = [RGBW::default(); NUM_LEDS];
@@ -237,11 +244,16 @@ async fn neopixel_task(
         for (i, led) in data.iter_mut().enumerate().take(NUM_LEDS) {
             let color = wheel(j.wrapping_add(i as i32 * 256 / NUM_LEDS as i32) as u8);
             // Convert RGB8 to RGBW (White is controlled by MIDI)
-            let w = 0;//WHITE_LEVEL.load(Ordering::Relaxed);
-            *led = RGBW { r: color.r, g: color.g, b: color.b, a: smart_leds::White(w) };
+            let w = 0; //WHITE_LEVEL.load(Ordering::Relaxed);
+            *led = RGBW {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: smart_leds::White(w),
+            };
         }
         ws2812.write(&data).await;
-        
+
         j = j.wrapping_add(1);
         ticker.next().await;
     }
@@ -259,16 +271,16 @@ async fn midi_task(mut sender: Sender<'static, Driver<'static, USB>>) {
     loop {
         // Note On (Channel 0, Note 60, Velocity 64)
         info!("Note On {}", pitch);
-        let packet = [0x09, 0x90, pitch, 64]; 
+        let packet = [0x09, 0x90, pitch, 64];
         sender.write_packet(&packet).await.unwrap();
         Timer::after_millis(500).await;
-        
+
         // Note Off
         info!("Note Off {}", pitch);
         let packet = [0x08, 0x80, pitch, 64];
         sender.write_packet(&packet).await.unwrap();
         Timer::after_millis(500).await;
-        
+
         pitch = if pitch < 72 { pitch + 1 } else { 60 };
     }
 }
@@ -326,7 +338,7 @@ async fn core1_led_task(mut led: Output<'static>) {
 async fn core1_oled_task(i2c: I2c<'static, I2C1, i2c::Async>) {
     use crate::devices::ssd1306::Oled;
     use crate::oled_demo::OledDemo;
-    
+
     info!("Core1 OLED task started");
     match Oled::new(i2c) {
         Ok(mut oled) => {
@@ -340,14 +352,15 @@ async fn core1_oled_task(i2c: I2c<'static, I2C1, i2c::Async>) {
                     }
                 }
             }
-        },
+        }
         Err(_) => {
-             error!("OLED init failed");
-             loop { Timer::after_millis(1000).await; } 
+            error!("OLED init failed");
+            loop {
+                Timer::after_millis(1000).await;
+            }
         }
     }
 }
-
 
 /// Program metadata for `picotool info`
 #[unsafe(link_section = ".bi_entries")]
