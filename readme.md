@@ -1,4 +1,4 @@
-# Rust pico_template
+# Loopian::QUBIT in Rust
 
 ## 概要
 

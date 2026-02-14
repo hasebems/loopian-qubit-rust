@@ -29,7 +29,7 @@ use embassy_usb::class::midi::{MidiClass, Receiver, Sender};
 use embassy_usb::{Builder, Config};
 
 const PCA9544_NUM_CHANNELS: u8 = 4; // PCA9544のチャネル数
-const PCA9544_NUM_DEVICES: u8 = 1;  // PCA9544の台数
+const PCA9544_NUM_DEVICES: u8 = 1; // PCA9544の台数
 const AT42QT_KEYS_PER_DEVICE: u8 = 6; // AT42QT1070
 
 bind_interrupts!(struct Irqs {
@@ -371,7 +371,13 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
     // --- init phase ---
     for ch in 0..PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES {
-        pca.select(&mut i2c, ch / PCA9544_NUM_CHANNELS, ch % PCA9544_NUM_CHANNELS).await.ok();
+        pca.select(
+            &mut i2c,
+            ch / PCA9544_NUM_CHANNELS,
+            ch % PCA9544_NUM_CHANNELS,
+        )
+        .await
+        .ok();
         at42.init(&mut i2c).await.ok();
     }
 
@@ -381,7 +387,8 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     }
 
     // 初期状態
-    let mut prev = [0u16; (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES * AT42QT_KEYS_PER_DEVICE) as usize];
+    let mut prev =
+        [0u16; (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES * AT42QT_KEYS_PER_DEVICE) as usize];
 
     // Task Loop
     loop {
@@ -401,7 +408,13 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         // Touch Scan
         DEBUG_STATE.store(4, Ordering::Relaxed); // Touch scan中
         for ch in 0..PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES {
-            pca.select(&mut i2c, ch / PCA9544_NUM_CHANNELS, ch % PCA9544_NUM_CHANNELS).await.ok();
+            pca.select(
+                &mut i2c,
+                ch / PCA9544_NUM_CHANNELS,
+                ch % PCA9544_NUM_CHANNELS,
+            )
+            .await
+            .ok();
             for key in 0..AT42QT_KEYS_PER_DEVICE {
                 if let Ok(rddata) = at42.read_state(&mut i2c, key, false).await {
                     let sid = (ch * AT42QT_KEYS_PER_DEVICE + key) as usize;

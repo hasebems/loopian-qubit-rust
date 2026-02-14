@@ -1,5 +1,4 @@
-pub struct Pca9544 {
-}
+pub struct Pca9544 {}
 
 impl Pca9544 {
     const ADDR: u8 = 0x74;
