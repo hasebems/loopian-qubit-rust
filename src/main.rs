@@ -86,80 +86,6 @@ static BUFFER_FROM_DISPLAY: Channel<
 static DEBUG_STATE: AtomicU8 = AtomicU8::new(0);
 static ERROR_COUNT: AtomicU8 = AtomicU8::new(0);
 
-// 診断用：Core1起動確認フラグ
-#[allow(dead_code)]
-static CORE1_ALIVE: AtomicU8 = AtomicU8::new(0);
-
-// 診断用LED点滅周期（ms）
-#[allow(dead_code)]
-static DELAY_MS: AtomicU8 = AtomicU8::new(100);
-
-// 進捗表示用ステージ（USBログが取れない場合の切り分け用）
-// LEDは「ステージ回数だけ点滅 → 少し待つ」を繰り返します。
-// 250/251 はエラー（高速点滅）。
-#[allow(dead_code)]
-static STAGE: AtomicU8 = AtomicU8::new(0);
-
-fn led_on(led: &mut Output<'static>) {
-    led.set_high();
-}
-
-fn led_off(led: &mut Output<'static>) {
-    led.set_low();
-}
-
-#[allow(dead_code)]
-enum FatalFail {
-    Probe,
-    Init,
-    Flush,
-}
-
-fn delay_ms_blocking(ms: u32) {
-    // だいたい。動作確認用（正確さ不要）
-    // 150MHz想定で 150_000 cycles/ms くらい。
-    asm::delay(ms.saturating_mul(150_000));
-}
-
-#[allow(dead_code)]
-fn fatal_blink_forever(led: &mut Output<'static>, stage: u8, kind: FatalFail) -> ! {
-    STAGE.store(stage, Ordering::Relaxed);
-    loop {
-        match kind {
-            // 2回チカチカ → 長休み
-            FatalFail::Probe => {
-                for _ in 0..2 {
-                    led_on(led);
-                    delay_ms_blocking(80);
-                    led_off(led);
-                    delay_ms_blocking(120);
-                }
-                delay_ms_blocking(1_000);
-            }
-            // 3回チカチカ → 長休み
-            FatalFail::Init => {
-                for _ in 0..3 {
-                    led_on(led);
-                    delay_ms_blocking(80);
-                    led_off(led);
-                    delay_ms_blocking(120);
-                }
-                delay_ms_blocking(1_000);
-            }
-            // 4回チカチカ → 長休み (flushの途中でI2Cが落ちる/ノイズ等)
-            FatalFail::Flush => {
-                for _ in 0..4 {
-                    led_on(led);
-                    delay_ms_blocking(80);
-                    led_off(led);
-                    delay_ms_blocking(120);
-                }
-                delay_ms_blocking(1_000);
-            }
-        }
-    }
-}
-
 #[cortex_m_rt::entry]
 fn main() -> ! {
     let p = embassy_rp::init(Default::default());
@@ -524,20 +450,4 @@ pub static PICOTOOL_ENTRIES: [rp235x_hal::binary_info::EntryAddr; 5] = [
     rp235x_hal::binary_info::rp_cargo_homepage_url!(),
     rp235x_hal::binary_info::rp_program_build_attribute!(),
 ];
-
-// Core0: LED heartbeat (like C++ loop)
-#[embassy_executor::task]
-async fn heartbeat_task(mut led: Output<'static>) {
-    // タスクが実行されたことを確認（すぐにLED点滅開始）
-    let mut counter = 0u32;
-    loop {
-        counter = counter.wrapping_add(1);
-        if counter.is_multiple_of(2) {
-            led_on(&mut led);
-        } else {
-            led_off(&mut led);
-        }
-        embassy_time::Timer::after_millis(200).await; // 200msで高速点滅（動作確認用）
-    }
-}
 // End of file
