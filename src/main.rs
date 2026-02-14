@@ -232,7 +232,7 @@ async fn neopixel_task(
         }
         ws2812.write(&data).await;
 
-        j = j.wrapping_add(1);
+        j = j.wrapping_add(2); // 色の変化速度
         ticker.next().await;
     }
 }
