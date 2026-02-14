@@ -18,3 +18,12 @@
 
 - SSD1306 に提供する画像を生成
 
+### NeoPixel
+
+- NeoPixel(RGBW) をPIOで制御可能
+
+## USB MIDI
+
+- USB MIDI 受信機能
+- USB MIDI 送信機能
+    - 現状は半音ずつ上げながら Note On/Off を繰り返し送信
