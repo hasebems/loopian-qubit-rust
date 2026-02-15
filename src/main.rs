@@ -6,13 +6,17 @@
 #![no_std]
 #![no_main]
 
+mod constants;
 mod devices;
+mod gen_ev;
 mod ui;
 
 use embassy_executor::Executor;
 use embassy_rp::Peri;
 use embassy_rp::multicore::{Stack, spawn_core1};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
 
 use rp235x_hal::{self as hal};
@@ -27,10 +31,6 @@ use embassy_rp::pio_programs::ws2812::PioWs2812Program;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_usb::class::midi::{MidiClass, Receiver, Sender};
 use embassy_usb::{Builder, Config};
-
-const PCA9544_NUM_CHANNELS: u8 = 4; // PCA9544のチャネル数
-const PCA9544_NUM_DEVICES: u8 = 1; // PCA9544の台数
-const AT42QT_KEYS_PER_DEVICE: u8 = 6; // AT42QT1070
 
 bind_interrupts!(struct Irqs {
     I2C1_IRQ => I2cInterruptHandler<I2C1>;
@@ -68,7 +68,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
 // Core1 stack
-static mut CORE1_STACK: Stack<8192> = Stack::new();
+static mut CORE1_STACK: Stack<{ constants::CORE1_STACK_SIZE }> = Stack::new();
 static EXECUTOR0: StaticCell<embassy_executor::Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<embassy_executor::Executor> = StaticCell::new();
 
@@ -90,6 +90,19 @@ static BUFFER_FROM_DISPLAY: Channel<
 static DEBUG_STATE: AtomicU8 = AtomicU8::new(0);
 static ERROR_COUNT: AtomicU8 = AtomicU8::new(0);
 
+// タッチセンサの生データ格納用（16bit/key）
+static TOUCH_RAW_DATA: Mutex<
+    CriticalSectionRawMutex,
+    [u16; (constants::PCA9544_NUM_CHANNELS
+        * constants::PCA9544_NUM_DEVICES
+        * constants::AT42QT_KEYS_PER_DEVICE) as usize],
+> = Mutex::new(
+    [0u16;
+        (constants::PCA9544_NUM_CHANNELS
+            * constants::PCA9544_NUM_DEVICES
+            * constants::AT42QT_KEYS_PER_DEVICE) as usize],
+);
+
 #[cortex_m_rt::entry]
 fn main() -> ! {
     let p = embassy_rp::init(Default::default());
@@ -99,10 +112,10 @@ fn main() -> ! {
 
     // USB Driver
     let driver = Driver::new(p.USB, Irqs);
-    let mut config = Config::new(0xc0de, 0xcafe); // Vendor ID / Product ID
-    config.manufacturer = Some("Embassy");
-    config.product = Some("USB MIDI Device");
-    config.serial_number = Some("12345678");
+    let mut config = Config::new(0x1209, 0x3690); // Vendor ID / Product ID
+    config.manufacturer = Some("Kigakudoh");
+    config.product = Some("Loopian::QUBIT");
+    config.serial_number = Some("000000");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
@@ -161,7 +174,7 @@ fn main() -> ! {
                     Ok(token) => spawner.spawn(token),
                     Err(_) => ERROR_COUNT.store(11, Ordering::Relaxed),
                 }
-                match oled_ui_task() {
+                match core1_oled_ui_task() {
                     Ok(token) => spawner.spawn(token),
                     Err(_) => ERROR_COUNT.store(12, Ordering::Relaxed),
                 }
@@ -175,19 +188,22 @@ fn main() -> ! {
     // Core0もExecutorを回す（必須）
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
+        match qubit_touch_task(sender) {
+            Ok(token) => spawner.spawn(token),
+            Err(_) => ERROR_COUNT.store(20, Ordering::Relaxed),
+        }
         match usb_task(usb) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_COUNT.store(20, Ordering::Relaxed),
         }
-        match midi_task(sender) {
-            Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_COUNT.store(21, Ordering::Relaxed),
-        }
+        //        match midi_task(sender) {
+        //            Ok(token) => spawner.spawn(token),
+        //            Err(_) => ERROR_COUNT.store(21, Ordering::Relaxed),
+        //        }
         match midi_rx_task(receiver) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_COUNT.store(22, Ordering::Relaxed),
         }
-        // Neopixel on D0 (GP26)
         match neopixel_task(common, sm0, p.DMA_CH0, p.PIN_26, ws2812_program) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_COUNT.store(23, Ordering::Relaxed),
@@ -203,6 +219,7 @@ async fn neopixel_task(
     pin: Peri<'static, embassy_rp::peripherals::PIN_26>,
     program: &'static PioWs2812Program<'static, PIO0>,
 ) {
+    // Neopixel on D0 (GP26)
     use devices::ws2812::wheel;
     use embassy_rp::pio_programs::ws2812::RgbwPioWs2812;
     use embassy_time::Ticker;
@@ -238,26 +255,55 @@ async fn neopixel_task(
 }
 
 #[embassy_executor::task]
-async fn usb_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB>>) {
-    usb.run().await;
+async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
+    use core::cell::RefCell;
+    use gen_ev::qtouch::QubitTouch;
+    let send_buffer = RefCell::new([[0u8; 4]; 8]);
+    let send_index = RefCell::new(0);
+    let mut qt = QubitTouch::new(|status, note, velocity| {
+        // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信
+        let packet = [(status & 0xf0) >> 4, status, note, velocity];
+        let mut buf = send_buffer.borrow_mut();
+        let mut idx = send_index.borrow_mut();
+        if *idx < buf.len() {
+            buf[*idx] = packet;
+            *idx += 1;
+        } else {
+            panic!();
+        }
+    });
+    loop {
+        Timer::after(embassy_time::Duration::from_millis(10)).await;
+        {
+            let data = TOUCH_RAW_DATA.lock().await;
+            for ch in 0..constants::TOTAL_QT_KEYS {
+                qt.set_value(ch, data[ch]);
+            }
+        }
+        qt.seek_and_update_touch_point();
+        let idx = *send_index.borrow();
+        if idx > 0 {
+            // await前にバッファをコピーして借用を解放
+            let mut packets = [[0u8; 4]; 8];
+            {
+                let buf = send_buffer.borrow();
+                packets[0..idx].copy_from_slice(&buf[0..idx]);
+            }
+            for i in 0..idx {
+                sender.write_packet(&packets[i]).await.ok();
+            }
+            *send_index.borrow_mut() = 0;
+        }
+        qt.lighten_leds(|_location, _intensity| {
+            // LEDの明るさをタッチの強さに応じて変化させる
+            //WHITE_LEVEL.store(intensity as u8, Ordering::Relaxed);
+        });
+    }
 }
 
 #[embassy_executor::task]
-async fn midi_task(mut sender: Sender<'static, Driver<'static, USB>>) {
-    let mut pitch = 60u8;
-    loop {
-        // Note On (Channel 0, Note 60, Velocity 64)
-        let packet = [0x09, 0x90, pitch, 64];
-        sender.write_packet(&packet).await.ok();
-        Timer::after_millis(500).await;
-
-        // Note Off
-        let packet = [0x08, 0x80, pitch, 64];
-        sender.write_packet(&packet).await.ok();
-        Timer::after_millis(500).await;
-
-        pitch = if pitch < 72 { pitch + 1 } else { 60 };
-    }
+async fn usb_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB>>) {
+    usb.run().await;
 }
 
 #[embassy_executor::task]
@@ -370,11 +416,11 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     let mut oled = Oled::new();
 
     // --- init phase ---
-    for ch in 0..PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES {
+    for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
         pca.select(
             &mut i2c,
-            ch / PCA9544_NUM_CHANNELS,
-            ch % PCA9544_NUM_CHANNELS,
+            ch / constants::PCA9544_NUM_CHANNELS,
+            ch % constants::PCA9544_NUM_CHANNELS,
         )
         .await
         .ok();
@@ -385,10 +431,6 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     if oled.init(&mut i2c).is_err() {
         ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
     }
-
-    // 初期状態
-    let mut prev =
-        [0u16; (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES * AT42QT_KEYS_PER_DEVICE) as usize];
 
     // Task Loop
     loop {
@@ -407,18 +449,21 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
         // Touch Scan
         DEBUG_STATE.store(4, Ordering::Relaxed); // Touch scan中
-        for ch in 0..PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES {
-            pca.select(
-                &mut i2c,
-                ch / PCA9544_NUM_CHANNELS,
-                ch % PCA9544_NUM_CHANNELS,
-            )
-            .await
-            .ok();
-            for key in 0..AT42QT_KEYS_PER_DEVICE {
-                if let Ok(rddata) = at42.read_state(&mut i2c, key, false).await {
-                    let sid = (ch * AT42QT_KEYS_PER_DEVICE + key) as usize;
-                    prev[sid] = rddata;
+        {
+            let mut data = TOUCH_RAW_DATA.lock().await;
+            for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
+                pca.select(
+                    &mut i2c,
+                    ch / constants::PCA9544_NUM_CHANNELS,
+                    ch % constants::PCA9544_NUM_CHANNELS,
+                )
+                .await
+                .ok();
+                for key in 0..constants::AT42QT_KEYS_PER_DEVICE {
+                    if let Ok(rddata) = at42.read_state(&mut i2c, key, false).await {
+                        let sid = (ch * constants::AT42QT_KEYS_PER_DEVICE + key) as usize;
+                        data[sid] = rddata;
+                    }
                 }
             }
         }
@@ -427,7 +472,7 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 }
 
 #[embassy_executor::task]
-async fn oled_ui_task() {
+async fn core1_oled_ui_task() {
     use ui::oled_demo::OledDemo;
 
     let mut demo = OledDemo::new();
