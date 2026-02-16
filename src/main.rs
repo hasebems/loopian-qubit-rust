@@ -74,6 +74,8 @@ static EXECUTOR1: StaticCell<embassy_executor::Executor> = StaticCell::new();
 
 // OLEDバッファ転送用チャンネル（ダブルバッファリング）
 use devices::ssd1306::OledBuffer;
+
+use crate::constants::TOTAL_QT_KEYS;
 static BUFFER_TO_DISPLAY: Channel<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     OledBuffer,
@@ -194,12 +196,8 @@ fn main() -> ! {
         }
         match usb_task(usb) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_COUNT.store(20, Ordering::Relaxed),
+            Err(_) => ERROR_COUNT.store(21, Ordering::Relaxed),
         }
-        //        match midi_task(sender) {
-        //            Ok(token) => spawner.spawn(token),
-        //            Err(_) => ERROR_COUNT.store(21, Ordering::Relaxed),
-        //        }
         match midi_rx_task(receiver) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_COUNT.store(22, Ordering::Relaxed),
@@ -269,12 +267,14 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             buf[*idx] = packet;
             *idx += 1;
         } else {
-            panic!();
+            // バッファオーバーフローの場合はエラーカウントをインクリメント
+            ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     });
     loop {
         Timer::after(embassy_time::Duration::from_millis(10)).await;
         {
+            // タッチセンサの生データを取得してQubitTouchにセット
             let data = TOUCH_RAW_DATA.lock().await;
             for ch in 0..constants::TOTAL_QT_KEYS {
                 qt.set_value(ch, data[ch]);
@@ -282,9 +282,12 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         }
         qt.seek_and_update_touch_point();
         let idx = *send_index.borrow();
-        if idx > 0 {
+        const MAX_EVENT: usize = 8;
+        if idx == 0 {
+            // no event
+        } else if idx < MAX_EVENT {
             // await前にバッファをコピーして借用を解放
-            let mut packets = [[0u8; 4]; 8];
+            let mut packets = [[0u8; 4]; MAX_EVENT];
             {
                 let buf = send_buffer.borrow();
                 packets[0..idx].copy_from_slice(&buf[0..idx]);
@@ -293,6 +296,9 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
                 sender.write_packet(packet).await.ok();
             }
             *send_index.borrow_mut() = 0;
+        } else {
+            // バッファオーバーフロー
+            ERROR_COUNT.store(15, Ordering::Relaxed);
         }
         qt.lighten_leds(|_location, _intensity| {
             // LEDの明るさをタッチの強さに応じて変化させる
@@ -432,25 +438,30 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
+    // refference value for touch raw data
+    let mut refference = [0u16; TOTAL_QT_KEYS];
+    let mut ref_idx_num = 0;
+
     // Task Loop
     loop {
-        // OLED更新：UIタスクから描画済みバッファを受信
-        DEBUG_STATE.store(2, Ordering::Relaxed); // I2Cタスクがバッファ待ち
-        let buffer = BUFFER_TO_DISPLAY.receive().await;
+        // OLED更新:UIタスクから描画済みバッファを受信（非ブロッキング）
+        if let Ok(buffer) = BUFFER_TO_DISPLAY.try_receive() {
+            DEBUG_STATE.store(3, Ordering::Relaxed); // flush中
+            if oled.flush_buffer(&buffer, &mut i2c).is_err() {
+                ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
 
-        DEBUG_STATE.store(3, Ordering::Relaxed); // flush中
-        if oled.flush_buffer(&buffer, &mut i2c).is_err() {
-            ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+            // バッファを返却
+            if BUFFER_FROM_DISPLAY.try_send(buffer).is_err() {
+                ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
         }
-
-        // バッファを返却
-        BUFFER_FROM_DISPLAY.send(buffer).await;
         DEBUG_STATE.store(0, Ordering::Relaxed); // 正常動作
 
         // Touch Scan
-        DEBUG_STATE.store(4, Ordering::Relaxed); // Touch scan中
         {
             let mut data = TOUCH_RAW_DATA.lock().await;
+            DEBUG_STATE.store(4, Ordering::Relaxed); // Touch scan中
             for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
                 pca.select(
                     &mut i2c,
@@ -460,14 +471,26 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
                 .await
                 .ok();
                 for key in 0..constants::AT42QT_KEYS_PER_DEVICE {
-                    if let Ok(rddata) = at42.read_state(&mut i2c, key, false).await {
+                    if let Ok(raw_data) = at42.read_state(&mut i2c, key, false).await {
                         let sid = (ch * constants::AT42QT_KEYS_PER_DEVICE + key) as usize;
-                        data[sid] = rddata;
+                        if raw_data >= refference[sid] {
+                            data[sid] = raw_data - refference[sid];
+                        } else {
+                            data[sid] = 0;
+                        }
                     }
                 }
             }
         }
+        // Refference Update (1key/loop)
+        if let Ok(ref_data) = at42.read_state(&mut i2c, ref_idx_num as u8, true).await {
+            refference[ref_idx_num] = ref_data;
+            ref_idx_num = (ref_idx_num + 1) % TOTAL_QT_KEYS;
+        }
         DEBUG_STATE.store(0, Ordering::Relaxed); // 正常動作
+
+        // 他のタスクに処理を譲る
+        embassy_futures::yield_now().await;
     }
 }
 

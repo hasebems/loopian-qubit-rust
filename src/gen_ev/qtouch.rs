@@ -516,18 +516,30 @@ where
                 sum += tp_value as i32;
                 locate += ((tp as i32 + window_idx) as f32) * tp_value as f32; // Wrap around to ensure valid index
             }
-            locate /= sum as f32; // Calculate the average location based on intensity
-            ttp.1 = locate;
-            ttp.2 = sum as i16;
+            // ゼロ除算を防ぐ
+            if sum > 0 {
+                locate /= sum as f32; // Calculate the average location based on intensity
+                ttp.1 = locate;
+                ttp.2 = sum as i16;
+            } else {
+                // sumが0の場合はこのタッチポイントを無効化（INIT_VALのまま）
+                continue; // このイテレーションをスキップ
+            }
         }
         // 3: 各パッドの値を確認し、タッチポイントを更新または追加する
         for ttp in temp_touch_point.iter().take(temp_index) {
             let location = ttp.1;
             let intensity = ttp.2;
+            
+            // 無効なタッチポイント（sum=0だった場合）はスキップ
+            if location == INIT_VAL {
+                continue;
+            }
+            
             // 現在のタッチポイントで近いものがあれば、タッチポイントがそこから移動したとみなす
             let mut nearest: f32 = TouchPoint::<F>::INIT_VAL;
-            let mut nearest_tp: Option<&mut TouchPoint<F>> = None;
-            for tp in self.touch_points.iter_mut() {
+            let mut nearest_idx: Option<usize> = None;
+            for (idx, tp) in self.touch_points.iter().enumerate() {
                 if !tp.is_touched() || tp.is_updated() {
                     continue; // Skip if the touch point is not touched
                 }
@@ -535,13 +547,16 @@ where
                 if diff < nearest {
                     // 近いものがあれば、タッチポイントを更新する
                     nearest = diff;
-                    nearest_tp = Some(tp);
+                    nearest_idx = Some(idx);
                 }
             }
-            if let Some(nearest_tp) = nearest_tp {
-                if nearest_tp.is_near_here(location) {
+            
+            // 借用の問題を回避するため、インデックスを使って処理を分離
+            if let Some(idx) = nearest_idx {
+                let should_update = self.touch_points[idx].is_near_here(location);
+                if should_update {
                     // 一番近いタッチポイントが、現在のタッチポイントに近い場合
-                    nearest_tp.update_touch(location, intensity as u16);
+                    self.touch_points[idx].update_touch(location, intensity as u16);
                 } else {
                     self.new_touch_point(location, intensity as u16);
                 }
