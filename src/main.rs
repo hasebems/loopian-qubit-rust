@@ -272,7 +272,8 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         }
     });
     loop {
-        Timer::after(embassy_time::Duration::from_millis(10)).await;
+        // タッチスキャンは20msごとに実行（NeoPixelと同じ周期）
+        Timer::after(embassy_time::Duration::from_millis(20)).await;
         {
             // タッチセンサの生データを取得してQubitTouchにセット
             let data = TOUCH_RAW_DATA.lock().await;

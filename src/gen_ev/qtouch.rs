@@ -630,7 +630,12 @@ where
     }*/
     fn erase_touch_point(&mut self) {
         for tp in self.touch_points.iter_mut() {
-            if !tp.is_updated() && tp.is_touched() {
+            // タッチされていないポイントは処理不要（これがないと毎回無駄処理が蓄積）
+            if !tp.is_touched() {
+                continue;
+            }
+            
+            if !tp.is_updated() {
                 tp.maybe_released();
             } else {
                 tp.clear_updated_flag(); // Clear the updated flag for the next cycle
