@@ -530,12 +530,12 @@ where
         for ttp in temp_touch_point.iter().take(temp_index) {
             let location = ttp.1;
             let intensity = ttp.2;
-            
+
             // 無効なタッチポイント（sum=0だった場合）はスキップ
             if location == INIT_VAL {
                 continue;
             }
-            
+
             // 現在のタッチポイントで近いものがあれば、タッチポイントがそこから移動したとみなす
             let mut nearest: f32 = TouchPoint::<F>::INIT_VAL;
             let mut nearest_idx: Option<usize> = None;
@@ -550,7 +550,7 @@ where
                     nearest_idx = Some(idx);
                 }
             }
-            
+
             // 借用の問題を回避するため、インデックスを使って処理を分離
             if let Some(idx) = nearest_idx {
                 let should_update = self.touch_points[idx].is_near_here(location);
@@ -634,7 +634,7 @@ where
             if !tp.is_touched() {
                 continue;
             }
-            
+
             if !tp.is_updated() {
                 tp.maybe_released();
             } else {
