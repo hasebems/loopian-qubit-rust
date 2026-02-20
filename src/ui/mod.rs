@@ -1,1 +1,1 @@
-pub mod oled_demo;
+pub mod oled_display;

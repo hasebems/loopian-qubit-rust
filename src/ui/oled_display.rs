@@ -7,6 +7,8 @@ use embedded_graphics::primitives::{
     Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, Triangle,
 };
 use embedded_graphics::text::Text;
+use heapless::String;
+use core::fmt::Write;
 
 use crate::devices::ssd1306::OledBuffer;
 
@@ -36,14 +38,16 @@ impl OledDemo {
     }
 
     /// Executes a single demo step and returns the suggested delay (ms) before the next step.
-    pub fn tick(&mut self, buffer: &mut OledBuffer) -> u64 {
+    pub fn tick(&mut self, buffer: &mut OledBuffer, a: u8, b: u8, c: u8) -> u64 {
         match self.step {
             0 => {
                 // loop1(): drawPixel + display + delay(2000)
                 buffer.clear();
-                let _ = Pixel(Point::new(10, 10), BinaryColor::On).draw(buffer);
-                self.step += 1;
-                2000
+                //let _ = Pixel(Point::new(10, 10), BinaryColor::On).draw(buffer);
+                //self.step += 1;
+                //2000
+                display_info(buffer, a, b, c);
+                100
             }
             1 => {
                 demo_lines(buffer);
@@ -123,6 +127,29 @@ impl OledDemo {
             }
         }
     }
+}
+
+fn display_info(buffer: &mut OledBuffer, var1: u8, var2: u8, var3: u8) {
+    buffer.clear();
+
+    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+        .into_styled(outline)
+        .draw(buffer);
+
+    let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    
+    let mut text1: String<32> = String::new();
+    let _ = write!(text1, "var1: {}", var1);
+    let _ = Text::new(&text1, Point::new(6, 16), style_big).draw(buffer);
+    
+    let mut text2: String<32> = String::new();
+    let _ = write!(text2, "var2: {}", var2);
+    let _ = Text::new(&text2, Point::new(6, 36), style_big).draw(buffer);
+    
+    let mut text3: String<32> = String::new();
+    let _ = write!(text3, "var3: {}", var3);
+    let _ = Text::new(&text3, Point::new(6, 56), style_big).draw(buffer);
 }
 
 fn demo_lines(buffer: &mut OledBuffer) {

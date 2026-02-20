@@ -497,9 +497,10 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
 #[embassy_executor::task]
 async fn core1_oled_ui_task() {
-    use ui::oled_demo::OledDemo;
+    use ui::oled_display::OledDemo;
 
     let mut demo = OledDemo::new();
+    let mut counter = 0u8;
 
     loop {
         // 空バッファを受信
@@ -507,8 +508,11 @@ async fn core1_oled_ui_task() {
         let mut buffer = BUFFER_FROM_DISPLAY.receive().await;
 
         // 描画
+        let state = DEBUG_STATE.load(Ordering::Relaxed);
+        let errors = ERROR_COUNT.load(Ordering::Relaxed);
         DEBUG_STATE.store(5, Ordering::Relaxed); // 描画中
-        let delay = demo.tick(&mut buffer);
+        let delay = demo.tick(&mut buffer, state, errors, counter);
+        counter = counter.wrapping_add(1);
 
         // 描画済みバッファを送信
         BUFFER_TO_DISPLAY.send(buffer).await;
