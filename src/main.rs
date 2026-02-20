@@ -354,61 +354,10 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
 #[embassy_executor::task]
 async fn core1_led_task(mut led: Output<'static>) {
     loop {
-        let state = DEBUG_STATE.load(Ordering::Relaxed);
-        let errors = ERROR_COUNT.load(Ordering::Relaxed);
-
-        // エラーがある場合は高速点滅
-        if errors > 0 {
-            for _ in 0..errors.min(10) {
-                led.set_high();
-                Timer::after_millis(50).await;
-                led.set_low();
-                Timer::after_millis(50).await;
-            }
-            Timer::after_millis(500).await;
-        }
-        // 状態に応じた点滅パターン
-        else {
-            match state {
-                0 => {
-                    // 正常動作: ゆっくり点滅
-                    led.set_high();
-                    Timer::after_millis(100).await;
-                    led.set_low();
-                    Timer::after_millis(900).await;
-                }
-                1 => {
-                    // UIタスクがバッファ待ち: 2回点滅
-                    for _ in 0..2 {
-                        led.set_high();
-                        Timer::after_millis(100).await;
-                        led.set_low();
-                        Timer::after_millis(100).await;
-                    }
-                    Timer::after_millis(600).await;
-                }
-                2 => {
-                    // I2Cタスクがバッファ待ち: 3回点滅
-                    for _ in 0..3 {
-                        led.set_high();
-                        Timer::after_millis(100).await;
-                        led.set_low();
-                        Timer::after_millis(100).await;
-                    }
-                    Timer::after_millis(400).await;
-                }
-                _ => {
-                    // その他の状態: state回数点滅
-                    for _ in 0..state.min(10) {
-                        led.set_high();
-                        Timer::after_millis(100).await;
-                        led.set_low();
-                        Timer::after_millis(100).await;
-                    }
-                    Timer::after_millis(500).await;
-                }
-            }
-        }
+        led.set_high();
+        Timer::after_millis(100).await;
+        led.set_low();
+        Timer::after_millis(900).await;
     }
 }
 
