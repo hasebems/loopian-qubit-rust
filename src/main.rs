@@ -332,7 +332,8 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
                 };
                 if sender
                     .write_packet(&[status >> 4, status, packet.1, packet.2])
-                    .await.is_err()
+                    .await
+                    .is_err()
                 {
                     // エラーハンドリング
                     ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
