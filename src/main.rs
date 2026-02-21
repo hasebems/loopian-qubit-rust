@@ -8,7 +8,7 @@
 
 mod constants;
 mod devices;
-mod gen_ev;
+mod touch;
 mod ui;
 
 use embassy_executor::Executor;
@@ -279,7 +279,7 @@ async fn ringled_task(
 #[embassy_executor::task]
 async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
     use core::cell::RefCell;
-    use gen_ev::qtouch::QubitTouch;
+    use touch::qtouch::QubitTouch;
     let send_buffer = RefCell::new([TouchEvent::default(); 8]);
     let send_index = RefCell::new(0);
     let mut qt = QubitTouch::new(|status, note, velocity, location| {
@@ -407,7 +407,7 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     let mut oled = Oled::new();
 
     // --- init phase ---
-    let mut read_touch = gen_ev::read_touch::ReadTouch::new(); // タッチイベントの状態を保持する構造体を生成
+    let mut read_touch = touch::read_touch::ReadTouch::new(); // タッチイベントの状態を保持する構造体を生成
     read_touch.init_touch_sensors(&pca, &mut at42, &mut i2c).await;
 
     // OLED初期化
