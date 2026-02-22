@@ -16,6 +16,7 @@ rustflags = [
     "-C", "link-arg=--nmagic",
     "-C", "link-arg=-Tlink.x",
     "-C", "target-cpu=cortex-m33",
+    "-C", "link-arg=-Map=output.map"
 ]
 linker = "rust-lld"
 

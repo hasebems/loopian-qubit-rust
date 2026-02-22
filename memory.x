@@ -73,3 +73,6 @@ SECTIONS {
 
 PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
+
+/* Core0 stack size: 8 KiB */
+_stack_size = 8192;

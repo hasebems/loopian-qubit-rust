@@ -64,6 +64,9 @@ build = [
   { target = "thumbv8m.main-none-eabihf", artifact-dir = "out/rp235x" }
 ]
 
+[build-dependencies]
+chrono = { version = "0.4", features = ["clock"] }
+
 # cargo build/run
 [profile.dev]
 debug = 2
