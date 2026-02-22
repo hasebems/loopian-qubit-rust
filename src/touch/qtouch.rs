@@ -561,10 +561,8 @@ where
             }
         }
 
-        for i in 0..display_count {
-            if let Some(id) = display_ids[i] {
-                self.display_location(id); // Update the display for this touch point
-            }
+        for id in display_ids.iter().take(display_count).flatten() {
+            self.display_location(*id); // Update the display for this touch point
         }
     }
 }

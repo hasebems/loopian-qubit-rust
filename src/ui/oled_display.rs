@@ -152,7 +152,7 @@ fn display3(buffer: &mut OledBuffer) {
 
     let mut text1: String<32> = String::new();
     let p0 = TOUCH0.load(core::sync::atomic::Ordering::Relaxed);
-    if p0 >= 0 && p0 < 10000 {
+    if (0..10000).contains(&p0) {
         let _ = write!(text1, "Touch: {}", p0);
     } else {
         let _ = write!(text1, "Touch: ---");
@@ -161,7 +161,7 @@ fn display3(buffer: &mut OledBuffer) {
 
     text1.clear();
     let p1 = TOUCH1.load(core::sync::atomic::Ordering::Relaxed);
-    if p1 >= 0 && p1 < 10000 {
+    if (0..10000).contains(&p1) {
         let _ = write!(text1, "Touch: {}", p1);
     } else {
         let _ = write!(text1, "Touch: ---");
@@ -170,7 +170,7 @@ fn display3(buffer: &mut OledBuffer) {
 
     text1.clear();
     let p2 = TOUCH2.load(core::sync::atomic::Ordering::Relaxed);
-    if p2 >= 0 && p2 < 10000 {
+    if (0..10000).contains(&p2) {
         let _ = write!(text1, "Touch: {}", p2);
     } else {
         let _ = write!(text1, "Touch: ---");
@@ -179,7 +179,7 @@ fn display3(buffer: &mut OledBuffer) {
 
     text1.clear();
     let p3 = TOUCH3.load(core::sync::atomic::Ordering::Relaxed);
-    if p3 >= 0 && p3 < 10000 {
+    if (0..10000).contains(&p3) {
         let _ = write!(text1, "Touch: {}", p3);
     } else {
         let _ = write!(text1, "Touch: ---");
