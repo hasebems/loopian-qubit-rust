@@ -11,6 +11,11 @@ mod devices;
 mod touch;
 mod ui;
 
+use core::sync::atomic::AtomicI32;
+use cortex_m::asm;
+use portable_atomic::{AtomicU8, Ordering};
+use static_cell::StaticCell;
+
 use embassy_executor::Executor;
 use embassy_rp::Peri;
 use embassy_rp::multicore::{Stack, spawn_core1};
@@ -23,7 +28,7 @@ use rp235x_hal::{self as hal};
 
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
-use embassy_rp::gpio::{Level, Output};
+use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::i2c::{self, Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};
 use embassy_rp::peripherals::{DMA_CH0, I2C1, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
@@ -49,19 +54,23 @@ macro_rules! make_static {
     }};
 }
 
-use cortex_m::asm;
-use portable_atomic::{AtomicU8, Ordering};
-use static_cell::StaticCell;
-
 // パニックハンドラ: エラーカウントを最大値にして永久ループ
+pub static ERROR_CODE: AtomicU8 = AtomicU8::new(0);
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    ERROR_COUNT.store(255, Ordering::Relaxed);
+    ERROR_CODE.store(255, Ordering::Relaxed);
     loop {
         asm::nop();
     }
 }
 
+// タッチイベントのデータ構造
+#[derive(Copy, Clone, Default)]
+struct TouchEvent(u8, u8, u8, f32); // (status, note, velocity, location)
+
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      Global static variables
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 /// Tell the Boot ROM about our application
 #[unsafe(link_section = ".start_block")]
 #[used]
@@ -86,10 +95,15 @@ static BUFFER_FROM_DISPLAY: Channel<
     2,
 > = Channel::new();
 
-// デバッグ用状態フラグ（LED点滅パターンで表示）
-// 0: 正常動作, 1-9: 各種状態, 10以上: エラー
-pub static DEBUG_STATE: AtomicU8 = AtomicU8::new(0);
-static ERROR_COUNT: AtomicU8 = AtomicU8::new(0);
+// 表示用変数
+pub static POINT0: AtomicU8 = AtomicU8::new(0);
+pub static POINT1: AtomicU8 = AtomicU8::new(0);
+pub static POINT2: AtomicU8 = AtomicU8::new(0);
+pub static POINT3: AtomicU8 = AtomicU8::new(0);
+pub static TOUCH0: AtomicI32 = AtomicI32::new(10000);
+pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
+pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
+pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
 
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
@@ -111,16 +125,19 @@ static RINGLED_MESSAGE: Channel<
     { constants::RINGLED_MESSAGE_SIZE },
 > = Channel::new();
 
-// タッチイベントのデータ構造
-#[derive(Copy, Clone, Default)]
-struct TouchEvent(u8, u8, u8, f32); // (status, note, velocity, location)
-
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      Main entry point
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[cortex_m_rt::entry]
 fn main() -> ! {
     let p = embassy_rp::init(Default::default());
 
     // LEDピン
     let led = Output::new(p.PIN_25, Level::Low);
+
+    // Switchピン
+    let switch1 = Input::new(p.PIN_2, Pull::Up);
+    let switch2 = Input::new(p.PIN_4, Pull::Up);
 
     // USB Driver
     let driver = Driver::new(p.USB, Irqs);
@@ -165,10 +182,10 @@ fn main() -> ! {
     // 初期バッファを準備してチャンネルに投入（Core1起動前に実行）
     // 2つのバッファを確実に投入
     if BUFFER_FROM_DISPLAY.try_send(OledBuffer::new()).is_err() {
-        ERROR_COUNT.store(1, Ordering::Relaxed);
+        ERROR_CODE.store(1, Ordering::Relaxed);
     }
     if BUFFER_FROM_DISPLAY.try_send(OledBuffer::new()).is_err() {
-        ERROR_COUNT.store(2, Ordering::Relaxed);
+        ERROR_CODE.store(2, Ordering::Relaxed);
     }
 
     // Core1起動
@@ -180,15 +197,15 @@ fn main() -> ! {
             executor1.run(|spawner| {
                 match core1_led_task(led) {
                     Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_COUNT.store(10, Ordering::Relaxed),
+                    Err(_) => ERROR_CODE.store(10, Ordering::Relaxed),
                 }
                 match core1_i2c_task(i2c) {
                     Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_COUNT.store(11, Ordering::Relaxed),
+                    Err(_) => ERROR_CODE.store(11, Ordering::Relaxed),
                 }
-                match core1_oled_ui_task() {
+                match core1_oled_ui_task(switch1, switch2) {
                     Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_COUNT.store(12, Ordering::Relaxed),
+                    Err(_) => ERROR_CODE.store(12, Ordering::Relaxed),
                 }
             });
         },
@@ -202,23 +219,26 @@ fn main() -> ! {
     executor0.run(|spawner| {
         match qubit_touch_task(sender) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_COUNT.store(20, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(20, Ordering::Relaxed),
         }
         match usb_task(usb) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_COUNT.store(21, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(21, Ordering::Relaxed),
         }
         match midi_rx_task(receiver) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_COUNT.store(22, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(22, Ordering::Relaxed),
         }
         match ringled_task(common, sm0, p.DMA_CH0, p.PIN_26, ws2812_program) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_COUNT.store(23, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(23, Ordering::Relaxed),
         }
     });
 }
 
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      RingLED Task: MIDIイベントに応じてNeopixelを制御
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn ringled_task(
     mut common: embassy_rp::pio::Common<'static, PIO0>,
@@ -282,6 +302,9 @@ async fn ringled_task(
     }
 }
 
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      QubitTouch Task: タッチセンサのスキャンとMIDIイベントの送信
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
     use core::cell::RefCell;
@@ -298,7 +321,7 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             *idx += 1;
         } else {
             // バッファオーバーフローの場合はエラーカウントをインクリメント
-            ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+            ERROR_CODE.store(30, Ordering::Relaxed);
         }
     });
     loop {
@@ -336,14 +359,14 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
                     .is_err()
                 {
                     // エラーハンドリング
-                    ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                    ERROR_CODE.store(31, Ordering::Relaxed);
                 }
                 RINGLED_MESSAGE.send((packet.0, packet.3)).await;
             }
             *send_index.borrow_mut() = 0;
         } else {
             // バッファオーバーフロー
-            ERROR_COUNT.store(15, Ordering::Relaxed);
+            ERROR_CODE.store(32, Ordering::Relaxed);
         }
         qt.lighten_leds(|_location, _intensity| {
             // LEDの明るさをタッチの強さに応じて変化させる
@@ -352,11 +375,17 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
     }
 }
 
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      USB Task: USBデバイスの処理
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn usb_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB>>) {
     usb.run().await;
 }
 
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      MIDI RX Task: USB経由で受信したMIDIイベントの処理
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
     let mut buf = [0; 64];
@@ -393,22 +422,38 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
             }
             Err(_e) => {
                 // エラーカウント
-                ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                ERROR_CODE.store(40, Ordering::Relaxed);
             }
         }
     }
 }
 
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      Core1 LED Task: Heartbeat LEDの点滅
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn core1_led_task(mut led: Output<'static>) {
     loop {
-        led.set_high();
-        Timer::after_millis(100).await;
-        led.set_low();
-        Timer::after_millis(900).await;
+        let code = ERROR_CODE.load(Ordering::Relaxed); // エラーコードを読み取るだけで、実際の値は使用しない
+        if code != 0 {
+            // エラーコードが0でない場合は、点滅パターンを変える（例: 点灯時間を長くする）
+            led.set_high();
+            Timer::after_millis(100).await;
+            led.set_low();
+            Timer::after_millis(200).await;
+        } else {
+            // 正常時の点滅パターン
+            led.set_high();
+            Timer::after_millis(100).await;
+            led.set_low();
+            Timer::after_millis(900).await;
+        }
     }
 }
 
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      Core1 I2C Task: タッチセンサとOLEDの処理
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     // AT42QT1070 と PCA9544 の生成
@@ -427,7 +472,7 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
     // OLED初期化
     if oled.init(&mut i2c).is_err() {
-        ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+        ERROR_CODE.store(50, Ordering::Relaxed);
     }
 
     // Task Loop
@@ -435,12 +480,12 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         // OLED更新:UIタスクから描画済みバッファを受信（非ブロッキング）
         if let Ok(buffer) = BUFFER_TO_DISPLAY.try_receive() {
             if oled.flush_buffer(&buffer, &mut i2c).is_err() {
-                ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                ERROR_CODE.store(51, Ordering::Relaxed);
             }
 
             // バッファを返却
             if BUFFER_FROM_DISPLAY.try_send(buffer).is_err() {
-                ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                ERROR_CODE.store(52, Ordering::Relaxed);
             }
         }
 
@@ -454,28 +499,57 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     }
 }
 
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      Core1 OLED UI Task: OLEDディスプレイの更新
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
-async fn core1_oled_ui_task() {
-    use ui::oled_display::OledDemo;
+async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
+    use ui::oled_display::GraphicsDisplay;
 
-    let mut demo = OledDemo::new();
-    let mut counter = 0u8;
+    let mut gui = GraphicsDisplay::new();
+    let mut counter = 0u32;
+    let mut ui_page = 0u8;
+
+    let mut switch1_prev = false;
+    let mut switch2_prev = false;
+
+    // 初期画面表示
+    let mut buffer = BUFFER_FROM_DISPLAY.receive().await;
+    gui.draw_bringup_screen(&mut buffer);
+    BUFFER_TO_DISPLAY.send(buffer).await;
+    Timer::after_millis(10000).await;
 
     loop {
         // 空バッファを受信
-        let mut buffer = BUFFER_FROM_DISPLAY.receive().await;
+        buffer = BUFFER_FROM_DISPLAY.receive().await;
+
+        // スイッチの状態を取得
+        let switch1_state = switch1.is_low();
+        let switch2_state = switch2.is_low();
+        if switch1_state != switch1_prev {
+            if switch1_state {
+                ui_page = ui_page.wrapping_add(1) % 3; // スイッチ1でページ切替
+                gui.change_page(ui_page); // ページ切替をGUIに通知
+            }
+        }
+        if switch2_state != switch2_prev {
+            if switch2_state {
+                ui_page = ui_page.wrapping_sub(1) % 3; // スイッチ2でページ切替
+                gui.change_page(ui_page); // ページ切替をGUIに通知
+            }
+        }
+        switch1_prev = switch1_state;
+        switch2_prev = switch2_state;
 
         // 描画
-        let state = DEBUG_STATE.load(Ordering::Relaxed);
-        let errors = ERROR_COUNT.load(Ordering::Relaxed);
-        let delay = demo.tick(&mut buffer, state, errors, counter);
+        gui.tick(&mut buffer, counter);
         counter = counter.wrapping_add(1);
 
         // 描画済みバッファを送信
         BUFFER_TO_DISPLAY.send(buffer).await;
 
-        // 次のステップまで待機
-        Timer::after_millis(delay).await;
+        // 次のステップまで待機(10fps想定)
+        Timer::after_millis(100).await;
     }
 }
 

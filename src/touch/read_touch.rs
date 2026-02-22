@@ -2,9 +2,10 @@ use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::I2C1;
 use portable_atomic::Ordering;
 
+use crate::TOUCH_RAW_DATA;
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
-use crate::{DEBUG_STATE, TOUCH_RAW_DATA};
+use crate::{POINT0, POINT1, POINT2, POINT3};
 
 pub struct ReadTouch {
     refference: [u16; constants::TOTAL_QT_KEYS],
@@ -68,6 +69,9 @@ impl ReadTouch {
                 pca.disconnect(i2c, dev).await.ok();
             }
         }
-        DEBUG_STATE.store(data[0] as u8, Ordering::Relaxed);
+        POINT0.store(data[0] as u8, Ordering::Relaxed);
+        POINT1.store(data[1] as u8, Ordering::Relaxed);
+        POINT2.store(data[2] as u8, Ordering::Relaxed);
+        POINT3.store(data[3] as u8, Ordering::Relaxed);
     }
 }

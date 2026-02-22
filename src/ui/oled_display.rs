@@ -11,125 +11,88 @@ use embedded_graphics::text::Text;
 use heapless::String;
 
 use crate::devices::ssd1306::OledBuffer;
+use crate::{POINT0, POINT1, POINT2, POINT3, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 
-pub struct OledDemo {
+pub struct GraphicsDisplay {
+    page: u8,
     step: u8,
     anim_x: u8,
 }
 
-#[allow(dead_code)]
-pub fn draw_bringup_screen(buffer: &mut OledBuffer) {
-    buffer.clear();
-    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
-        .into_styled(outline)
-        .draw(buffer);
-
-    let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
-    let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let _ = Text::new("OLED OK", Point::new(10, 22), style_big).draw(buffer);
-    let _ = Text::new("I2C1 GPIO6/7", Point::new(10, 44), style_small).draw(buffer);
-    let _ = Text::new("addr 0x3C/0x3D", Point::new(10, 56), style_small).draw(buffer);
-}
-
-impl OledDemo {
+impl GraphicsDisplay {
     pub fn new() -> Self {
-        Self { step: 0, anim_x: 0 }
+        Self {
+            page: 0,
+            step: 0,
+            anim_x: 0,
+        }
+    }
+
+    pub fn change_page(&mut self, page: u8) {
+        self.page = page; // 14 demo pages
+    }
+
+    pub fn draw_bringup_screen(&self, buffer: &mut OledBuffer) {
+        buffer.clear();
+        let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+            .into_styled(outline)
+            .draw(buffer);
+
+        let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+        let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+        let _ = Text::new("Loopian::QUBIT", Point::new(2, 20), style_big).draw(buffer);
+        let _ = Text::new(
+            concat!("build:", env!("BUILD_DATE")),
+            Point::new(10, 44),
+            style_small,
+        )
+        .draw(buffer);
+        let _ = Text::new(
+            concat!("      ", env!("BUILD_TIME")),
+            Point::new(10, 56),
+            style_small,
+        )
+        .draw(buffer);
     }
 
     /// Executes a single demo step and returns the suggested delay (ms) before the next step.
-    pub fn tick(&mut self, buffer: &mut OledBuffer, a: u8, b: u8, c: u8) -> u64 {
-        match self.step {
-            0 => {
-                // loop1(): drawPixel + display + delay(2000)
-                buffer.clear();
-                //let _ = Pixel(Point::new(10, 10), BinaryColor::On).draw(buffer);
-                //self.step += 1;
-                //2000
-                display_info(buffer, a, b, c);
-                100
-            }
-            1 => {
-                demo_lines(buffer);
-                self.step += 1;
-                800
-            }
-            2 => {
-                demo_rects(buffer);
-                self.step += 1;
-                800
-            }
-            3 => {
-                demo_filled_rects(buffer);
-                self.step += 1;
-                800
-            }
-            4 => {
-                demo_circles(buffer);
-                self.step += 1;
-                800
-            }
-            5 => {
-                demo_filled_circles(buffer);
-                self.step += 1;
-                800
-            }
-            6 => {
-                demo_round_rects(buffer);
-                self.step += 1;
-                800
-            }
-            7 => {
-                demo_filled_round_rects(buffer);
-                self.step += 1;
-                800
-            }
-            8 => {
-                demo_triangles(buffer);
-                self.step += 1;
-                800
-            }
-            9 => {
-                demo_filled_triangles(buffer);
-                self.step += 1;
-                800
-            }
-            10 => {
-                demo_text(buffer);
-                self.step += 1;
-                1200
-            }
-            11 => {
-                demo_styles(buffer);
-                self.step += 1;
-                900
-            }
-            12 => {
-                // scroll/invert are intentionally omitted.
-                demo_bitmap(buffer);
-                self.step += 1;
-                900
+    pub fn tick(&mut self, buffer: &mut OledBuffer, counter: u32) {
+        match self.page {
+            0 => display1(buffer, counter),
+            1 => display2(buffer),
+            2 => display3(buffer),
+            50 => demo_lines(buffer),
+            51 => demo_rects(buffer),
+            52 => demo_filled_rects(buffer),
+            4 => demo_circles(buffer),
+            5 => demo_filled_circles(buffer),
+            6 => demo_round_rects(buffer),
+            7 => demo_filled_round_rects(buffer),
+            8 => demo_triangles(buffer),
+            9 => demo_filled_triangles(buffer),
+            10 => demo_text(buffer),
+            11 => demo_styles(buffer),
+            12 =>
+            // scroll/invert are intentionally omitted.
+            {
+                demo_bitmap(buffer)
             }
             13 => {
                 let done = demo_animate_frame(buffer, self.anim_x);
                 if done {
                     self.anim_x = 0;
                     self.step = 0;
-                    1000
                 } else {
                     self.anim_x = self.anim_x.saturating_add(6);
-                    80
                 }
             }
-            _ => {
-                self.step = 0;
-                200
-            }
+            _ => (),
         }
     }
 }
 
-fn display_info(buffer: &mut OledBuffer, var1: u8, var2: u8, var3: u8) {
+fn display1(buffer: &mut OledBuffer, counter: u32) {
     buffer.clear();
 
     let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
@@ -140,16 +103,88 @@ fn display_info(buffer: &mut OledBuffer, var1: u8, var2: u8, var3: u8) {
     let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
 
     let mut text1: String<32> = String::new();
-    let _ = write!(text1, "var1: {}", var1);
+    let _ = write!(text1, "Cntr: {}", counter);
     let _ = Text::new(&text1, Point::new(6, 16), style_big).draw(buffer);
+}
 
-    let mut text2: String<32> = String::new();
-    let _ = write!(text2, "var2: {}", var2);
-    let _ = Text::new(&text2, Point::new(6, 36), style_big).draw(buffer);
+fn display2(buffer: &mut OledBuffer) {
+    buffer.clear();
 
-    let mut text3: String<32> = String::new();
-    let _ = write!(text3, "var3: {}", var3);
-    let _ = Text::new(&text3, Point::new(6, 56), style_big).draw(buffer);
+    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+        .into_styled(outline)
+        .draw(buffer);
+
+    //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+
+    let mut text1: String<32> = String::new();
+    let p0 = POINT0.load(core::sync::atomic::Ordering::Relaxed);
+    let _ = write!(text1, "Point: {}", p0);
+    let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
+
+    let p1 = POINT1.load(core::sync::atomic::Ordering::Relaxed);
+    text1.clear();
+    let _ = write!(text1, "Point: {}", p1);
+    let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
+
+    let p2 = POINT2.load(core::sync::atomic::Ordering::Relaxed);
+    text1.clear();
+    let _ = write!(text1, "Point: {}", p2);
+    let _ = Text::new(&text1, Point::new(6, 36), style_small).draw(buffer);
+
+    let p3 = POINT3.load(core::sync::atomic::Ordering::Relaxed);
+    text1.clear();
+    let _ = write!(text1, "Point: {}", p3);
+    let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
+}
+
+fn display3(buffer: &mut OledBuffer) {
+    buffer.clear();
+
+    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+        .into_styled(outline)
+        .draw(buffer);
+
+    //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+
+    let mut text1: String<32> = String::new();
+    let p0 = TOUCH0.load(core::sync::atomic::Ordering::Relaxed);
+    if p0 >= 0 && p0 < 10000 {
+        let _ = write!(text1, "Touch: {}", p0);
+    } else {
+        let _ = write!(text1, "Touch: ---");
+    }
+    let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
+
+    text1.clear();
+    let p1 = TOUCH1.load(core::sync::atomic::Ordering::Relaxed);
+    if p1 >= 0 && p1 < 10000 {
+        let _ = write!(text1, "Touch: {}", p1);
+    } else {
+        let _ = write!(text1, "Touch: ---");
+    }
+    let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
+
+    text1.clear();
+    let p2 = TOUCH2.load(core::sync::atomic::Ordering::Relaxed);
+    if p2 >= 0 && p2 < 10000 {
+        let _ = write!(text1, "Touch: {}", p2);
+    } else {
+        let _ = write!(text1, "Touch: ---");
+    }
+    let _ = Text::new(&text1, Point::new(6, 36), style_small).draw(buffer);
+
+    text1.clear();
+    let p3 = TOUCH3.load(core::sync::atomic::Ordering::Relaxed);
+    if p3 >= 0 && p3 < 10000 {
+        let _ = write!(text1, "Touch: {}", p3);
+    } else {
+        let _ = write!(text1, "Touch: ---");
+    }
+    let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
 }
 
 fn demo_lines(buffer: &mut OledBuffer) {

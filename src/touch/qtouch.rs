@@ -4,6 +4,7 @@
 //  https://opensource.org/licenses/mit-license.php
 //
 use crate::constants;
+use crate::{TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 
 // =========================================================
 //      Touch Constants
@@ -108,6 +109,7 @@ where
             midi_callback: None,
         }
     }
+
     /// 新しいタッチポイントを作成する
     fn new_touch(&mut self, location: f32, intensity: i16, callback: F) {
         if let Ok(crnt_note) = self.new_location(Self::NEW_NOTE, location) {
@@ -294,7 +296,7 @@ where
         self.touch_count
     }
     /// タッチポイントの参照を取得する（非const版）
-    pub fn _get_touch_point(&mut self, index: usize) -> Option<&mut TouchPoint<F>> {
+    pub fn get_touch_point(&mut self, index: usize) -> Option<&mut TouchPoint<F>> {
         self.touch_points.get_mut(index)
     }
     /// タッチポイントのconst参照を取得する（const版）
@@ -305,6 +307,20 @@ where
     pub fn proper_pad(&mut self, pad_num: i32) -> &mut Pad {
         let index = pad_num.rem_euclid(MAX_PADS as i32) as usize;
         &mut self.pads[index]
+    }
+    fn display_location(&mut self, id: usize) {
+        let loc = if let Some(tp) = self.get_touch_point(id) {
+            (tp.get_location() * 100.0) as i32
+        } else {
+            10000
+        };
+        match id {
+            0 => TOUCH0.store(loc, core::sync::atomic::Ordering::Relaxed),
+            1 => TOUCH1.store(loc, core::sync::atomic::Ordering::Relaxed),
+            2 => TOUCH2.store(loc, core::sync::atomic::Ordering::Relaxed),
+            3 => TOUCH3.store(loc, core::sync::atomic::Ordering::Relaxed),
+            _ => {}
+        }
     }
     /// 差分の符号が変化した時、その位置の値がある一定の値以上なら、そこをタッチポイントとする
     /*void seek_and_update_touch_point() {
@@ -467,6 +483,7 @@ where
                 if should_update {
                     // 一番近いタッチポイントが、現在のタッチポイントに近い場合
                     self.touch_points[idx].update_touch(location, intensity as u16);
+                    self.display_location(idx);
                 } else {
                     self.new_touch_point(location, intensity as u16);
                 }
@@ -513,22 +530,40 @@ where
         }
     }
     fn new_touch_point(&mut self, location: f32, intensity: u16) {
-        for tp in self.touch_points.iter_mut() {
-            if !tp.is_touched() {
-                tp.new_touch(location, intensity as i16, self.midi_callback.clone());
-                return;
-            }
+        let cb = self.midi_callback.clone();
+        let id = self
+            .touch_points
+            .iter_mut()
+            .find(|tp| !tp.is_touched())
+            .map(|tp| {
+                tp.new_touch(location, intensity as i16, cb);
+                tp.id
+            });
+        if let Some(id) = id {
+            self.display_location(id); // Update the display for this touch point
         }
     }
     fn erase_touch_point(&mut self) {
+        let mut display_ids: [Option<usize>; constants::MAX_TOUCH_POINTS] =
+            [None; constants::MAX_TOUCH_POINTS];
+        let mut display_count = 0;
+
         for tp in self.touch_points.iter_mut() {
             // タッチされていないポイントは処理不要
             if tp.is_touched() {
-                if !tp.is_updated() && tp.is_touched() {
+                if !tp.is_updated() {
                     tp.maybe_released();
+                    display_ids[display_count] = Some(tp.id);
+                    display_count += 1;
                 } else {
                     tp.clear_updated_flag(); // Clear the updated flag for the next cycle
                 }
+            }
+        }
+
+        for i in 0..display_count {
+            if let Some(id) = display_ids[i] {
+                self.display_location(id); // Update the display for this touch point
             }
         }
     }
