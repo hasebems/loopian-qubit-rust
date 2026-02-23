@@ -27,7 +27,4 @@ fn main() {
     let memory_x = include_bytes!("memory.x");
     let mut f = File::create(out.join("memory.x")).unwrap();
     f.write_all(memory_x).unwrap();
-    println!("cargo:rerun-if-changed=memory.x");
-
-    println!("cargo:rerun-if-changed=build.rs");
 }
