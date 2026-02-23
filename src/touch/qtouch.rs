@@ -15,6 +15,8 @@ pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec �
 pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
 pub const HISTERESIS: f32 = 0.7; // Hysteresis value for touch point detection
 
+const INIT_VAL: f32 = 100.0; // Invalid location initially
+
 // =========================================================
 //      Pad Class
 // =========================================================
@@ -92,14 +94,13 @@ where
 {
     const NEW_NOTE: u8 = 0xff;
     const TOUCH_POINT_ERROR: u8 = 0xfe;
-    const INIT_VAL: f32 = 100.0;
     const OFFSET_NOTE: u8 = constants::KEYBD_LO - 4;
 
     /// Constructor は起動時に最大数分呼ばれる
     fn new(id: usize) -> Self {
         TouchPoint {
             id,
-            center_location: Self::INIT_VAL, // Invalid location initially
+            center_location: INIT_VAL, // Invalid location initially
             intensity: 0,
             real_crnt_note: 0, // Initialize to 0, will be set when a touch is detected
             is_updated: false,
@@ -183,7 +184,7 @@ where
             );
         }
         self.is_touched = false;
-        self.center_location = Self::INIT_VAL;
+        self.center_location = INIT_VAL;
         self.intensity = 0;
     }
     fn is_touched(&self) -> bool {
@@ -397,12 +398,27 @@ where
         erase_touch_point();
     }*/
     pub fn seek_and_update_touch_point(&mut self) {
-        const INIT_VAL: f32 = 100.0; // Invalid location initially
         let mut temp_touch_point: [(f32, f32, i16); constants::MAX_TOUCH_POINTS] =
             [(INIT_VAL, INIT_VAL, 0); constants::MAX_TOUCH_POINTS];
         let mut temp_index = 0;
 
         // 1: 全パッドを走査し、差分の符号が変化した箇所をタッチポイントとみなし、temp_touch_point に保存
+        self.scan_pads(&mut temp_touch_point, &mut temp_index);
+
+        // 2: タッチポイントの前後のパッドの値を足し、平均をとってパッドの位置と強度を確定する
+        self.decide_touch_point(&mut temp_touch_point, &mut temp_index);
+
+        // 3: 前回値と比較し、近いものを紐付け、タッチポイントを更新または追加する
+        self.update_or_add_touch_point(&temp_touch_point, temp_index);
+
+        // 4: 更新のなかったタッチポイントを削除する
+        self.erase_touch_point();
+    }
+    fn scan_pads(
+        &mut self,
+        temp_touch_point: &mut [(f32, f32, i16); constants::MAX_TOUCH_POINTS],
+        temp_index: &mut usize,
+    ) {
         let mut diff_before: i16 = 0;
         for i in 0..=MAX_PADS {
             // Get previous pad value first
@@ -415,57 +431,68 @@ where
                 if value > TOUCH_THRESHOLD {
                     // Example threshold for touch point
                     self.proper_pad(i as i32 - 1).note_top_flag();
-                    temp_touch_point[temp_index] = (
+                    temp_touch_point[*temp_index] = (
                         (if i >= 1 { i - 1 } else { i - 1 + MAX_PADS }) as f32,
                         INIT_VAL,
                         0,
                     );
-                    temp_index += 1;
-                    if temp_index >= constants::MAX_TOUCH_POINTS {
+                    *temp_index += 1;
+                    if *temp_index >= constants::MAX_TOUCH_POINTS {
                         break; // Prevent overflow of touch points
                     }
                 }
             }
             diff_before = diff_after;
         }
-        self.touch_count = temp_index; // Update the touch count
-
-        // 2: タッチポイントの前後のパッドの値を足し、平均をとってパッドの位置と強度を確定する
-        for ttp in temp_touch_point.iter_mut().take(temp_index) {
-            let mut sum: i32 = 0;
+        self.touch_count = *temp_index; // Update the touch count
+    }
+    fn decide_touch_point(
+        &mut self,
+        temp_touch_point: &mut [(f32, f32, i16); constants::MAX_TOUCH_POINTS],
+        temp_index: &mut usize,
+    ) {
+        for tp in temp_touch_point.iter_mut().take(*temp_index) {
+            let tp_idx = tp.0 as i32;
+            let mut sum: i16 = 0;
             let mut locate: f32 = 0.0;
-            let tp = ttp.0 as usize;
+
             for j in 0..(FINGER_RANGE * 2 + 1) {
                 let window_idx = j as i32 - FINGER_RANGE as i32;
-                let neighbor_pad = self.proper_pad(tp as i32 + window_idx);
-                let tp_value = neighbor_pad.get_crnt();
-                sum += tp_value as i32;
-                locate += ((tp as i32 + window_idx) as f32) * tp_value as f32; // Wrap around to ensure valid index
+                let neighbor_pad = self.proper_pad(tp_idx + window_idx);
+                let tp_value = neighbor_pad.get_crnt() as i16;
+                sum += tp_value;
+                locate += (tp_idx + window_idx) as f32 * tp_value as f32; // Wrap around to ensure valid index
             }
-            // ゼロ除算を防ぐ
+
             if sum > 0 {
                 locate /= sum as f32; // Calculate the average location based on intensity
-                ttp.1 = locate;
-                ttp.2 = sum as i16;
+                *tp = (tp.0, locate, sum);
             } else {
-                // sumが0の場合はこのタッチポイントを無効化（INIT_VALのまま）
-                continue; // このイテレーションをスキップ
+                // 無効なタッチポイント（sum=0だった場合）は初期値のままにする
+                *tp = (tp.0, INIT_VAL, 0);
             }
         }
-        // 3: 各パッドの値を確認し、タッチポイントを更新または追加する
-        for ttp in temp_touch_point.iter().take(temp_index) {
-            let location = ttp.1;
-            let intensity = ttp.2;
-
+    }
+    fn update_or_add_touch_point(
+        &mut self,
+        temp_touch_point: &[(f32, f32, i16); constants::MAX_TOUCH_POINTS],
+        temp_index: usize,
+    ) {
+        let mut display_index: [bool; constants::MAX_TOUCH_POINTS] =
+            [false; constants::MAX_TOUCH_POINTS];
+        for tp in temp_touch_point.iter().take(temp_index) {
+            let location = tp.1;
+            let intensity = tp.2;
             // 無効なタッチポイント（sum=0だった場合）はスキップ
             if location == INIT_VAL {
                 continue;
             }
 
             // 現在のタッチポイントで近いものがあれば、タッチポイントがそこから移動したとみなす
-            let mut nearest: f32 = TouchPoint::<F>::INIT_VAL;
-            let mut nearest_idx: Option<usize> = None;
-            for (idx, tp) in self.touch_points.iter().enumerate() {
+            let mut nearest = INIT_VAL;
+            let mut nearest_tp: Option<&mut TouchPoint<F>> = None;
+
+            for tp in self.touch_points.iter_mut() {
                 if !tp.is_touched() || tp.is_updated() {
                     continue; // Skip if the touch point is not touched
                 }
@@ -473,27 +500,28 @@ where
                 if diff < nearest {
                     // 近いものがあれば、タッチポイントを更新する
                     nearest = diff;
-                    nearest_idx = Some(idx);
+                    nearest_tp = Some(tp);
                 }
             }
 
-            // 借用の問題を回避するため、インデックスを使って処理を分離
-            if let Some(idx) = nearest_idx {
-                let should_update = self.touch_points[idx].is_near_here(location);
-                if should_update {
-                    // 一番近いタッチポイントが、現在のタッチポイントに近い場合
-                    self.touch_points[idx].update_touch(location, intensity as u16);
-                    self.display_location(idx);
-                } else {
-                    self.new_touch_point(location, intensity as u16);
-                }
-            } else {
-                self.new_touch_point(location, intensity as u16);
+            if let Some(nearest_tp) = nearest_tp
+                && nearest_tp.is_near_here(location)
+            {
+                // 一番近いタッチポイントが、現在のタッチポイントに近い場合
+                nearest_tp.update_touch(location, intensity as u16);
+                display_index[nearest_tp.id] = true; // Mark this touch point for display update
+                continue; // Move to the next temp touch point
             }
+            // 近いタッチポイントがない場合は、新しいタッチポイントを作成する
+            self.new_touch_point(location, intensity as u16);
         }
 
-        // 更新のなかったタッチポイントを削除する
-        self.erase_touch_point();
+        // RingLEDの表示を更新する必要のあるタッチポイントのIDを収集し、まとめて表示を更新する
+        display_index.iter().enumerate().for_each(|(id, &update)| {
+            if update {
+                self.display_location(id);
+            }
+        });
     }
     /// LEDを点灯させるためのコールバック関数をコールする
     /*void lighten_leds(std::function<void(float, int16_t)> led_callback) {
