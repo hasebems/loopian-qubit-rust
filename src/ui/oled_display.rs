@@ -11,7 +11,7 @@ use embedded_graphics::text::Text;
 use heapless::String;
 
 use crate::devices::ssd1306::OledBuffer;
-use crate::{POINT0, POINT1, POINT2, POINT3, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
+use crate::{ERROR_CODE, POINT0, POINT1, POINT2, POINT3, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 
 pub struct GraphicsDisplay {
     page: u8,
@@ -41,16 +41,17 @@ impl GraphicsDisplay {
 
         let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
         let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-        let _ = Text::new("Loopian::QUBIT", Point::new(2, 20), style_big).draw(buffer);
+        let _ = Text::new("Loopian::", Point::new(5, 20), style_small).draw(buffer);
+        let _ = Text::new("QUBIT", Point::new(64, 20), style_big).draw(buffer);
         let _ = Text::new(
-            concat!("build:", env!("BUILD_DATE")),
-            Point::new(10, 44),
+            concat!("build: ", env!("BUILD_DATE")),
+            Point::new(30, 44),
             style_small,
         )
         .draw(buffer);
         let _ = Text::new(
-            concat!("      ", env!("BUILD_TIME")),
-            Point::new(10, 56),
+            concat!("       ", env!("BUILD_TIME")),
+            Point::new(30, 56),
             style_small,
         )
         .draw(buffer);
@@ -59,26 +60,27 @@ impl GraphicsDisplay {
     /// Executes a single demo step and returns the suggested delay (ms) before the next step.
     pub fn tick(&mut self, buffer: &mut OledBuffer, counter: u32) {
         match self.page {
-            0 => display1(buffer, counter),
-            1 => display2(buffer),
-            2 => display3(buffer),
-            50 => demo_lines(buffer),
-            51 => demo_rects(buffer),
-            52 => demo_filled_rects(buffer),
-            4 => demo_circles(buffer),
-            5 => demo_filled_circles(buffer),
-            6 => demo_round_rects(buffer),
-            7 => demo_filled_round_rects(buffer),
-            8 => demo_triangles(buffer),
-            9 => demo_filled_triangles(buffer),
-            10 => demo_text(buffer),
-            11 => demo_styles(buffer),
-            12 =>
+            0 => self.draw_bringup_screen(buffer),
+            1 => display1(buffer, counter),
+            2 => display2(buffer),
+            3 => display3(buffer),
+            10 => demo_lines(buffer),
+            11 => demo_rects(buffer),
+            12 => demo_filled_rects(buffer),
+            13 => demo_circles(buffer),
+            14 => demo_filled_circles(buffer),
+            15 => demo_round_rects(buffer),
+            16 => demo_filled_round_rects(buffer),
+            17 => demo_triangles(buffer),
+            18 => demo_filled_triangles(buffer),
+            19 => demo_text(buffer),
+            20 => demo_styles(buffer),
+            21 =>
             // scroll/invert are intentionally omitted.
             {
                 demo_bitmap(buffer)
             }
-            13 => {
+            22 => {
                 let done = demo_animate_frame(buffer, self.anim_x);
                 if done {
                     self.anim_x = 0;
@@ -105,6 +107,11 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
     let mut text1: String<32> = String::new();
     let _ = write!(text1, "Cntr: {}", counter);
     let _ = Text::new(&text1, Point::new(6, 16), style_big).draw(buffer);
+
+    let er = ERROR_CODE.load(core::sync::atomic::Ordering::Relaxed);
+    text1.clear();
+    let _ = write!(text1, "ErCd: {}", er);
+    let _ = Text::new(&text1, Point::new(6, 32), style_big).draw(buffer);
 }
 
 fn display2(buffer: &mut OledBuffer) {
@@ -120,22 +127,22 @@ fn display2(buffer: &mut OledBuffer) {
 
     let mut text1: String<32> = String::new();
     let p0 = POINT0.load(core::sync::atomic::Ordering::Relaxed);
-    let _ = write!(text1, "Point: {}", p0);
+    let _ = write!(text1, "Point0: {}", p0);
     let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
 
     let p1 = POINT1.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point: {}", p1);
+    let _ = write!(text1, "Point1: {}", p1);
     let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
 
     let p2 = POINT2.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point: {}", p2);
+    let _ = write!(text1, "Point2: {}", p2);
     let _ = Text::new(&text1, Point::new(6, 36), style_small).draw(buffer);
 
     let p3 = POINT3.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point: {}", p3);
+    let _ = write!(text1, "Point3: {}", p3);
     let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
 }
 
@@ -153,36 +160,36 @@ fn display3(buffer: &mut OledBuffer) {
     let mut text1: String<32> = String::new();
     let p0 = TOUCH0.load(core::sync::atomic::Ordering::Relaxed);
     if (0..10000).contains(&p0) {
-        let _ = write!(text1, "Touch: {}", p0);
+        let _ = write!(text1, "Touch1: {}", p0);
     } else {
-        let _ = write!(text1, "Touch: ---");
+        let _ = write!(text1, "Touch1: ---");
     }
     let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
 
     text1.clear();
     let p1 = TOUCH1.load(core::sync::atomic::Ordering::Relaxed);
     if (0..10000).contains(&p1) {
-        let _ = write!(text1, "Touch: {}", p1);
+        let _ = write!(text1, "Touch2: {}", p1);
     } else {
-        let _ = write!(text1, "Touch: ---");
+        let _ = write!(text1, "Touch2: ---");
     }
     let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
 
     text1.clear();
     let p2 = TOUCH2.load(core::sync::atomic::Ordering::Relaxed);
     if (0..10000).contains(&p2) {
-        let _ = write!(text1, "Touch: {}", p2);
+        let _ = write!(text1, "Touch3: {}", p2);
     } else {
-        let _ = write!(text1, "Touch: ---");
+        let _ = write!(text1, "Touch3: ---");
     }
     let _ = Text::new(&text1, Point::new(6, 36), style_small).draw(buffer);
 
     text1.clear();
     let p3 = TOUCH3.load(core::sync::atomic::Ordering::Relaxed);
     if (0..10000).contains(&p3) {
-        let _ = write!(text1, "Touch: {}", p3);
+        let _ = write!(text1, "Touch4: {}", p3);
     } else {
-        let _ = write!(text1, "Touch: ---");
+        let _ = write!(text1, "Touch4: ---");
     }
     let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
 }
