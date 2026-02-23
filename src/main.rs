@@ -527,11 +527,19 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
         let switch1_state = switch1.is_low();
         let switch2_state = switch2.is_low();
         if switch1_state != switch1_prev && switch1_state {
-            ui_page = ui_page.wrapping_add(1) % 3; // スイッチ1でページ切替
+            if ui_page == 3 {
+                ui_page = 0;
+            } else {
+                ui_page += 1;
+            }
             gui.change_page(ui_page); // ページ切替をGUIに通知
         }
         if switch2_state != switch2_prev && switch2_state {
-            ui_page = ui_page.wrapping_sub(1) % 3; // スイッチ2でページ切替
+            if ui_page == 0 {
+                ui_page = 3;
+            } else {
+                ui_page -= 1;
+            }
             gui.change_page(ui_page); // ページ切替をGUIに通知
         }
         switch1_prev = switch1_state;
