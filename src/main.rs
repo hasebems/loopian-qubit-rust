@@ -22,7 +22,7 @@ use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer, with_timeout};
 
 use rp235x_hal::{self as hal};
 
@@ -353,12 +353,13 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
                 } else {
                     status | 0x0c
                 };
-                if sender
-                    .write_packet(&[status >> 4, status, packet.1, packet.2])
-                    .await
-                    .is_err()
-                {
-                    // エラーハンドリング
+                let result = with_timeout(
+                    Duration::from_millis(5),
+                    sender.write_packet(&[status >> 4, status, packet.1, packet.2]),
+                )
+                .await;
+                if result.is_err() {
+                    // タイムアウトまたは送信エラー（USB未接続時など）
                     ERROR_CODE.store(31, Ordering::Relaxed);
                 }
                 RINGLED_MESSAGE.send((packet.0, packet.3)).await;
