@@ -11,7 +11,9 @@ use embedded_graphics::text::Text;
 use heapless::String;
 
 use crate::devices::ssd1306::OledBuffer;
-use crate::{ERROR_CODE, POINT0, POINT1, POINT2, POINT3, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
+use crate::{
+    ELAPSED_TIME, ERROR_CODE, POINT0, POINT1, POINT2, POINT3, TOUCH0, TOUCH1, TOUCH2, TOUCH3,
+};
 
 pub struct GraphicsDisplay {
     page: u8,
@@ -112,6 +114,11 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
     text1.clear();
     let _ = write!(text1, "ErCd: {}", er);
     let _ = Text::new(&text1, Point::new(6, 32), style_big).draw(buffer);
+
+    let elapsed_time = ELAPSED_TIME.load(core::sync::atomic::Ordering::Relaxed);
+    text1.clear();
+    let _ = write!(text1, "Time: {}", elapsed_time);
+    let _ = Text::new(&text1, Point::new(6, 48), style_big).draw(buffer);
 }
 
 fn display2(buffer: &mut OledBuffer) {

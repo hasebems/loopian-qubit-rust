@@ -11,9 +11,8 @@ mod devices;
 mod touch;
 mod ui;
 
-use core::sync::atomic::AtomicI32;
 use cortex_m::asm;
-use portable_atomic::{AtomicU8, Ordering};
+use portable_atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering};
 use static_cell::StaticCell;
 
 use embassy_executor::Executor;
@@ -22,7 +21,7 @@ use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 
 use rp235x_hal::{self as hal};
 
@@ -104,6 +103,7 @@ pub static TOUCH0: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
+pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）
 
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
@@ -324,16 +324,23 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             ERROR_CODE.store(30, Ordering::Relaxed);
         }
     });
+
+    let mut loop_times = 0u64;
+    let mut total_time = 0u64;
+    let mut _ticker = Ticker::every(embassy_time::Duration::from_millis(10));
+
     loop {
         // タッチスキャンは10msごとに実行
         Timer::after(embassy_time::Duration::from_millis(10)).await;
-        {
-            // タッチセンサの生データを取得してQubitTouchにセット
-            let data = TOUCH_RAW_DATA.lock().await;
-            for ch in 0..constants::TOTAL_QT_KEYS {
-                qt.set_value(ch, data[ch]);
-            }
+        // ticker.next().await; // タッチスキャンはtickerに合わせて実行
+        let start = Instant::now();
+
+        // タッチセンサの生データを取得してQubitTouchにセット
+        let data = TOUCH_RAW_DATA.lock().await;
+        for ch in 0..constants::TOTAL_QT_KEYS {
+            qt.set_value(ch, data[ch]);
         }
+
         qt.seek_and_update_touch_point();
         let idx = *send_index.borrow();
         const MAX_EVENT: usize = 8;
@@ -373,6 +380,11 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             // LEDの明るさをタッチの強さに応じて変化させる
             //WHITE_LEVEL.store(intensity as u8, Ordering::Relaxed);
         });
+
+        // 時間計測
+        loop_times = loop_times.wrapping_add(1);
+        total_time = total_time.wrapping_add(start.elapsed().as_micros() as u64);
+        //ELAPSED_TIME.store(total_time / loop_times, Ordering::Relaxed);
     }
 }
 
@@ -453,7 +465,7 @@ async fn core1_led_task(mut led: Output<'static>) {
 }
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//      Core1 I2C Task: タッチセンサとOLEDの処理
+//      Core1 I2C Task: タッチセンサとOLED Device の処理
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
@@ -476,6 +488,9 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         ERROR_CODE.store(50, Ordering::Relaxed);
     }
 
+    let start = Instant::now();
+    let mut loop_times = 0u64;
+
     // Task Loop
     loop {
         // OLED更新:UIタスクから描画済みバッファを受信（非ブロッキング）
@@ -497,6 +512,11 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
         // 他のタスクに処理を譲る
         embassy_futures::yield_now().await;
+
+        // 時間計測
+        loop_times = loop_times.wrapping_add(1);
+        let elapsed_time = start.elapsed().as_micros() as u64;
+        ELAPSED_TIME.store(elapsed_time / loop_times, Ordering::Relaxed);
     }
 }
 
@@ -518,9 +538,11 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
     let mut buffer = BUFFER_FROM_DISPLAY.receive().await;
     gui.draw_bringup_screen(&mut buffer);
     BUFFER_TO_DISPLAY.send(buffer).await;
-    Timer::after_millis(10000).await;
 
     loop {
+        // 次のステップまで待機(5fps想定)
+        Timer::after_millis(200).await;
+
         // 空バッファを受信
         buffer = BUFFER_FROM_DISPLAY.receive().await;
 
@@ -552,9 +574,6 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
 
         // 描画済みバッファを送信
         BUFFER_TO_DISPLAY.send(buffer).await;
-
-        // 次のステップまで待機(10fps想定)
-        Timer::after_millis(100).await;
     }
 }
 
