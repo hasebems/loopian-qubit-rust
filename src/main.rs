@@ -383,7 +383,7 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
 
         // 時間計測
         loop_times = loop_times.wrapping_add(1);
-        total_time = total_time.wrapping_add(start.elapsed().as_micros() as u64);
+        total_time = total_time.wrapping_add(start.elapsed().as_micros());
         //ELAPSED_TIME.store(total_time / loop_times, Ordering::Relaxed);
     }
 }
@@ -515,7 +515,7 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
         // 時間計測
         loop_times = loop_times.wrapping_add(1);
-        let elapsed_time = start.elapsed().as_micros() as u64;
+        let elapsed_time = start.elapsed().as_micros();
         ELAPSED_TIME.store(elapsed_time / loop_times, Ordering::Relaxed);
     }
 }
