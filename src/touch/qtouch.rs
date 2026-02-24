@@ -11,11 +11,12 @@ use crate::{TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 // =========================================================
 pub const MAX_PADS: u16 = constants::TOTAL_QT_KEYS as u16; // MAX_SENS;
 pub const TOUCH_THRESHOLD: u16 = 40; // Threshold for touch point detection
-pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec あたりの動作範囲
+pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec あたりの片側変化量
 pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
 pub const HISTERESIS: f32 = 0.7; // Hysteresis value for touch point detection
 
 const INIT_VAL: f32 = 100.0; // Invalid location initially
+const RELEASE_WAITING_TIME: u32 = 5; // Number of cycles to wait before considering a touch point released
 
 // =========================================================
 //      Pad Class
@@ -169,8 +170,8 @@ where
     }
     /// タッチポイントが離れたときの処理
     fn maybe_released(&mut self) {
-        if self.no_update_time + 5 > self.touching_time {
-            // 5回以上更新がなかったら、タッチポイントを離れたとみなす
+        if self.no_update_time + RELEASE_WAITING_TIME > self.touching_time {
+            // RELEASE_WAITING_TIME 回まで、更新のないタッチポイントは、まだ離れたと見なさない
             self.touching_time = self.touching_time.wrapping_add(1);
             return;
         }
@@ -199,12 +200,12 @@ where
     fn get_intensity(&self) -> i16 {
         self.intensity
     }
+    /// タッチされたタッチポイントの処理が終了したので、時間更新して更新フラグを下ろす
     fn clear_updated_flag(&mut self) {
         self.touching_time = self.touching_time.wrapping_add(1);
         self.no_update_time = self.touching_time;
         self.is_updated = false;
     }
-
     //private:
     /// crnt_note : 0-(MAX_SENS-1) 現在の位置、NEW_NOTE は新規ノート
     fn new_location(&self, crnt_note: u8, location: f32) -> Result<u8, u8> {
@@ -324,79 +325,6 @@ where
         }
     }
     /// 差分の符号が変化した時、その位置の値がある一定の値以上なら、そこをタッチポイントとする
-    /*void seek_and_update_touch_point() {
-        std::array<std::tuple<size_t, float, int16_t>, MAX_TOUCH_POINTS> temp_touch_point;
-        temp_touch_point.fill(std::make_tuple(TouchPoint::INIT_VAL, TouchPoint::INIT_VAL, 0));
-        size_t temp_index = 0;
-
-        // 1: 全パッドを走査し、差分の符号が変化した箇所をタッチポイントとみなし、temp_touch_point に保存
-        int16_t diff_before = 0;
-        for (size_t i = 0; i <= MAX_PADS; ++i) {
-            Pad& prev_pad = proper_pad(i-1);
-            int16_t diff_after = proper_pad(i).set_diff_from_before(prev_pad.get_crnt());
-            if ((diff_after > 0 ) && (diff_before < 0)) { // - -> + 変化時
-                int16_t value = prev_pad.get_crnt(); // Note the top flag
-                if (value > TOUCH_THRESHOLD) { // Example threshold for touch point
-                    prev_pad.note_top_flag();
-                    std::get<0>(temp_touch_point[temp_index++]) = (i >= 1) ? i - 1 : i - 1 + MAX_PADS;
-                    if (temp_index >= MAX_TOUCH_POINTS) {
-                        break; // Prevent overflow of touch points
-                    }
-                }
-            }
-            diff_before = diff_after;
-        }
-        touch_count_ = temp_index; // Update the touch count
-
-        // 2: タッチポイントの前後のパッドの値を足し、平均をとってパッドの位置と強度を確定する
-        for (int i = 0; i < temp_index; ++i) {
-            int16_t sum = 0;
-            float locate = 0.0f;
-            auto &tpi = temp_touch_point[i];
-            int tp = static_cast<int>(std::get<0>(tpi));
-            int window_idx = 0; // Initialize window index for averaging
-            for (int j = 0; j < FINGER_RANGE*2 + 1; ++j) {
-                window_idx = static_cast<int>(j - FINGER_RANGE);
-                Pad& neighbor_pad = proper_pad(tp + window_idx);
-                int16_t tp_value = neighbor_pad.get_crnt();
-                sum += tp_value;
-                locate += (tp + window_idx) * tp_value; // Wrap around to ensure valid index
-            }
-            locate /= sum; // Calculate the average location based on intensity
-            std::get<1>(tpi) = locate;
-            std::get<2>(tpi) = sum;
-        }
-
-        // 3: 各パッドの値を確認し、タッチポイントを更新または追加する
-        for (int k = 0; k < temp_index; ++k) {
-            auto &tpi = temp_touch_point[k];
-            float location = std::get<1>(tpi);
-            int16_t intensity = std::get<2>(tpi);
-            // 現在のタッチポイントで近いものがあれば、タッチポイントがそこから移動したとみなす
-            float nearest = TouchPoint::INIT_VAL;
-            TouchPoint* nearest_tp = nullptr;
-            for (auto& tp: touch_points_) {
-                if (!tp.is_touched() || tp.is_updated()) {
-                    continue; // Skip if the touch point is not touched
-                }
-                float diff = std::abs(tp.get_location() - location);
-                if (diff < nearest) {
-                    // 近いものがあれば、タッチポイントを更新する
-                    nearest = diff;
-                    nearest_tp = &tp;
-                }
-            }
-            if (nearest_tp && nearest_tp->is_near_here(location)) {
-                // 一番近いタッチポイントが、現在のタッチポイントに近い場合
-                nearest_tp->update_touch(location, intensity);
-            } else {
-                new_touch_point(location, intensity, midi_callback_);
-            }
-        }
-
-        // 更新のなかったタッチポイントを削除する
-        erase_touch_point();
-    }*/
     pub fn seek_and_update_touch_point(&mut self) {
         let mut temp_touch_point: [(f32, f32, i16); constants::MAX_TOUCH_POINTS] =
             [(INIT_VAL, INIT_VAL, 0); constants::MAX_TOUCH_POINTS];
@@ -409,7 +337,7 @@ where
         self.decide_touch_point(&mut temp_touch_point, &mut temp_index);
 
         // 3: 前回値と比較し、近いものを紐付け、タッチポイントを更新または追加する
-        self.update_or_add_touch_point(&temp_touch_point, temp_index);
+        self.collate_touch_point(&temp_touch_point, temp_index);
 
         // 4: 更新のなかったタッチポイントを削除する
         self.erase_touch_point();
@@ -473,7 +401,7 @@ where
             }
         }
     }
-    fn update_or_add_touch_point(
+    fn collate_touch_point(
         &mut self,
         temp_touch_point: &[(f32, f32, i16); constants::MAX_TOUCH_POINTS],
         temp_index: usize,
@@ -489,7 +417,7 @@ where
             }
 
             // 現在のタッチポイントで近いものがあれば、タッチポイントがそこから移動したとみなす
-            let mut nearest = INIT_VAL;
+            let mut nearest = MAX_PADS as f32;
             let mut nearest_tp: Option<&mut TouchPoint<F>> = None;
 
             for tp in self.touch_points.iter_mut() {
