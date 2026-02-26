@@ -134,22 +134,22 @@ fn display2(buffer: &mut OledBuffer) {
 
     let mut text1: String<32> = String::new();
     let p0 = POINT0.load(core::sync::atomic::Ordering::Relaxed);
-    let _ = write!(text1, "Point0: {}", p0);
+    let _ = write!(text1, "Point64: {}", p0);
     let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
 
     let p1 = POINT1.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point1: {}", p1);
+    let _ = write!(text1, "Point65: {}", p1);
     let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
 
     let p2 = POINT2.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point2: {}", p2);
+    let _ = write!(text1, "Point66: {}", p2);
     let _ = Text::new(&text1, Point::new(6, 36), style_small).draw(buffer);
 
     let p3 = POINT3.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point3: {}", p3);
+    let _ = write!(text1, "Point67: {}", p3);
     let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
 }
 

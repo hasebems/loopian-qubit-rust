@@ -2,7 +2,7 @@ use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::I2C1;
 use portable_atomic::Ordering;
 
-use crate::TOUCH_RAW_DATA;
+use crate::{ERROR_CODE, TOUCH_RAW_DATA};
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
 use crate::{POINT0, POINT1, POINT2, POINT3};
@@ -47,11 +47,13 @@ impl ReadTouch {
         i2c: &mut I2c<'static, I2C1, i2c::Async>,
     ) {
         let mut data = [0u16; constants::TOTAL_QT_KEYS];
-        for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
+        for ch in 0..(constants::TOTAL_CH as u8) {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
             let ch_in_dev = Self::CH_CONVERTION[(ch % constants::PCA9544_NUM_CHANNELS) as usize];
             pca.select(i2c, dev, ch_in_dev).await.ok();
-            if let Ok(raw_data) = at42.read_6key(i2c, false).await {
+
+            let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE as usize];
+            if let Ok(()) = at42.read_6key(i2c, &mut raw_data, false).await {
                 for key in 0..constants::AT42QT_KEYS_PER_DEVICE {
                     let sid = (ch * constants::AT42QT_KEYS_PER_DEVICE + key) as usize;
                     if raw_data[key as usize] >= self.refference[sid] {
@@ -78,10 +80,19 @@ impl ReadTouch {
                 let ch_in_dev =
                     Self::CH_CONVERTION[(ch % constants::PCA9544_NUM_CHANNELS) as usize];
                 pca.select(i2c, dev, ch_in_dev).await.ok();
-                if let Ok(raw_data) = at42.read_6key(i2c, true).await {
+
+                let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE as usize];
+                if let Ok(()) = at42.read_6key(i2c, &mut raw_data, true).await {
                     for key in 0..constants::AT42QT_KEYS_PER_DEVICE {
                         let sid = (ch * constants::AT42QT_KEYS_PER_DEVICE + key) as usize;
-                        self.refference[sid] = raw_data[key as usize];
+                        let raw = raw_data[key as usize];
+                        //let old = self.refference[sid];
+                        self.refference[sid] = raw;//if raw - old > 50 {
+                        //    ERROR_CODE.store(70 + sid as u8, Ordering::Relaxed);
+                        //    old + 50
+                        //} else {
+                        //    raw
+                        //};
                     }
                 }
                 // PCA9544のチャネルが最後のときに切断する
@@ -90,11 +101,11 @@ impl ReadTouch {
                 }
             }
         }
-        self.refference_counter = (self.refference_counter + 1) % 48;
+        self.refference_counter = (self.refference_counter + 1) % 24;
 
-        POINT0.store(data[0] as u8, Ordering::Relaxed);
-        POINT1.store(data[1] as u8, Ordering::Relaxed);
-        POINT2.store(data[2] as u8, Ordering::Relaxed);
-        POINT3.store(data[3] as u8, Ordering::Relaxed);
+        POINT0.store(data[64] as u8, Ordering::Relaxed);
+        POINT1.store(data[65] as u8, Ordering::Relaxed);
+        POINT2.store(data[66] as u8, Ordering::Relaxed);
+        POINT3.store(data[67] as u8, Ordering::Relaxed);
     }
 }

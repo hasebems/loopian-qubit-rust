@@ -46,18 +46,18 @@ impl At42Qt1070 {
     pub async fn read_6key<I2C>(
         &mut self,
         i2c: &mut I2C,
+        result: &mut [u16; 6],
         reference: bool,
-    ) -> Result<[u16; 6], I2C::Error>
+    ) -> Result<(), I2C::Error>
     where
         I2C: embedded_hal_async::i2c::I2c,
     {
         let mut buf = [0u8; 12];
         let wr_adrs = if reference { 18 } else { 4 };
         i2c.write_read(Self::ADDR, &[wr_adrs], &mut buf).await?;
-        let mut result = [0u16; 6];
         for i in 0..6 {
             result[i] = buf[i * 2] as u16 * 256 + buf[i * 2 + 1] as u16;
         }
-        Ok(result)
+        Ok(())
     }
 }

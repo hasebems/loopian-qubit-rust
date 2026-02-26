@@ -19,7 +19,7 @@ pub const PCA9544_NUM_CHANNELS: u8 = 4; // PCA9544のチャネル数
 pub const PCA9544_NUM_DEVICES: u8 = 4; // PCA9544の台数
 pub const AT42QT_KEYS_PER_DEVICE: u8 = 6; // AT42QT1070
 
-pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS as usize) * (PCA9544_NUM_DEVICES as usize);
+pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
 pub const TOTAL_QT_KEYS: usize = TOTAL_CH * (AT42QT_KEYS_PER_DEVICE as usize);
 
 // MIDI Note Number
