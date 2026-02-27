@@ -108,14 +108,12 @@ pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャン
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
     CriticalSectionRawMutex,
-    [u16; (constants::PCA9544_NUM_CHANNELS
-        * constants::PCA9544_NUM_DEVICES
-        * constants::AT42QT_KEYS_PER_DEVICE) as usize],
+    [u16; (constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES) as usize
+        * constants::AT42QT_KEYS_PER_DEVICE],
 > = Mutex::new(
     [0u16;
-        (constants::PCA9544_NUM_CHANNELS
-            * constants::PCA9544_NUM_DEVICES
-            * constants::AT42QT_KEYS_PER_DEVICE) as usize],
+        (constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES) as usize
+            * constants::AT42QT_KEYS_PER_DEVICE],
 );
 
 // RINGLED用メッセージチャンネル
