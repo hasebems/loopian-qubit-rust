@@ -57,8 +57,8 @@ impl ReadTouch {
             let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
             if let Ok(()) = at42.read_6key(i2c, &mut raw_data, false).await {
                 let mut sid = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
-                for key in 0..constants::AT42QT_KEYS_PER_DEVICE {
-                    let mut raw = raw_data[key];
+                for rawd in raw_data.iter().take(constants::AT42QT_KEYS_PER_DEVICE) {
+                    let mut raw = *rawd;
                     let old = self.raw_value[sid];
                     if old != 0 && raw > old + 200 {
                         raw -= 256; // hiからloを読む間に数値が変化した場合の対策
