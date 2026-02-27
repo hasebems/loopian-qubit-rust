@@ -12,7 +12,7 @@ mod touch;
 mod ui;
 
 use cortex_m::asm;
-use portable_atomic::{AtomicI32, AtomicU8, AtomicU64, Ordering};
+use portable_atomic::{AtomicI32, AtomicU8, AtomicU16, AtomicU64, Ordering};
 use static_cell::StaticCell;
 
 use embassy_executor::Executor;
@@ -95,10 +95,10 @@ static BUFFER_FROM_DISPLAY: Channel<
 > = Channel::new();
 
 // 表示用変数
-pub static POINT0: AtomicU8 = AtomicU8::new(0);
-pub static POINT1: AtomicU8 = AtomicU8::new(0);
-pub static POINT2: AtomicU8 = AtomicU8::new(0);
-pub static POINT3: AtomicU8 = AtomicU8::new(0);
+pub static POINT0: AtomicU16 = AtomicU16::new(0);
+pub static POINT1: AtomicU16 = AtomicU16::new(0);
+pub static POINT2: AtomicU16 = AtomicU16::new(0);
+pub static POINT3: AtomicU16 = AtomicU16::new(0);
 pub static TOUCH0: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);

@@ -59,7 +59,11 @@ impl ReadTouch {
                     if raw_data[key as usize] >= self.refference[sid] {
                         data[sid] = raw_data[key as usize] - self.refference[sid];
                     } else {
-                        data[sid] = 0;
+                    if data[sid] > 10 {
+                        POINT0.store(sid as u16, Ordering::Relaxed);
+                        POINT1.store(self.refference[sid], Ordering::Relaxed);
+                        POINT2.store(old, Ordering::Relaxed);
+                        POINT3.store(raw, Ordering::Relaxed);
                     }
                 }
             }
@@ -103,9 +107,9 @@ impl ReadTouch {
         }
         self.refference_counter = (self.refference_counter + 1) % 24;
 
-        POINT0.store(data[64] as u8, Ordering::Relaxed);
-        POINT1.store(data[65] as u8, Ordering::Relaxed);
-        POINT2.store(data[66] as u8, Ordering::Relaxed);
-        POINT3.store(data[67] as u8, Ordering::Relaxed);
+        //POINT0.store(self.raw_value[64], Ordering::Relaxed);
+        //POINT1.store(self.raw_value[65], Ordering::Relaxed);
+        //POINT2.store(self.raw_value[66], Ordering::Relaxed);
+        //POINT3.store(self.raw_value[67], Ordering::Relaxed);
     }
 }
