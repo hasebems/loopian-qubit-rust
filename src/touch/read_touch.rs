@@ -64,11 +64,7 @@ impl ReadTouch {
                         raw -= 256; // hiからloを読む間に数値が変化した場合の対策
                     }
                     self.raw_value[sid] = raw;
-                    data[sid] = if raw >= self.refference[sid] {
-                        raw - self.refference[sid]
-                    } else {
-                        0
-                    };
+                    data[sid] = raw.saturating_sub(self.refference[sid]);
                     if data[sid] > 10 {
                         POINT0.store(sid as u16, Ordering::Relaxed);
                         POINT1.store(self.refference[sid], Ordering::Relaxed);
