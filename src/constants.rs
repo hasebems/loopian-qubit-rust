@@ -21,6 +21,7 @@ pub const AT42QT_KEYS_PER_DEVICE: usize = 6; // AT42QT1070
 
 pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
 pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
+pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
 
 // MIDI Note Number
 pub const KEYBD_LO: u8 = 21; // A0

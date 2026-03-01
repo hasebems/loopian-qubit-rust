@@ -246,56 +246,23 @@ async fn ringled_task(
     program: &'static PioWs2812Program<'static, PIO0>,
 ) {
     // Neopixel on D0 (GP26)
-    use devices::ws2812::wheel;
     use embassy_rp::pio_programs::ws2812::RgbwPioWs2812;
     use embassy_time::Ticker;
     use smart_leds::RGBW;
+    use ui::ringled::RingLed;
 
     // RgbwPioWs2812 is needed for RGBW
     let mut ws2812 = RgbwPioWs2812::new(&mut common, sm, dma, Irqs, pin, program);
-
+    let mut ring_led = RingLed::new();
     let mut ticker = Ticker::every(embassy_time::Duration::from_millis(20));
-    let mut speed: i32 = 0;
 
-    // LEDの数
-    const NUM_LEDS: usize = constants::TOTAL_QT_KEYS;
-    let mut data = [RGBW::default(); NUM_LEDS];
-    let mut rxkey_state = [false; NUM_LEDS]; // 受信したNote On/Offの状態を保持
-    let mut txkey_state: [Option<u8>; constants::MAX_TOUCH_POINTS] =
-        [None; constants::MAX_TOUCH_POINTS]; // 送信したNote On/Offの状態を保持
-
+    let mut data = [RGBW::default(); constants::NUM_LEDS];
     loop {
         let (cmd, location) = RINGLED_MESSAGE
             .try_receive()
             .unwrap_or((constants::RINGLED_CMD_NONE, 0.0)); // ここは止まらない
-        let num = location.clamp(0.0, (NUM_LEDS - 1) as f32) as usize; // 安全のために位置をクランプ
-        if cmd == constants::RINGLED_CMD_RX_ON {
-            rxkey_state[num] = true;
-        } else if cmd == constants::RINGLED_CMD_RX_OFF {
-            rxkey_state[num] = false;
-        } else if cmd & 0xf0 == constants::RINGLED_CMD_TX_ON {
-            txkey_state[(cmd & 0x0f).clamp(0, (constants::MAX_TOUCH_POINTS - 1) as u8) as usize] =
-                Some(num as u8);
-        } else if cmd & 0xf0 == constants::RINGLED_CMD_TX_OFF {
-            txkey_state[(cmd & 0x0f).clamp(0, (constants::MAX_TOUCH_POINTS - 1) as u8) as usize] =
-                None;
-        }
-        for (i, led) in data.iter_mut().enumerate().take(NUM_LEDS) {
-            let color = wheel(speed.wrapping_add(i as i32 * 16) as u8);
-            // Convert RGB8 to RGBW (White is controlled by MIDI)
-            let txon = txkey_state
-                .iter()
-                .any(|&tx| tx.is_some_and(|tx| tx as usize == i));
-            *led = RGBW {
-                r: color.r / 4, // RGBを少し暗くして白とバランスを取る
-                g: color.g / 4,
-                b: color.b / 4,
-                a: smart_leds::White(if rxkey_state[i] || txon { 255 } else { 0 }),
-            };
-        }
+        ring_led.set_color(&mut data, location, cmd);
         ws2812.write(&data).await;
-
-        speed = speed.wrapping_add(2); // 色の変化速度
         ticker.next().await;
     }
 }
