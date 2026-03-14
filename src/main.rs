@@ -25,8 +25,8 @@ use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 
 use rp235x_hal::{self as hal};
 
-use embassy_rp::bind_interrupts;
 use embassy_rp::adc::InterruptHandler as AdcInterruptHandler;
+use embassy_rp::bind_interrupts;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::i2c::{self, Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};

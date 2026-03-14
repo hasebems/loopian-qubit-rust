@@ -241,7 +241,10 @@ pub fn draw_bar(buffer: &mut OledBuffer, value: u16) {
     if BAR_HEIGHT > 2 && filled_width > 0 {
         let fill = Rectangle::new(
             Point::new(BAR_START_X + 1, BAR_START_Y + 1),
-            Size::new(filled_width.min(BAR_WIDTH.saturating_sub(2)), BAR_HEIGHT - 2),
+            Size::new(
+                filled_width.min(BAR_WIDTH.saturating_sub(2)),
+                BAR_HEIGHT - 2,
+            ),
         );
         let _ = fill.into_styled(fill_style).draw(buffer);
     }
