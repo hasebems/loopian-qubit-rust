@@ -12,7 +12,17 @@ use heapless::String;
 
 use crate::devices::ssd1306::OledBuffer;
 use crate::{
-    ELAPSED_TIME, ERROR_CODE, POINT0, POINT1, POINT2, POINT3, TOUCH0, TOUCH1, TOUCH2, TOUCH3,
+    AD_VALUE,
+    ELAPSED_TIME,
+    //ERROR_CODE,
+    POINT0,
+    POINT1,
+    POINT2,
+    POINT3,
+    TOUCH0,
+    TOUCH1,
+    TOUCH2,
+    TOUCH3,
 };
 
 pub struct GraphicsDisplay {
@@ -110,9 +120,10 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
     let _ = write!(text1, "Cntr: {}", counter);
     let _ = Text::new(&text1, Point::new(6, 16), style_big).draw(buffer);
 
-    let er = ERROR_CODE.load(core::sync::atomic::Ordering::Relaxed);
+    let ad_value = AD_VALUE.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, ad_value as u16);
     text1.clear();
-    let _ = write!(text1, "ErCd: {}", er);
+    let _ = write!(text1, "Prs:");
     let _ = Text::new(&text1, Point::new(6, 32), style_big).draw(buffer);
 
     let elapsed_time = ELAPSED_TIME.load(core::sync::atomic::Ordering::Relaxed);
@@ -199,6 +210,41 @@ fn display3(buffer: &mut OledBuffer) {
         let _ = write!(text1, "Touch4: ---");
     }
     let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
+}
+
+pub fn draw_bar(buffer: &mut OledBuffer, value: u16) {
+    const BAR_START_X: i32 = 54;
+    const BAR_START_Y: i32 = 24;
+    const BAR_WIDTH: u32 = 64;
+    const BAR_HEIGHT: u32 = 6;
+    const BAR_VALUE_MIN: u16 = 0;
+    const BAR_VALUE_MAX: u16 = 4095;
+
+    let border_style = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let fill_style = PrimitiveStyle::with_fill(BinaryColor::On);
+
+    let clamped = value.clamp(BAR_VALUE_MIN, BAR_VALUE_MAX);
+    let range = u32::from(BAR_VALUE_MAX.saturating_sub(BAR_VALUE_MIN));
+    let numerator = u32::from(clamped.saturating_sub(BAR_VALUE_MIN));
+    let filled_width = if range == 0 {
+        0
+    } else {
+        (numerator * BAR_WIDTH) / range
+    };
+
+    let frame = Rectangle::new(
+        Point::new(BAR_START_X, BAR_START_Y),
+        Size::new(BAR_WIDTH, BAR_HEIGHT),
+    );
+    let _ = frame.into_styled(border_style).draw(buffer);
+
+    if BAR_HEIGHT > 2 && filled_width > 0 {
+        let fill = Rectangle::new(
+            Point::new(BAR_START_X + 1, BAR_START_Y + 1),
+            Size::new(filled_width.min(BAR_WIDTH.saturating_sub(2)), BAR_HEIGHT - 2),
+        );
+        let _ = fill.into_styled(fill_style).draw(buffer);
+    }
 }
 
 fn demo_lines(buffer: &mut OledBuffer) {

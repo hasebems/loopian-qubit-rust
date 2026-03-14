@@ -26,10 +26,11 @@ use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use rp235x_hal::{self as hal};
 
 use embassy_rp::bind_interrupts;
+use embassy_rp::adc::InterruptHandler as AdcInterruptHandler;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::i2c::{self, Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};
-use embassy_rp::peripherals::{DMA_CH0, I2C1, PIO0, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, I2C1, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::PioWs2812Program;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
@@ -37,10 +38,11 @@ use embassy_usb::class::midi::{MidiClass, Receiver, Sender};
 use embassy_usb::{Builder, Config};
 
 bind_interrupts!(struct Irqs {
+    ADC_IRQ_FIFO => AdcInterruptHandler;
     I2C1_IRQ => I2cInterruptHandler<I2C1>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
-    DMA_IRQ_0 => DmaInterruptHandler<DMA_CH0>;
+    DMA_IRQ_0 => DmaInterruptHandler<DMA_CH0>, DmaInterruptHandler<DMA_CH1>;
 });
 
 macro_rules! make_static {
@@ -104,6 +106,8 @@ pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
 pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）
+pub static AD_VALUE: AtomicI32 = AtomicI32::new(0); // ADCの値
+pub static AD_VALUE2: AtomicI32 = AtomicI32::new(0); // ADCの値 (GPIO28)
 
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
@@ -136,6 +140,14 @@ fn main() -> ! {
     // Switchピン
     let switch1 = Input::new(p.PIN_2, Pull::Up);
     let switch2 = Input::new(p.PIN_4, Pull::Up);
+
+    // ADC
+    let (adc, adc_a1, adc_a2) = (
+        embassy_rp::adc::Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default()),
+        embassy_rp::adc::Channel::new_pin(p.PIN_27, Pull::None),
+        embassy_rp::adc::Channel::new_pin(p.PIN_28, Pull::None),
+    );
+    let adc_dma = embassy_rp::dma::Channel::new(p.DMA_CH1, Irqs);
 
     // USB Driver
     let driver = Driver::new(p.USB, Irqs);
@@ -230,6 +242,10 @@ fn main() -> ! {
         match ringled_task(common, sm0, p.DMA_CH0, p.PIN_26, ws2812_program) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(23, Ordering::Relaxed),
+        }
+        match adc_task(adc, adc_a1, adc_a2, adc_dma) {
+            Ok(token) => spawner.spawn(token),
+            Err(_) => ERROR_CODE.store(24, Ordering::Relaxed),
         }
     });
 }
@@ -425,6 +441,35 @@ async fn core1_led_task(mut led: Output<'static>) {
             Timer::after_millis(100).await;
             led.set_low();
             Timer::after_millis(900).await;
+        }
+    }
+}
+
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      ADC Task (Core0): GP27/GP28 の連続サンプリング
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#[embassy_executor::task]
+async fn adc_task(
+    mut adc: embassy_rp::adc::Adc<'static, embassy_rp::adc::Async>,
+    adc_a1: embassy_rp::adc::Channel<'static>,
+    adc_a2: embassy_rp::adc::Channel<'static>,
+    mut adc_dma: embassy_rp::dma::Channel<'static>,
+) {
+    let mut channels = [adc_a1, adc_a2];
+    let mut samples = [0u16; 2];
+
+    loop {
+        match adc
+            .read_many_multichannel(&mut channels, &mut samples, 0, &mut adc_dma)
+            .await
+        {
+            Ok(()) => {
+                AD_VALUE.store(samples[0] as i32, Ordering::Relaxed);
+                AD_VALUE2.store(samples[1] as i32, Ordering::Relaxed);
+            }
+            Err(_) => {
+                ERROR_CODE.store(60, Ordering::Relaxed);
+            }
         }
     }
 }
