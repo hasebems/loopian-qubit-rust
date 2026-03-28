@@ -230,9 +230,7 @@ pub fn draw_bar(buffer: &mut OledBuffer, number: i32, value: u16) {
     const BAR_VALUE_MIN: u16 = 0;
     const BAR_VALUE_MAX: u16 = 4095;
 
-    let border_style = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     let fill_style = PrimitiveStyle::with_fill(BinaryColor::On);
-
     let clamped = value.clamp(BAR_VALUE_MIN, BAR_VALUE_MAX);
     let range = u32::from(BAR_VALUE_MAX.saturating_sub(BAR_VALUE_MIN));
     let numerator = u32::from(clamped.saturating_sub(BAR_VALUE_MIN));
