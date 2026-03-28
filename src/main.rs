@@ -106,8 +106,10 @@ pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
 pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）
-pub static AD_VALUE: AtomicI32 = AtomicI32::new(0); // ADCの値
-pub static AD_VALUE2: AtomicI32 = AtomicI32::new(0); // ADCの値 (GPIO28)
+pub static AD_VALUE1: AtomicI32 = AtomicI32::new(0); // ADCの値(A0)
+pub static AD_VALUE2: AtomicI32 = AtomicI32::new(0); // ADCの値(A1)
+pub static AD_VALUE3: AtomicI32 = AtomicI32::new(0); // ADCの値(B0)
+pub static AD_VALUE4: AtomicI32 = AtomicI32::new(0); // ADCの値(B1)
 
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
@@ -142,10 +144,11 @@ fn main() -> ! {
     let switch2 = Input::new(p.PIN_4, Pull::Up);
 
     // ADC
-    let (adc, adc_a1, adc_a2) = (
+    let (adc, adc_a1, adc_a2, adc_change) = (
         embassy_rp::adc::Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default()),
         embassy_rp::adc::Channel::new_pin(p.PIN_27, Pull::None),
         embassy_rp::adc::Channel::new_pin(p.PIN_28, Pull::None),
+        Output::new(p.PIN_5, Level::Low),
     );
     let adc_dma = embassy_rp::dma::Channel::new(p.DMA_CH1, Irqs);
 
@@ -243,7 +246,7 @@ fn main() -> ! {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(23, Ordering::Relaxed),
         }
-        match adc_task(adc, adc_a1, adc_a2, adc_dma) {
+        match adc_task(adc, adc_a1, adc_a2, adc_change, adc_dma) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(24, Ordering::Relaxed),
         }
@@ -453,19 +456,32 @@ async fn adc_task(
     mut adc: embassy_rp::adc::Adc<'static, embassy_rp::adc::Async>,
     adc_a1: embassy_rp::adc::Channel<'static>,
     adc_a2: embassy_rp::adc::Channel<'static>,
+    mut adc_change: Output<'static>,
     mut adc_dma: embassy_rp::dma::Channel<'static>,
 ) {
     let mut channels = [adc_a1, adc_a2];
     let mut samples = [0u16; 2];
+    let mut a0b0_available = true;
 
     loop {
+        if a0b0_available {
+            adc_change.set_low();
+        } else {
+            adc_change.set_high();
+        }
+        a0b0_available = !a0b0_available;
         match adc
             .read_many_multichannel(&mut channels, &mut samples, 0, &mut adc_dma)
             .await
         {
             Ok(()) => {
-                AD_VALUE.store(samples[0] as i32, Ordering::Relaxed);
-                AD_VALUE2.store(samples[1] as i32, Ordering::Relaxed);
+                if a0b0_available {
+                    AD_VALUE1.store(samples[0] as i32, Ordering::Relaxed);
+                    AD_VALUE3.store(samples[1] as i32, Ordering::Relaxed);
+                } else {
+                    AD_VALUE2.store(samples[0] as i32, Ordering::Relaxed);
+                    AD_VALUE4.store(samples[1] as i32, Ordering::Relaxed);
+                }
             }
             Err(_) => {
                 ERROR_CODE.store(60, Ordering::Relaxed);

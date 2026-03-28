@@ -12,7 +12,10 @@ use heapless::String;
 
 use crate::devices::ssd1306::OledBuffer;
 use crate::{
-    AD_VALUE,
+    AD_VALUE1,
+    AD_VALUE2,
+    AD_VALUE3,
+    AD_VALUE4,
     ELAPSED_TIME,
     //ERROR_CODE,
     POINT0,
@@ -120,8 +123,15 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
     let _ = write!(text1, "Cntr: {}", counter);
     let _ = Text::new(&text1, Point::new(6, 16), style_big).draw(buffer);
 
-    let ad_value = AD_VALUE.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, ad_value as u16);
+    let ad_value1 = AD_VALUE1.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, 0, ad_value1 as u16);
+    let ad_value2 = AD_VALUE2.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, 1, ad_value2 as u16);
+    let ad_value3 = AD_VALUE3.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, 2, ad_value3 as u16);
+    let ad_value4 = AD_VALUE4.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, 3, ad_value4 as u16);
+
     text1.clear();
     let _ = write!(text1, "Prs:");
     let _ = Text::new(&text1, Point::new(6, 32), style_big).draw(buffer);
@@ -212,11 +222,11 @@ fn display3(buffer: &mut OledBuffer) {
     let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
 }
 
-pub fn draw_bar(buffer: &mut OledBuffer, value: u16) {
+pub fn draw_bar(buffer: &mut OledBuffer, number: i32, value: u16) {
     const BAR_START_X: i32 = 54;
-    const BAR_START_Y: i32 = 24;
+    let start_y: i32 = 24 + number * 2;
     const BAR_WIDTH: u32 = 64;
-    const BAR_HEIGHT: u32 = 6;
+    const BAR_HEIGHT: u32 = 2;
     const BAR_VALUE_MIN: u16 = 0;
     const BAR_VALUE_MAX: u16 = 4095;
 
@@ -232,19 +242,10 @@ pub fn draw_bar(buffer: &mut OledBuffer, value: u16) {
         (numerator * BAR_WIDTH) / range
     };
 
-    let frame = Rectangle::new(
-        Point::new(BAR_START_X, BAR_START_Y),
-        Size::new(BAR_WIDTH, BAR_HEIGHT),
-    );
-    let _ = frame.into_styled(border_style).draw(buffer);
-
-    if BAR_HEIGHT > 2 && filled_width > 0 {
+    if filled_width > 0 {
         let fill = Rectangle::new(
-            Point::new(BAR_START_X + 1, BAR_START_Y + 1),
-            Size::new(
-                filled_width.min(BAR_WIDTH.saturating_sub(2)),
-                BAR_HEIGHT - 2,
-            ),
+            Point::new(BAR_START_X, start_y),
+            Size::new(filled_width, BAR_HEIGHT),
         );
         let _ = fill.into_styled(fill_style).draw(buffer);
     }
