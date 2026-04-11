@@ -17,6 +17,10 @@
     - MIDI 出力表示（４つのタッチの位置）
     - MIDI 入力表示（全音程のon/off）
 
+* adc_task(adc, p.PIN_27, p.PIN_28, p.PIN_5, adc_dma)
+    - 2ch ADC
+    - Analog Multiplexer の切り替え
+
 ## Core1
 * core1_led_task(led)
     - onboard LED 点滅
