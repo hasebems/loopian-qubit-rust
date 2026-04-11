@@ -359,6 +359,7 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         } else {
             // バッファオーバーフロー
             ERROR_CODE.store(32, Ordering::Relaxed);
+            *send_index.borrow_mut() = 0;
         }
         qt.lighten_leds(|_location, _intensity| {
             // LEDの明るさをタッチの強さに応じて変化させる
@@ -470,6 +471,10 @@ async fn adc_task(
             adc_change.set_high();
         }
         a0b0_available = !a0b0_available;
+
+        // サンプリング開始前に少し待機（センサの安定化などのため）
+        Timer::after_millis(10).await;
+
         match adc
             .read_many_multichannel(&mut channels, &mut samples, 0, &mut adc_dma)
             .await
