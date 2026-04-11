@@ -1,6 +1,7 @@
 use smart_leds::RGB8;
 
 /// Helper to generate color wheel
+#[allow(dead_code)]
 pub fn wheel(mut wheel_pos: u8) -> RGB8 {
     wheel_pos = 255 - wheel_pos;
     if wheel_pos < 85 {
