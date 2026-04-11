@@ -7,7 +7,7 @@
 pub const CORE1_STACK_SIZE: usize = 8192; // コア1のスタックサイズ
 
 // Message for Ringled
-pub const RINGLED_MESSAGE_SIZE: usize = 16; // ringled_task でやりとりするメッセージのサイズ
+pub const RINGLED_MESSAGE_SIZE: usize = 64; // バグ対策: 送受信の瞬間的バーストで詰まりにくくする
 pub const RINGLED_CMD_NONE: u8 = 0x00; // コマンドなし
 pub const RINGLED_CMD_TX_ON: u8 = 0x90; // 送信用Note Onコマンド
 pub const RINGLED_CMD_TX_OFF: u8 = 0x80; // 送信用Note Offコマンド

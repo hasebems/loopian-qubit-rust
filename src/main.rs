@@ -277,11 +277,20 @@ async fn ringled_task(
 
     let mut data = [RGBW::default(); constants::NUM_LEDS];
     loop {
-        let (cmd, location) = RINGLED_MESSAGE
-            .try_receive()
-            .unwrap_or((constants::RINGLED_CMD_NONE, 0.0)); // ここは止まらない
-        ring_led.set_color(&mut data, location, cmd);
-        ws2812.write(&data).await;
+        // バグ対策: 1周期でキューを可能な限りドレインして、送信側の詰まりを防ぐ
+        let mut drained = false;
+        while let Ok((cmd, location)) = RINGLED_MESSAGE.try_receive() {
+            drained = true;
+            ring_led.set_color(&mut data, location, cmd);
+        }
+        if !drained {
+            ring_led.set_color(&mut data, constants::RINGLED_CMD_NONE as f32, constants::RINGLED_CMD_NONE);
+        }
+        // バグ対策: NeoPixel書き込みが固着してもタスク全体が停止しないようタイムアウト保護
+        let write_result = with_timeout(Duration::from_millis(8), ws2812.write(&data)).await;
+        if write_result.is_err() {
+            ERROR_CODE.store(34, Ordering::Relaxed);
+        }
         ticker.next().await;
     }
 }
@@ -320,11 +329,15 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         let start = Instant::now();
 
         // タッチセンサの生データを取得してQubitTouchにセット
-        let data = TOUCH_RAW_DATA.lock().await;
-        for ch in 0..constants::TOTAL_QT_KEYS {
-            qt.set_value(ch, data[ch]);
+        // ロック保持時間を最小化し、以降の await をロック外で実行する
+        let mut touch_values = [0u16; constants::TOTAL_QT_KEYS];
+        {
+            let data = TOUCH_RAW_DATA.lock().await;
+            touch_values.copy_from_slice(&*data);
         }
-
+        for ch in 0..constants::TOTAL_QT_KEYS {
+            qt.set_value(ch, touch_values[ch]);
+        }
         qt.seek_and_update_touch_point();
         let idx = *send_index.borrow();
         const MAX_EVENT: usize = 8;
@@ -353,7 +366,10 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
                     // タイムアウトまたは送信エラー（USB未接続時など）
                     ERROR_CODE.store(31, Ordering::Relaxed);
                 }
-                RINGLED_MESSAGE.send((packet.0, packet.3)).await;
+                // バグ対策: RingLEDキュー満杯でCore0全体が停止しないよう非ブロッキング送信にする
+                if RINGLED_MESSAGE.try_send((packet.0, packet.3)).is_err() {
+                    ERROR_CODE.store(33, Ordering::Relaxed);
+                }
             }
             *send_index.borrow_mut() = 0;
         } else {
@@ -400,20 +416,32 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
                         // Note On (Channel 0-15)
                         if (status & 0xF0) == 0x90 {
                             if velocity > 0 {
-                                RINGLED_MESSAGE
-                                    .send((constants::RINGLED_CMD_RX_ON, note as f32))
-                                    .await;
+                                // バグ対策: RingLEDキュー満杯でもmidi_rx_taskを止めない
+                                if RINGLED_MESSAGE
+                                    .try_send((constants::RINGLED_CMD_RX_ON, note as f32))
+                                    .is_err()
+                                {
+                                    ERROR_CODE.store(41, Ordering::Relaxed);
+                                }
                             } else {
-                                RINGLED_MESSAGE
-                                    .send((constants::RINGLED_CMD_RX_OFF, note as f32))
-                                    .await;
+                                // バグ対策: RingLEDキュー満杯でもmidi_rx_taskを止めない
+                                if RINGLED_MESSAGE
+                                    .try_send((constants::RINGLED_CMD_RX_OFF, note as f32))
+                                    .is_err()
+                                {
+                                    ERROR_CODE.store(41, Ordering::Relaxed);
+                                }
                             }
                         }
                         // Note Off
                         else if (status & 0xF0) == 0x80 {
-                            RINGLED_MESSAGE
-                                .send((constants::RINGLED_CMD_RX_OFF, note as f32))
-                                .await;
+                            // バグ対策: RingLEDキュー満杯でもmidi_rx_taskを止めない
+                                if RINGLED_MESSAGE
+                                    .try_send((constants::RINGLED_CMD_RX_OFF, note as f32))
+                                    .is_err()
+                                {
+                                    ERROR_CODE.store(41, Ordering::Relaxed);
+                                }
                         }
                     }
                 }
@@ -465,12 +493,12 @@ async fn adc_task(
     let mut a0b0_available = true;
 
     loop {
+        // multiplexer の切り替え
         if a0b0_available {
             adc_change.set_low();
         } else {
             adc_change.set_high();
         }
-        a0b0_available = !a0b0_available;
 
         // サンプリング開始前に少し待機（センサの安定化などのため）
         Timer::after_millis(10).await;
@@ -492,6 +520,8 @@ async fn adc_task(
                 ERROR_CODE.store(60, Ordering::Relaxed);
             }
         }
+        // AD処理完了後に状態を切り替え
+        a0b0_available = !a0b0_available;
     }
 }
 
