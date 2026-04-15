@@ -284,7 +284,11 @@ async fn ringled_task(
             ring_led.set_color(&mut data, location, cmd);
         }
         if !drained {
-            ring_led.set_color(&mut data, constants::RINGLED_CMD_NONE as f32, constants::RINGLED_CMD_NONE);
+            ring_led.set_color(
+                &mut data,
+                constants::RINGLED_CMD_NONE as f32,
+                constants::RINGLED_CMD_NONE,
+            );
         }
         // バグ対策: NeoPixel書き込みが固着してもタスク全体が停止しないようタイムアウト保護
         let write_result = with_timeout(Duration::from_millis(8), ws2812.write(&data)).await;
@@ -335,8 +339,8 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             let data = TOUCH_RAW_DATA.lock().await;
             touch_values.copy_from_slice(&*data);
         }
-        for ch in 0..constants::TOTAL_QT_KEYS {
-            qt.set_value(ch, touch_values[ch]);
+        for (ch, tv) in touch_values.iter().enumerate() {
+            qt.set_value(ch, *tv);
         }
         qt.seek_and_update_touch_point();
         let idx = *send_index.borrow();
@@ -436,12 +440,12 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
                         // Note Off
                         else if (status & 0xF0) == 0x80 {
                             // バグ対策: RingLEDキュー満杯でもmidi_rx_taskを止めない
-                                if RINGLED_MESSAGE
-                                    .try_send((constants::RINGLED_CMD_RX_OFF, note as f32))
-                                    .is_err()
-                                {
-                                    ERROR_CODE.store(41, Ordering::Relaxed);
-                                }
+                            if RINGLED_MESSAGE
+                                .try_send((constants::RINGLED_CMD_RX_OFF, note as f32))
+                                .is_err()
+                            {
+                                ERROR_CODE.store(41, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
