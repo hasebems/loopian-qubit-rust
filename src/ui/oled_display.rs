@@ -17,7 +17,6 @@ use crate::{
     AD_VALUE3,
     AD_VALUE4,
     ELAPSED_TIME,
-    //ERROR_CODE,
     POINT0,
     POINT1,
     POINT2,
@@ -26,6 +25,8 @@ use crate::{
     TOUCH1,
     TOUCH2,
     TOUCH3,
+    //ERROR_CODE,
+    WORK_MODE,
 };
 
 pub struct GraphicsDisplay {
@@ -79,6 +80,7 @@ impl GraphicsDisplay {
             1 => display1(buffer, counter),
             2 => display2(buffer),
             3 => display3(buffer),
+            4 => display4(buffer, counter),
             10 => demo_lines(buffer),
             11 => demo_rects(buffer),
             12 => demo_filled_rects(buffer),
@@ -220,6 +222,43 @@ fn display3(buffer: &mut OledBuffer) {
         let _ = write!(text1, "Touch4: ---");
     }
     let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
+}
+
+fn display4(buffer: &mut OledBuffer, counter: u32) {
+    buffer.clear();
+
+    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+        .into_styled(outline)
+        .draw(buffer);
+
+    //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+
+    let mut text: String<32> = String::new();
+    let _ = write!(text, "Piano");
+    let _ = Text::new(&text, Point::new(12, 18), style_small).draw(buffer);
+
+    text.clear();
+    let _ = write!(text, "Violin");
+    let _ = Text::new(&text, Point::new(12, 36), style_small).draw(buffer);
+
+    text.clear();
+    let _ = write!(text, "up/down   quit");
+    let _ = Text::new(&text, Point::new(20, 56), style_small).draw(buffer);
+
+    let work_mode = WORK_MODE.load(core::sync::atomic::Ordering::Relaxed);
+    if counter % 10 < 5 {
+        if work_mode == 0 {
+            let _ = Rectangle::new(Point::new(8, 10), Size::new(100, 14))
+                .into_styled(outline)
+                .draw(buffer);
+        } else {
+            let _ = Rectangle::new(Point::new(8, 27), Size::new(100, 14))
+                .into_styled(outline)
+                .draw(buffer);
+        }
+    }
 }
 
 pub fn draw_bar(buffer: &mut OledBuffer, number: i32, value: u16) {

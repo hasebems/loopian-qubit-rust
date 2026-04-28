@@ -110,6 +110,7 @@ pub static AD_VALUE1: AtomicI32 = AtomicI32::new(0); // ADCの値(A0)
 pub static AD_VALUE2: AtomicI32 = AtomicI32::new(0); // ADCの値(A1)
 pub static AD_VALUE3: AtomicI32 = AtomicI32::new(0); // ADCの値(B0)
 pub static AD_VALUE4: AtomicI32 = AtomicI32::new(0); // ADCの値(B1)
+pub static WORK_MODE: AtomicU8 = AtomicU8::new(0); // 動作モード（Piano/Violin）
 
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
@@ -505,7 +506,7 @@ async fn adc_task(
         }
 
         // サンプリング開始前に少し待機（センサの安定化などのため）
-        Timer::after_millis(10).await;
+        Timer::after_millis(2).await;
 
         match adc
             .read_many_multichannel(&mut channels, &mut samples, 0, &mut adc_dma)
@@ -605,33 +606,44 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
     BUFFER_TO_DISPLAY.send(buffer).await;
 
     loop {
-        // 次のステップまで待機(5fps想定)
-        Timer::after_millis(200).await;
+        // 次のステップまで待機(10fps想定)
+        Timer::after_millis(100).await;
 
         // 空バッファを受信
         buffer = BUFFER_FROM_DISPLAY.receive().await;
 
         // スイッチの状態を取得
-        let switch1_state = switch1.is_low();
-        let switch2_state = switch2.is_low();
-        if switch1_state != switch1_prev && switch1_state {
-            if ui_page == 3 {
+        let switch_r_state = switch1.is_low();
+        let switch_l_state = switch2.is_low();
+        if switch_r_state != switch1_prev && switch_r_state {
+            if switch_l_state {
+                // 両方のスイッチが同時に押された場合は、設定画面に直接遷移
+                ui_page = 4;
+            } else if ui_page == 3 || ui_page == 4 {
                 ui_page = 0;
             } else {
                 ui_page += 1;
             }
             gui.change_page(ui_page); // ページ切替をGUIに通知
         }
-        if switch2_state != switch2_prev && switch2_state {
-            if ui_page == 0 {
+        if switch_l_state != switch2_prev && switch_l_state {
+            if switch_r_state {
+                // 両方のスイッチが同時に押された場合は、設定画面に直接遷移
+                ui_page = 4;
+            } else if ui_page == 4 {
+                WORK_MODE.store(
+                    (WORK_MODE.load(Ordering::Relaxed) + 1) % 2,
+                    Ordering::Relaxed,
+                ); // 動作モードを切り替え
+            } else if ui_page == 0 {
                 ui_page = 3;
             } else {
                 ui_page -= 1;
             }
             gui.change_page(ui_page); // ページ切替をGUIに通知
         }
-        switch1_prev = switch1_state;
-        switch2_prev = switch2_state;
+        switch1_prev = switch_r_state;
+        switch2_prev = switch_l_state;
 
         // 描画
         gui.tick(&mut buffer, counter);
