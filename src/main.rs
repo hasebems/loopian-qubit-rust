@@ -64,6 +64,27 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
         asm::nop();
     }
 }
+// ERROR CODE 一覧(一の位も十の位も1-9の範囲)
+// 11: BUFFER_FROM_DISPLAYの初期投入に失敗
+// 12: BUFFER_FROM_DISPLAYの初期投入に失敗（2回目）
+// 21: Core1 LED Taskの起動に失敗
+// 22: Core1 I2C Taskの起動に失敗
+// 23: Core1 OLED UI Taskの起動に失敗
+// 31: QubitTouch Taskの起動に失敗
+// 32: USB Taskの起動に失敗
+// 33: MIDI RX Taskの起動に失敗
+// 34: RingLED Taskの起動に失敗
+// 35: ADC Taskの起動に失敗
+// 41: タッチイベントのバッファオーバーフロー
+// 42: MIDIイベントの送信失敗（USB未接続など）
+// 43: MIDIイベントのバッファオーバーフロー
+// 44: RingLEDキュー満杯
+// 45: RingLEDへの書き込みのタイムアウト
+// 51-54: MIDI RX Error
+// 61: ADC値取得エラー
+// 71: OLED初期化エラー
+// 72: 描画バッファ受信エラー
+// 73: 描画バッファ返却エラー
 
 // タッチイベントのデータ構造
 #[derive(Copy, Clone, Default)]
@@ -196,10 +217,10 @@ fn main() -> ! {
     // 初期バッファを準備してチャンネルに投入（Core1起動前に実行）
     // 2つのバッファを確実に投入
     if BUFFER_FROM_DISPLAY.try_send(OledBuffer::new()).is_err() {
-        ERROR_CODE.store(1, Ordering::Relaxed);
+        ERROR_CODE.store(11, Ordering::Relaxed);
     }
     if BUFFER_FROM_DISPLAY.try_send(OledBuffer::new()).is_err() {
-        ERROR_CODE.store(2, Ordering::Relaxed);
+        ERROR_CODE.store(12, Ordering::Relaxed);
     }
 
     // Core1起動
@@ -211,15 +232,15 @@ fn main() -> ! {
             executor1.run(|spawner| {
                 match core1_led_task(led) {
                     Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_CODE.store(10, Ordering::Relaxed),
+                    Err(_) => ERROR_CODE.store(21, Ordering::Relaxed),
                 }
                 match core1_i2c_task(i2c) {
                     Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_CODE.store(11, Ordering::Relaxed),
+                    Err(_) => ERROR_CODE.store(22, Ordering::Relaxed),
                 }
                 match core1_oled_ui_task(switch1, switch2) {
                     Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_CODE.store(12, Ordering::Relaxed),
+                    Err(_) => ERROR_CODE.store(23, Ordering::Relaxed),
                 }
             });
         },
@@ -233,23 +254,23 @@ fn main() -> ! {
     executor0.run(|spawner| {
         match qubit_touch_task(sender) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(20, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(31, Ordering::Relaxed),
         }
         match usb_task(usb) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(21, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(32, Ordering::Relaxed),
         }
         match midi_rx_task(receiver) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(22, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(33, Ordering::Relaxed),
         }
         match ringled_task(common, sm0, p.DMA_CH0, p.PIN_26, ws2812_program) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(23, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(34, Ordering::Relaxed),
         }
         match adc_task(adc, adc_a1, adc_a2, adc_change, adc_dma) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(24, Ordering::Relaxed),
+            Err(_) => ERROR_CODE.store(35, Ordering::Relaxed),
         }
     });
 }
@@ -294,7 +315,7 @@ async fn ringled_task(
         // バグ対策: NeoPixel書き込みが固着してもタスク全体が停止しないようタイムアウト保護
         let write_result = with_timeout(Duration::from_millis(8), ws2812.write(&data)).await;
         if write_result.is_err() {
-            ERROR_CODE.store(34, Ordering::Relaxed);
+            ERROR_CODE.store(45, Ordering::Relaxed);
         }
         ticker.next().await;
     }
@@ -319,7 +340,7 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             *idx += 1;
         } else {
             // バッファオーバーフローの場合はエラーカウントをインクリメント
-            ERROR_CODE.store(30, Ordering::Relaxed);
+            ERROR_CODE.store(41, Ordering::Relaxed);
         }
     });
 
@@ -369,17 +390,17 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
                 .await;
                 if result.is_err() {
                     // タイムアウトまたは送信エラー（USB未接続時など）
-                    ERROR_CODE.store(31, Ordering::Relaxed);
+                    ERROR_CODE.store(42, Ordering::Relaxed);
                 }
                 // バグ対策: RingLEDキュー満杯でCore0全体が停止しないよう非ブロッキング送信にする
                 if RINGLED_MESSAGE.try_send((packet.0, packet.3)).is_err() {
-                    ERROR_CODE.store(33, Ordering::Relaxed);
+                    ERROR_CODE.store(44, Ordering::Relaxed);
                 }
             }
             *send_index.borrow_mut() = 0;
         } else {
             // バッファオーバーフロー
-            ERROR_CODE.store(32, Ordering::Relaxed);
+            ERROR_CODE.store(43, Ordering::Relaxed);
             *send_index.borrow_mut() = 0;
         }
         qt.lighten_leds(|_location, _intensity| {
@@ -426,7 +447,7 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
                                     .try_send((constants::RINGLED_CMD_RX_ON, note as f32))
                                     .is_err()
                                 {
-                                    ERROR_CODE.store(41, Ordering::Relaxed);
+                                    ERROR_CODE.store(51, Ordering::Relaxed);
                                 }
                             } else {
                                 // バグ対策: RingLEDキュー満杯でもmidi_rx_taskを止めない
@@ -434,7 +455,7 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
                                     .try_send((constants::RINGLED_CMD_RX_OFF, note as f32))
                                     .is_err()
                                 {
-                                    ERROR_CODE.store(41, Ordering::Relaxed);
+                                    ERROR_CODE.store(52, Ordering::Relaxed);
                                 }
                             }
                         }
@@ -445,7 +466,7 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
                                 .try_send((constants::RINGLED_CMD_RX_OFF, note as f32))
                                 .is_err()
                             {
-                                ERROR_CODE.store(41, Ordering::Relaxed);
+                                ERROR_CODE.store(53, Ordering::Relaxed);
                             }
                         }
                     }
@@ -453,7 +474,7 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
             }
             Err(_e) => {
                 // エラーカウント
-                ERROR_CODE.store(40, Ordering::Relaxed);
+                ERROR_CODE.store(54, Ordering::Relaxed);
             }
         }
     }
@@ -465,19 +486,38 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
 #[embassy_executor::task]
 async fn core1_led_task(mut led: Output<'static>) {
     loop {
-        let code = ERROR_CODE.load(Ordering::Relaxed); // エラーコードを読み取るだけで、実際の値は使用しない
+        let code = ERROR_CODE.load(Ordering::Relaxed);
         if code != 0 {
-            // エラーコードが0でない場合は、点滅パターンを変える（例: 点灯時間を長くする）
-            led.set_high();
-            Timer::after_millis(100).await;
-            led.set_low();
-            Timer::after_millis(200).await;
+            // エラーコードは2桁表示に制限して、十の位→一の位の順で点滅する
+            let code_2digit = code.min(99);
+            let tens = code_2digit / 10;
+            let ones = code_2digit % 10;
+
+            for _ in 0..tens {
+                led.set_low();
+                Timer::after_millis(100).await;
+                led.set_high();
+                Timer::after_millis(100).await;
+            }
+
+            // 十の位と一の位の区切り
+            Timer::after_millis(400).await;
+
+            for _ in 0..ones {
+                led.set_low();
+                Timer::after_millis(100).await;
+                led.set_high();
+                Timer::after_millis(100).await;
+            }
+
+            // 次の表示シーケンスまで待機
+            Timer::after_millis(1200).await;
         } else {
             // 正常時の点滅パターン
-            led.set_high();
-            Timer::after_millis(100).await;
             led.set_low();
-            Timer::after_millis(900).await;
+            Timer::after_millis(500).await;
+            led.set_high();
+            Timer::after_millis(500).await;
         }
     }
 }
@@ -522,7 +562,7 @@ async fn adc_task(
                 }
             }
             Err(_) => {
-                ERROR_CODE.store(60, Ordering::Relaxed);
+                ERROR_CODE.store(61, Ordering::Relaxed);
             }
         }
         // AD処理完了後に状態を切り替え
@@ -562,12 +602,12 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         // OLED更新:UIタスクから描画済みバッファを受信（非ブロッキング）
         if let Ok(buffer) = BUFFER_TO_DISPLAY.try_receive() {
             if oled.flush_buffer(&buffer, &mut i2c).is_err() {
-                ERROR_CODE.store(51, Ordering::Relaxed);
+                ERROR_CODE.store(72, Ordering::Relaxed);
             }
 
             // バッファを返却
             if BUFFER_FROM_DISPLAY.try_send(buffer).is_err() {
-                ERROR_CODE.store(52, Ordering::Relaxed);
+                ERROR_CODE.store(73, Ordering::Relaxed);
             }
         }
 
@@ -635,6 +675,8 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
                     (WORK_MODE.load(Ordering::Relaxed) + 1) % 2,
                     Ordering::Relaxed,
                 ); // 動作モードを切り替え
+                // 設定変更時にエラーコードをリセットする
+                ERROR_CODE.store(0, Ordering::Relaxed);
             } else if ui_page == 0 {
                 ui_page = 3;
             } else {
