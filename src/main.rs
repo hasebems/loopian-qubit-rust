@@ -12,7 +12,7 @@ mod touch;
 mod ui;
 
 use cortex_m::asm;
-use portable_atomic::{AtomicI32, AtomicU8, AtomicU16, AtomicU64, Ordering};
+use portable_atomic::{AtomicI32, AtomicU32, AtomicU8, AtomicU16, AtomicU64, Ordering};
 use static_cell::StaticCell;
 
 use embassy_executor::Executor;
@@ -36,6 +36,8 @@ use embassy_rp::pio_programs::ws2812::PioWs2812Program;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_usb::class::midi::{MidiClass, Receiver, Sender};
 use embassy_usb::{Builder, Config};
+
+use crate::constants::*;
 
 bind_interrupts!(struct Irqs {
     ADC_IRQ_FIFO => AdcInterruptHandler;
@@ -127,10 +129,11 @@ pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
 pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）
-pub static AD_VALUE1: AtomicI32 = AtomicI32::new(0); // ADCの値(A0)
-pub static AD_VALUE2: AtomicI32 = AtomicI32::new(0); // ADCの値(A1)
-pub static AD_VALUE3: AtomicI32 = AtomicI32::new(0); // ADCの値(B0)
-pub static AD_VALUE4: AtomicI32 = AtomicI32::new(0); // ADCの値(B1)
+pub static AD_VALUE0: AtomicU32 = AtomicU32::new(0); // ADCの値(A0)
+pub static AD_VALUE1: AtomicU32 = AtomicU32::new(0); // ADCの値(A1)
+pub static AD_VALUE2: AtomicU32 = AtomicU32::new(0); // ADCの値(B0)
+pub static AD_VALUE3: AtomicU32 = AtomicU32::new(0); // ADCの値(B1)
+pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果
 pub static WORK_MODE: AtomicU8 = AtomicU8::new(0); // 動作モード（Piano/Violin）
 
 // タッチセンサの生データ格納用（16bit/key）
@@ -535,8 +538,11 @@ async fn adc_task(
     mut adc_dma: embassy_rp::dma::Channel<'static>,
 ) {
     let mut channels = [adc_a1, adc_a2];
-    let mut samples = [0u16; 2];
+    let mut ad_value = [0u16; 2];
     let mut a0b0_available = true;
+    let mut adc_counter = 0u32;
+    let mut sums = [0u64; MAX_ADC_CHANNELS];
+    let mut samples = [0u32; MAX_ADC_CHANNELS];
 
     loop {
         // multiplexer の切り替え
@@ -546,20 +552,24 @@ async fn adc_task(
             adc_change.set_high();
         }
 
-        // サンプリング開始前に少し待機（センサの安定化などのため）
-        Timer::after_millis(2).await;
+        // マルチプレクサのセットルタイムと ADC読み込み準備時間を確保
+        Timer::after_millis(5).await; // 1sensorあたり10msec
 
         match adc
-            .read_many_multichannel(&mut channels, &mut samples, 0, &mut adc_dma)
+            .read_many_multichannel(&mut channels, &mut ad_value, 0, &mut adc_dma)
             .await
         {
             Ok(()) => {
                 if a0b0_available {
-                    AD_VALUE1.store(samples[0] as i32, Ordering::Relaxed);
-                    AD_VALUE3.store(samples[1] as i32, Ordering::Relaxed);
+                    samples[0] = ad_value[0] as u32;
+                    samples[2] = ad_value[1] as u32;
+                    AD_VALUE0.store(samples[0], Ordering::Relaxed);
+                    AD_VALUE2.store(samples[2], Ordering::Relaxed);
                 } else {
-                    AD_VALUE2.store(samples[0] as i32, Ordering::Relaxed);
-                    AD_VALUE4.store(samples[1] as i32, Ordering::Relaxed);
+                    samples[1] = ad_value[0] as u32;
+                    samples[3] = ad_value[1] as u32;
+                    AD_VALUE1.store(samples[1], Ordering::Relaxed);
+                    AD_VALUE3.store(samples[3], Ordering::Relaxed);
                 }
             }
             Err(_) => {
@@ -568,6 +578,12 @@ async fn adc_task(
         }
         // AD処理完了後に状態を切り替え
         a0b0_available = !a0b0_available;
+
+        // 圧力を計算
+        if a0b0_available {
+            touch::pressure::update_pressure(&samples, &mut sums, adc_counter);
+            adc_counter = adc_counter.wrapping_add(1);
+        }
     }
 }
 
@@ -592,7 +608,7 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
     // OLED初期化
     if oled.init(&mut i2c).is_err() {
-        ERROR_CODE.store(50, Ordering::Relaxed);
+        ERROR_CODE.store(71, Ordering::Relaxed);
     }
 
     let start = Instant::now();

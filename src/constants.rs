@@ -28,3 +28,5 @@ pub const KEYBD_LO: u8 = 21; // A0
 
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
 pub const MAX_TOUCH_POINTS_U8: u8 = MAX_TOUCH_POINTS as u8;
+
+pub const MAX_ADC_CHANNELS: usize = 4; // ADCのチャンネル数

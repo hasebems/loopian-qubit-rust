@@ -12,10 +12,10 @@ use heapless::String;
 
 use crate::devices::ssd1306::OledBuffer;
 use crate::{
+    AD_VALUE0,
     AD_VALUE1,
     AD_VALUE2,
     AD_VALUE3,
-    AD_VALUE4,
     ELAPSED_TIME,
     POINT0,
     POINT1,
@@ -27,6 +27,7 @@ use crate::{
     TOUCH3,
     //ERROR_CODE,
     WORK_MODE,
+    PRESSURE,
 };
 
 pub struct GraphicsDisplay {
@@ -120,28 +121,34 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
         .draw(buffer);
 
     let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
 
     let mut text1: String<32> = String::new();
     let _ = write!(text1, "Cntr: {}", counter);
     let _ = Text::new(&text1, Point::new(6, 16), style_big).draw(buffer);
 
-    let ad_value1 = AD_VALUE1.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, 0, ad_value1 as u16);
-    let ad_value2 = AD_VALUE2.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, 1, ad_value2 as u16);
-    let ad_value3 = AD_VALUE3.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, 2, ad_value3 as u16);
-    let ad_value4 = AD_VALUE4.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, 3, ad_value4 as u16);
+    let ad_value1 = AD_VALUE0.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, 0, ad_value1);
+    let ad_value2 = AD_VALUE1.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, 1, ad_value2);
+    let ad_value3 = AD_VALUE2.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, 2, ad_value3);
+    let ad_value4 = AD_VALUE3.load(core::sync::atomic::Ordering::Relaxed);
+    draw_bar(buffer, 3, ad_value4);
 
     text1.clear();
     let _ = write!(text1, "Prs:");
     let _ = Text::new(&text1, Point::new(6, 32), style_big).draw(buffer);
 
+    let pressure = PRESSURE.load(core::sync::atomic::Ordering::Relaxed);
+    text1.clear();
+    let _ = write!(text1, "Calculated Prs: {}", pressure);
+    let _ = Text::new(&text1, Point::new(6, 44), style_small).draw(buffer);
+
     let elapsed_time = ELAPSED_TIME.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
     let _ = write!(text1, "Time: {}", elapsed_time);
-    let _ = Text::new(&text1, Point::new(6, 48), style_big).draw(buffer);
+    let _ = Text::new(&text1, Point::new(6, 56), style_small).draw(buffer);
 }
 
 fn display2(buffer: &mut OledBuffer) {
@@ -261,13 +268,13 @@ fn display4(buffer: &mut OledBuffer, counter: u32) {
     }
 }
 
-pub fn draw_bar(buffer: &mut OledBuffer, number: i32, value: u16) {
+pub fn draw_bar(buffer: &mut OledBuffer, number: i32, value: u32) {
     const BAR_START_X: i32 = 54;
     let start_y: i32 = 24 + number * 2;
     const BAR_WIDTH: u32 = 64;
     const BAR_HEIGHT: u32 = 2;
-    const BAR_VALUE_MIN: u16 = 0;
-    const BAR_VALUE_MAX: u16 = 4095;
+    const BAR_VALUE_MIN: u32 = 0;
+    const BAR_VALUE_MAX: u32 = 4095;
 
     let fill_style = PrimitiveStyle::with_fill(BinaryColor::On);
     let clamped = value.clamp(BAR_VALUE_MIN, BAR_VALUE_MAX);
