@@ -12,7 +12,7 @@ mod touch;
 mod ui;
 
 use cortex_m::asm;
-use portable_atomic::{AtomicI32, AtomicU32, AtomicU8, AtomicU16, AtomicU64, Ordering};
+use portable_atomic::{AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
 
 use embassy_executor::Executor;

@@ -21,13 +21,13 @@ use crate::{
     POINT1,
     POINT2,
     POINT3,
+    PRESSURE,
     TOUCH0,
     TOUCH1,
     TOUCH2,
     TOUCH3,
     //ERROR_CODE,
     WORK_MODE,
-    PRESSURE,
 };
 
 pub struct GraphicsDisplay {
@@ -278,8 +278,8 @@ pub fn draw_bar(buffer: &mut OledBuffer, number: i32, value: u32) {
 
     let fill_style = PrimitiveStyle::with_fill(BinaryColor::On);
     let clamped = value.clamp(BAR_VALUE_MIN, BAR_VALUE_MAX);
-    let range = u32::from(BAR_VALUE_MAX.saturating_sub(BAR_VALUE_MIN));
-    let numerator = u32::from(clamped.saturating_sub(BAR_VALUE_MIN));
+    let range = BAR_VALUE_MAX.saturating_sub(BAR_VALUE_MIN);
+    let numerator = clamped.saturating_sub(BAR_VALUE_MIN);
     let filled_width = if range == 0 {
         0
     } else {
