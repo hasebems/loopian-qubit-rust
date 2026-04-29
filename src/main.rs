@@ -159,7 +159,8 @@ fn main() -> ! {
     let p = embassy_rp::init(Default::default());
 
     // LEDピン
-    let led = Output::new(p.PIN_25, Level::Low);
+    // XIAO RP系の内蔵LEDは Active Low 想定: High=消灯, Low=点灯
+    let led = Output::new(p.PIN_25, Level::High);
 
     // Switchピン
     let switch1 = Input::new(p.PIN_2, Pull::Up);
