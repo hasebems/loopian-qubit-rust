@@ -280,11 +280,7 @@ pub fn draw_bar(buffer: &mut OledBuffer, number: i32, value: u32) {
     let clamped = value.clamp(BAR_VALUE_MIN, BAR_VALUE_MAX);
     let range = BAR_VALUE_MAX.saturating_sub(BAR_VALUE_MIN);
     let numerator = clamped.saturating_sub(BAR_VALUE_MIN);
-    let filled_width = if range == 0 {
-        0
-    } else {
-        (numerator * BAR_WIDTH) / range
-    };
+    let filled_width = (numerator * BAR_WIDTH).checked_div(range).unwrap_or(0);
 
     if filled_width > 0 {
         let fill = Rectangle::new(

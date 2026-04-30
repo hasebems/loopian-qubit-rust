@@ -56,8 +56,26 @@ impl ReadTouch {
 
             let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
             if let Ok(()) = at42.read_6key(i2c, &mut raw_data, false).await {
-                let mut sid = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
-                for rawd in raw_data.iter().take(constants::AT42QT_KEYS_PER_DEVICE) {
+                //let mut sid = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
+                let start_ch = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
+                for (sid, rawd) in
+                    (start_ch..).zip(raw_data.iter().take(constants::AT42QT_KEYS_PER_DEVICE))
+                {
+                    let mut raw = *rawd;
+                    let old = self.raw_value[sid];
+                    if old != 0 && raw > old + 200 {
+                        raw -= 256; // hiからloを読む間に数値が変化した場合の対策
+                    }
+                    self.raw_value[sid] = raw;
+                    data[sid] = raw.saturating_sub(self.refference[sid]);
+                    if data[sid] > 10 {
+                        POINT0.store(sid as u16, Ordering::Relaxed);
+                        POINT1.store(self.refference[sid], Ordering::Relaxed);
+                        POINT2.store(old, Ordering::Relaxed);
+                        POINT3.store(raw, Ordering::Relaxed);
+                    }
+                }
+                /*for rawd in raw_data.iter().take(constants::AT42QT_KEYS_PER_DEVICE) {
                     let mut raw = *rawd;
                     let old = self.raw_value[sid];
                     if old != 0 && raw > old + 200 {
@@ -72,7 +90,7 @@ impl ReadTouch {
                         POINT3.store(raw, Ordering::Relaxed);
                     }
                     sid += 1;
-                }
+                }*/
             }
             // PCA9544のチャネルが最後のときに切断する
             if ch % constants::PCA9544_NUM_CHANNELS == constants::PCA9544_NUM_CHANNELS - 1 {
