@@ -2,7 +2,8 @@ use crate::PRESSURE;
 use crate::constants::*;
 use portable_atomic::Ordering;
 
-const PRESSURE_THRESHOLD: u32 = 32;
+const PRESSURE_THRESHOLD: u32 = 100;
+const ADJUSTMENT_TABLE: [u32; 4] = [256, 160, 256, 0]; // x/256
 
 pub fn update_pressure(
     samples: &[u32; MAX_ADC_CHANNELS],
@@ -24,9 +25,11 @@ pub fn update_pressure(
 
         // 差分値がある一定値以上なら印加圧力とみなし、４つのセンサーの圧力を加算して保存
         let mut total_pressure = 0u32;
-        for diff in diffs.iter() {
-            if *diff >= PRESSURE_THRESHOLD {
-                total_pressure = total_pressure.saturating_add(*diff);
+        for (i, diff) in diffs.iter().enumerate() {
+            let adj_num = ADJUSTMENT_TABLE[i] * *diff / 256; // 調整値を計算
+            if adj_num >= PRESSURE_THRESHOLD {
+                let pressure = (adj_num * adj_num) / 100; // 差分値の二乗を圧力とする
+                total_pressure = total_pressure.saturating_add(pressure);
             }
         }
         PRESSURE.store(total_pressure, Ordering::Relaxed);

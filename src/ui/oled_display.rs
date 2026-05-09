@@ -142,7 +142,7 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
 
     let pressure = PRESSURE.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Calculated Prs: {}", pressure);
+    let _ = write!(text1, "Calc.Prs: {:>6}", pressure);
     let _ = Text::new(&text1, Point::new(6, 44), style_small).draw(buffer);
 
     let elapsed_time = ELAPSED_TIME.load(core::sync::atomic::Ordering::Relaxed);
