@@ -180,7 +180,7 @@ fn main() -> ! {
 
     // USB Driver
     let driver = Driver::new(p.USB, Irqs);
-    let mut config = Config::new(0x1209, 0x3690); // Vendor ID / Product ID
+    let mut config = Config::new(0x1209, 0x3691); // Vendor ID / Product ID
     config.manufacturer = Some("Kigakudoh");
     config.product = Some("Loopian::QUBIT");
     config.serial_number = Some("000000");
