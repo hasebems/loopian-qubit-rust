@@ -116,13 +116,13 @@ pub fn update_pressure(
     adc_counter: u32,
 ) {
     if adc_counter > 100 {
-        // 4箇所のセンサーおのおの、前回までの積算値から平均値を計算する
+        // センサーおのおの、前回までの積算値から平均値を計算する
         let mut averages = [0u32; MAX_ADC_CHANNELS];
         for i in 0..MAX_ADC_CHANNELS {
             averages[i] = (sums[i] / adc_counter as u64) as u32;
         }
 
-        // 今回の4箇所のサンプルと平均値の差を計算し、サンプル側が大きい場合は0、小さい場合は差分値として保持
+        // 今回のサンプルと平均値の差を計算し、サンプル側が大きい場合は0、小さい場合は差分値として保持
         let mut diffs = [0u32; MAX_ADC_CHANNELS];
         for i in 0..MAX_ADC_CHANNELS {
             diffs[i] = averages[i].saturating_sub(samples[i]);

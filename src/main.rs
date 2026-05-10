@@ -579,15 +579,17 @@ async fn adc_task(
         {
             Ok(()) => {
                 if a0b0_available {
+                    AD_VALUE0.store(ad_value[0] as u32, Ordering::Relaxed);
+                    AD_VALUE2.store(ad_value[1] as u32, Ordering::Relaxed);
                     samples[0] = ad_value[0] as u32;
                     samples[2] = ad_value[1] as u32;
-                    AD_VALUE0.store(samples[0], Ordering::Relaxed);
-                    AD_VALUE2.store(samples[2], Ordering::Relaxed);
                 } else {
+                    AD_VALUE1.store(ad_value[0] as u32, Ordering::Relaxed);
+                    AD_VALUE3.store(ad_value[1] as u32, Ordering::Relaxed);
                     samples[1] = ad_value[0] as u32;
-                    samples[3] = ad_value[1] as u32;
-                    AD_VALUE1.store(samples[1], Ordering::Relaxed);
-                    AD_VALUE3.store(samples[3], Ordering::Relaxed);
+                    if MAX_ADC_CHANNELS > 3 {
+                        samples[3] = ad_value[1] as u32;
+                    }
                 }
             }
             Err(_) => {

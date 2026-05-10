@@ -22,6 +22,8 @@ pub const AT42QT_KEYS_PER_DEVICE: usize = 6; // AT42QT1070
 pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
 pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
+
+pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
 pub const MAX_TOUCH_POINTS_U8: u8 = MAX_TOUCH_POINTS as u8;
 
 pub const MAX_ADC_CHANNELS: usize = 3; // ADCのチャンネル数
