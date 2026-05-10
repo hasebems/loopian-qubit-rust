@@ -372,7 +372,7 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         for (ch, tv) in touch_values.iter().enumerate() {
             qt.set_value(ch, *tv);
         }
-        qt.seek_and_update_touch_point();
+        qt.seek_and_update_touch_point(work_mode);
 
         let idx = *send_index.borrow();
         const MAX_EVENT: usize = 8;

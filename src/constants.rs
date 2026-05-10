@@ -22,14 +22,14 @@ pub const AT42QT_KEYS_PER_DEVICE: usize = 6; // AT42QT1070
 pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
 pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
+pub const MAX_TOUCH_POINTS_U8: u8 = MAX_TOUCH_POINTS as u8;
+
+pub const MAX_ADC_CHANNELS: usize = 3; // ADCのチャンネル数
 
 // MIDI
 pub const KEYBD_LO: u8 = 21; // A0
 pub const _MIDI_CH_PIANO: u8 = 0; // ピアノ用MIDIチャンネル
 pub const MIDI_CH_VIOLIN: u8 = 1; // バイオリン用MIDIチャンネル
 pub const MIDI_CH_FLOW: u8 = 12;
-
-pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
-pub const MAX_TOUCH_POINTS_U8: u8 = MAX_TOUCH_POINTS as u8;
-
-pub const MAX_ADC_CHANNELS: usize = 4; // ADCのチャンネル数
+pub const PIANO_OFFSET: u8 = KEYBD_LO - 4;
+pub const VIOLIN_OFFSET: u8 = 55; // バイオリンモードのMIDIノートオフセット

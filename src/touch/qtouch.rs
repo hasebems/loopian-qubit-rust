@@ -3,7 +3,7 @@
 //  Released under the MIT license
 //  https://opensource.org/licenses/mit-license.php
 //
-use crate::constants;
+use crate::constants::{self, PIANO_OFFSET, VIOLIN_OFFSET};
 use crate::{TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 
 // =========================================================
@@ -15,8 +15,13 @@ pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec �
 pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
 pub const HISTERESIS: f32 = 0.7; // Hysteresis value for touch point detection
 
+type NewLocationFn = fn(u8, f32) -> Result<u8, u8>;
+
 const INIT_VAL: f32 = 100.0; // Invalid location initially
 const RELEASE_WAITING_TIME: u32 = 5; // Number of cycles to wait before considering a touch point released
+
+const NEW_NOTE: u8 = 0xff;
+const TOUCH_POINT_ERROR: u8 = 0xfe;
 
 // =========================================================
 //      Pad Class
@@ -87,16 +92,14 @@ where
     is_touched: bool,
     touching_time: u32,
     no_update_time: u32,
+    offset_note: u8, // MIDI Note offset
+    new_location: NewLocationFn,
     midi_callback: Option<F>, // MIDI callback function
 }
 impl<F> TouchPoint<F>
 where
     F: Fn(u8, u8, u8, f32) + Clone,
 {
-    const NEW_NOTE: u8 = 0xff;
-    const TOUCH_POINT_ERROR: u8 = 0xfe;
-    const OFFSET_NOTE: u8 = constants::KEYBD_LO - 4;
-
     /// Constructor は起動時に最大数分呼ばれる
     fn new(id: usize) -> Self {
         TouchPoint {
@@ -108,13 +111,23 @@ where
             is_touched: false,
             touching_time: 0,
             no_update_time: 0,
+            offset_note: PIANO_OFFSET,
+            new_location: Self::new_location_piano,
             midi_callback: None,
         }
     }
 
     /// 新しいタッチポイントを作成する
-    fn new_touch(&mut self, location: f32, intensity: i16, callback: F) {
-        if let Ok(crnt_note) = self.new_location(Self::NEW_NOTE, location) {
+    fn new_touch(&mut self, location: f32, intensity: i16, callback: F, work_mode: u8) {
+        if work_mode == 1 {
+            self.new_location = Self::new_location_violin;
+            self.offset_note = VIOLIN_OFFSET;
+        } else {
+            self.new_location = Self::new_location_piano;
+            self.offset_note = PIANO_OFFSET;
+        }
+        let new_note = (self.new_location)(NEW_NOTE, location);
+        if let Ok(crnt_note) = new_note {
             self.center_location = location;
             self.real_crnt_note = crnt_note; // Set the current note
             self.intensity = intensity;
@@ -126,7 +139,7 @@ where
             if let Some(ref midi_callback) = self.midi_callback {
                 midi_callback(
                     constants::RINGLED_CMD_TX_ON | self.id as u8,
-                    self.real_crnt_note + Self::OFFSET_NOTE,
+                    self.real_crnt_note + self.offset_note,
                     self.intensity_to_velocity(self.intensity),
                     self.center_location,
                 );
@@ -147,20 +160,20 @@ where
         self.intensity = intensity as i16;
         self.is_updated = true;
         self.is_touched = true;
-        if let Ok(updated_note) = self.new_location(self.real_crnt_note, location) {
+        if let Ok(updated_note) = (self.new_location)(self.real_crnt_note, location) {
             // MIDI Note On & Off
             if let Some(ref midi_callback) = self.midi_callback
                 && updated_note != self.real_crnt_note
             {
                 midi_callback(
                     constants::RINGLED_CMD_TX_ON | self.id as u8,
-                    updated_note + Self::OFFSET_NOTE,
+                    updated_note + self.offset_note,
                     self.intensity_to_velocity(self.intensity),
                     self.center_location,
                 );
                 midi_callback(
                     constants::RINGLED_CMD_TX_MOVED | self.id as u8, // Note Off と同じ
-                    self.real_crnt_note + Self::OFFSET_NOTE,
+                    self.real_crnt_note + self.offset_note,
                     0x40,
                     self.center_location,
                 );
@@ -179,7 +192,7 @@ where
         if let Some(ref midi_callback) = self.midi_callback {
             midi_callback(
                 constants::RINGLED_CMD_TX_OFF | self.id as u8,
-                self.real_crnt_note + Self::OFFSET_NOTE,
+                self.real_crnt_note + self.offset_note,
                 0x40,
                 self.center_location,
             );
@@ -208,7 +221,7 @@ where
     }
     //private:
     /// crnt_note : 0-(MAX_SENS-1) 現在の位置、NEW_NOTE は新規ノート
-    fn new_location(&self, crnt_note: u8, location: f32) -> Result<u8, u8> {
+    fn new_location_piano(crnt_note: u8, location: f32) -> Result<u8, u8> {
         // Manual round implementation for no_std
         fn round(x: f32) -> f32 {
             if x >= 0.0 {
@@ -219,7 +232,7 @@ where
         }
 
         let location = location.clamp(0.0, (MAX_PADS - 1) as f32); // Clamp location to valid range
-        if crnt_note == Self::NEW_NOTE {
+        if crnt_note == NEW_NOTE {
             Ok(round(location) as u8) // Round to nearest integer for MIDI note
         } else if crnt_note < MAX_PADS as u8 {
             if (location > (crnt_note as f32 + HISTERESIS))
@@ -232,7 +245,31 @@ where
             }
         } else {
             // Invalid note number, return TOUCH_POINT_ERROR
-            Err(Self::TOUCH_POINT_ERROR)
+            Err(TOUCH_POINT_ERROR)
+        }
+    }
+    /// crnt_note : 0-(MAX_SENS-1) 現在の位置、NEW_NOTE は新規ノート
+    fn new_location_violin(crnt_note: u8, location: f32) -> Result<u8, u8> {
+        // Manual round implementation for no_std
+        fn round(x: f32) -> u8 {
+            (x + 0.5) as u8
+        }
+
+        let location = location.clamp(0.0, (MAX_PADS - 1) as f32) / 2.0;
+        if crnt_note == NEW_NOTE {
+            Ok(round(location)) // Round to nearest integer for MIDI note
+        } else if (0..(MAX_PADS as u8 / 2)).contains(&crnt_note) {
+            if (location > (crnt_note as f32 + HISTERESIS))
+                || (location < (crnt_note as f32 - HISTERESIS))
+            {
+                // histeresis
+                Ok(round(location))
+            } else {
+                Ok(crnt_note) // No change in note
+            }
+        } else {
+            // Invalid note number, return TOUCH_POINT_ERROR
+            Err(TOUCH_POINT_ERROR)
         }
     }
     fn intensity_to_velocity(&self, intensity: i16) -> u8 {
@@ -319,7 +356,7 @@ where
         }
     }
     /// 差分の符号が変化した時、その位置の値がある一定の値以上なら、そこをタッチポイントとする
-    pub fn seek_and_update_touch_point(&mut self) {
+    pub fn seek_and_update_touch_point(&mut self, work_mode: u8) {
         let mut temp_touch_point: [(f32, f32, i16); constants::MAX_TOUCH_POINTS] =
             [(INIT_VAL, INIT_VAL, 0); constants::MAX_TOUCH_POINTS];
         let mut temp_index = 0;
@@ -331,7 +368,7 @@ where
         self.decide_touch_point(&mut temp_touch_point, &mut temp_index);
 
         // 3: 前回値と比較し、近いものを紐付け、タッチポイントを更新または追加する
-        self.collate_touch_point(&temp_touch_point, temp_index);
+        self.collate_touch_point(&temp_touch_point, temp_index, work_mode);
 
         // 4: 更新のなかったタッチポイントを削除する
         self.erase_touch_point();
@@ -399,6 +436,7 @@ where
         &mut self,
         temp_touch_point: &[(f32, f32, i16); constants::MAX_TOUCH_POINTS],
         temp_index: usize,
+        work_mode: u8,
     ) {
         let mut display_index: [bool; constants::MAX_TOUCH_POINTS] =
             [false; constants::MAX_TOUCH_POINTS];
@@ -435,7 +473,7 @@ where
                 continue; // Move to the next temp touch point
             }
             // 近いタッチポイントがない場合は、新しいタッチポイントを作成する
-            self.new_touch_point(location, intensity as u16);
+            self.new_touch_point(location, intensity as u16, work_mode);
         }
 
         // RingLEDの表示を更新する必要のあるタッチポイントのIDを収集し、まとめて表示を更新する
@@ -479,14 +517,14 @@ where
             led_callback(-1.0, 0);
         }
     }
-    fn new_touch_point(&mut self, location: f32, intensity: u16) {
+    fn new_touch_point(&mut self, location: f32, intensity: u16, work_mode: u8) {
         let cb = self.midi_callback.clone();
         let id = self
             .touch_points
             .iter_mut()
             .find(|tp| !tp.is_touched())
             .map(|tp| {
-                tp.new_touch(location, intensity as i16, cb);
+                tp.new_touch(location, intensity as i16, cb, work_mode);
                 tp.id
             });
         if let Some(id) = id {
