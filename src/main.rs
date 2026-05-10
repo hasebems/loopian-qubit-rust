@@ -331,9 +331,12 @@ async fn ringled_task(
 #[embassy_executor::task]
 async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
     use core::cell::RefCell;
+    use touch::pressure::{PressureMidiState, send_pressure_cc11_if_needed};
     use touch::qtouch::QubitTouch;
+
     let send_buffer = RefCell::new([TouchEvent::default(); 8]);
     let send_index = RefCell::new(0);
+    let mut pressure_midi = PressureMidiState::new();
     let mut qt = QubitTouch::new(|status, note, velocity, location| {
         // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信
         let packet = TouchEvent(status, note, velocity, location);
@@ -357,6 +360,7 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         Timer::after(embassy_time::Duration::from_millis(10)).await;
         // ticker.next().await; // タッチスキャンはtickerに合わせて実行
         let start = Instant::now();
+        let work_mode = WORK_MODE.load(Ordering::Relaxed);
 
         // タッチセンサの生データを取得してQubitTouchにセット
         // ロック保持時間を最小化し、以降の await をロック外で実行する
@@ -369,6 +373,7 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             qt.set_value(ch, *tv);
         }
         qt.seek_and_update_touch_point();
+
         let idx = *send_index.borrow();
         const MAX_EVENT: usize = 8;
         if idx == 0 {
@@ -382,10 +387,15 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             }
             for packet in packets.iter().take(idx) {
                 let status = packet.0 & 0xf0; // コマンド部分
-                let status = if status == constants::RINGLED_CMD_TX_MOVED {
-                    0x8c // 移動イベントはNote Offとして扱う
+                let midi_channel = if work_mode == 0 {
+                    constants::MIDI_CH_FLOW
                 } else {
-                    status | 0x0c
+                    constants::MIDI_CH_VIOLIN
+                };
+                let status = if status == constants::RINGLED_CMD_TX_MOVED {
+                    0x80 | midi_channel // 移動イベントはNote Offとして扱う
+                } else {
+                    status | midi_channel
                 };
                 let result = with_timeout(
                     Duration::from_millis(5),
@@ -407,6 +417,14 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             ERROR_CODE.store(43, Ordering::Relaxed);
             *send_index.borrow_mut() = 0;
         }
+
+        if send_pressure_cc11_if_needed(&mut sender, &mut pressure_midi, work_mode)
+            .await
+            .is_err()
+        {
+            ERROR_CODE.store(42, Ordering::Relaxed);
+        }
+
         qt.lighten_leds(|_location, _intensity| {
             // LEDの明るさをタッチの強さに応じて変化させる
             //WHITE_LEVEL.store(intensity as u8, Ordering::Relaxed);

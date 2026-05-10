@@ -218,13 +218,7 @@ where
             }
         }
 
-        let location = if location < 0.0 {
-            0.0 // Ensure location is non-negative
-        } else if location >= (MAX_PADS - 1) as f32 {
-            (MAX_PADS - 1) as f32 // Ensure location is within bounds
-        } else {
-            location
-        };
+        let location = location.clamp(0.0, (MAX_PADS - 1) as f32); // Clamp location to valid range
         if crnt_note == Self::NEW_NOTE {
             Ok(round(location) as u8) // Round to nearest integer for MIDI note
         } else if crnt_note < MAX_PADS as u8 {

@@ -23,8 +23,11 @@ pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usiz
 pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
 
-// MIDI Note Number
+// MIDI
 pub const KEYBD_LO: u8 = 21; // A0
+pub const _MIDI_CH_PIANO: u8 = 0; // ピアノ用MIDIチャンネル
+pub const MIDI_CH_VIOLIN: u8 = 1; // バイオリン用MIDIチャンネル
+pub const MIDI_CH_FLOW: u8 = 12;
 
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
 pub const MAX_TOUCH_POINTS_U8: u8 = MAX_TOUCH_POINTS as u8;
