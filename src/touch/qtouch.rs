@@ -29,8 +29,6 @@ const TOUCH_POINT_ERROR: u8 = 0xfe;
 #[derive(Copy, Clone, Debug)]
 pub struct Pad {
     mv_avg_value: u16, // 移動平均(MAX_MOVING_AVERAGEで割らない)
-    diff_from_before: i16,
-    top_flag: bool,
     past_value: [u16; Pad::MAX_MOVING_AVERAGE],
     past_index: usize,
 }
@@ -40,8 +38,6 @@ impl Pad {
     fn new() -> Self {
         Pad {
             mv_avg_value: 0,
-            diff_from_before: 0,
-            top_flag: false,
             past_value: [0; Pad::MAX_MOVING_AVERAGE],
             past_index: 0,
         }
@@ -56,22 +52,8 @@ impl Pad {
     fn get_crnt(&self) -> u16 {
         self.mv_avg_value
     }
-    fn set_diff_from_before(&mut self, value_before: u16) -> i16 {
-        self.diff_from_before = value_before as i16 - self.mv_avg_value as i16;
-        self.diff_from_before
-    }
-    fn _diff_from_before(&self) -> i16 {
-        self.diff_from_before
-    }
-    fn note_top_flag(&mut self) {
-        self.top_flag = true;
-    }
-    fn _is_top_flag(&self) -> bool {
-        self.top_flag
-    }
-    /// Reset top flag
-    fn _clear_top_flag(&mut self) {
-        self.top_flag = false;
+    fn diff_from_before(&mut self, value_before: u16) -> i16 {
+        value_before as i16 - self.mv_avg_value as i16
     }
 }
 
@@ -383,13 +365,12 @@ where
             // Get previous pad value first
             let prev_value = self.proper_pad(i as i32 - 1).get_crnt();
             // Now get current pad and set diff
-            let diff_after = self.proper_pad(i as i32).set_diff_from_before(prev_value);
+            let diff_after = self.proper_pad(i as i32).diff_from_before(prev_value);
             if (diff_after > 0) && (diff_before < 0) {
                 // - -> + 変化時
                 let value = prev_value; // Note the top flag
                 if value > TOUCH_THRESHOLD {
                     // Example threshold for touch point
-                    self.proper_pad(i as i32 - 1).note_top_flag();
                     temp_touch_point[*temp_index] = (
                         (if i >= 1 { i - 1 } else { i - 1 + MAX_PADS }) as f32,
                         INIT_VAL,
@@ -518,13 +499,13 @@ where
         }
     }
     fn new_touch_point(&mut self, location: f32, intensity: u16, work_mode: u8) {
-        let cb = self.midi_callback.clone();
+        //let cb = self.midi_callback.clone();
         let id = self
             .touch_points
             .iter_mut()
             .find(|tp| !tp.is_touched())
             .map(|tp| {
-                tp.new_touch(location, intensity as i16, cb, work_mode);
+                tp.new_touch(location, intensity as i16, self.midi_callback.clone(), work_mode);
                 tp.id
             });
         if let Some(id) = id {
