@@ -8,9 +8,9 @@ use portable_atomic::Ordering;
 
 const PRESSURE_THRESHOLD: u32 = 100;
 const ADJUSTMENT_TABLE: [u32; 4] = [256, 160, 256, 0]; // x/256
-const PRESSURE_SENSITIVITY: u32 = 25; // 大きいほど反応が悪くなる（MIDI値が低いまま）
+const PRESSURE_SENSITIVITY: u32 = 20; // 大きいほど反応が悪くなる（MIDI値が低いまま）
 const CC11_MIN_VALUE: u8 = 20;
-const CC11_INDEX_MAX: usize = 80;
+const CC11_INDEX_MAX: usize = 100;
 const CC11_SEND_DEADBAND: u8 = 2;
 const CC11_MAX_STEP: u8 = 5;
 const MIDI_CC_CIN: u8 = 0x0b;
@@ -18,10 +18,17 @@ const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
 const MIDI_CC_ALL_SOUND_OFF: u8 = 120;
 const MIDI_CC_EXPRESSION: u8 = 11;
 const CC11_TABLE: [u8; CC11_INDEX_MAX + 1] = [
-    20, 20, 20, 20, 20, 21, 21, 21, 22, 22, 22, 23, 23, 24, 24, 25, 25, 26, 26, 27, 27, 28, 28, 29,
-    30, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
-    53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 75, 76, 78,
-    80, 82, 84, 86, 88, 91, 94, 97, 100,
+    0, 3, 6, 9, 12, 15, 18, 20, 23, 25,
+    28, 30, 32, 34, 36, 38, 40, 42, 44, 45,
+    47, 49, 50, 52, 54, 55, 56, 58, 59, 61,
+    62, 63, 64, 66, 67, 68, 69, 70, 71, 72,
+    73, 74, 75, 76, 77, 78, 79, 80, 81, 82,
+    83, 83, 84, 85, 86, 86, 87, 88, 89, 89,
+    90, 91, 91, 92, 93, 93, 94, 94, 95, 96,
+    96, 97, 97, 98, 98, 99, 100, 100, 101, 101,
+    102, 102, 103, 103, 103, 104, 104, 105, 105, 106,
+    106, 106, 107, 107, 108, 108, 108, 109, 109, 110,
+    110,
 ];
 
 pub struct PressureMidiState {
