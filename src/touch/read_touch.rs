@@ -5,7 +5,7 @@ use portable_atomic::Ordering;
 use crate::TOUCH_RAW_DATA;
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
-use crate::{POINT0, POINT1, POINT2, POINT3};
+use crate::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
 pub struct ReadTouch {
     raw_value: [u16; constants::TOTAL_QT_KEYS],
@@ -67,12 +67,6 @@ impl ReadTouch {
                     }
                     self.raw_value[sid] = raw;
                     data[sid] = raw.saturating_sub(self.refference[sid]);
-                    if data[sid] > 10 {
-                        POINT0.store(sid as u16, Ordering::Relaxed);
-                        POINT1.store(self.refference[sid], Ordering::Relaxed);
-                        POINT2.store(old, Ordering::Relaxed);
-                        POINT3.store(raw, Ordering::Relaxed);
-                    }
                 }
             }
             // PCA9544のチャネルが最後のときに切断する
@@ -108,9 +102,11 @@ impl ReadTouch {
         }
         self.refference_counter = (self.refference_counter + 1) % 12;
 
-        //POINT0.store(self.raw_value[64], Ordering::Relaxed);
-        //POINT1.store(self.raw_value[65], Ordering::Relaxed);
-        //POINT2.store(self.raw_value[66], Ordering::Relaxed);
-        //POINT3.store(self.raw_value[67], Ordering::Relaxed);
+        POINT0.store(self.raw_value[0], Ordering::Relaxed);
+        POINT1.store(self.raw_value[1], Ordering::Relaxed);
+        POINT2.store(self.raw_value[2], Ordering::Relaxed);
+        POINT3.store(self.raw_value[3], Ordering::Relaxed);
+        POINT4.store(self.raw_value[4], Ordering::Relaxed);
+        POINT5.store(self.raw_value[5], Ordering::Relaxed);
     }
 }

@@ -21,6 +21,8 @@ use crate::{
     POINT1,
     POINT2,
     POINT3,
+    POINT4,
+    POINT5,
     PRESSURE,
     TOUCH0,
     TOUCH1,
@@ -164,23 +166,33 @@ fn display2(buffer: &mut OledBuffer) {
 
     let mut text1: String<32> = String::new();
     let p0 = POINT0.load(core::sync::atomic::Ordering::Relaxed);
-    let _ = write!(text1, "Point64: {}", p0);
-    let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
+    let _ = write!(text1, "Point0: {}", p0);
+    let _ = Text::new(&text1, Point::new(6, 10), style_small).draw(buffer);
 
     let p1 = POINT1.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point65: {}", p1);
-    let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
+    let _ = write!(text1, "Point1: {}", p1);
+    let _ = Text::new(&text1, Point::new(6, 20), style_small).draw(buffer);
 
     let p2 = POINT2.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point66: {}", p2);
-    let _ = Text::new(&text1, Point::new(6, 36), style_small).draw(buffer);
+    let _ = write!(text1, "Point2: {}", p2);
+    let _ = Text::new(&text1, Point::new(6, 30), style_small).draw(buffer);
 
     let p3 = POINT3.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Point67: {}", p3);
-    let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
+    let _ = write!(text1, "Point3: {}", p3);
+    let _ = Text::new(&text1, Point::new(6, 40), style_small).draw(buffer);
+
+    let p4 = POINT4.load(core::sync::atomic::Ordering::Relaxed);
+    text1.clear();
+    let _ = write!(text1, "Point4: {}", p4);
+    let _ = Text::new(&text1, Point::new(6, 50), style_small).draw(buffer);
+
+    let p5 = POINT5.load(core::sync::atomic::Ordering::Relaxed);
+    text1.clear();
+    let _ = write!(text1, "Point5: {}", p5);
+    let _ = Text::new(&text1, Point::new(6, 60), style_small).draw(buffer);
 }
 
 fn display3(buffer: &mut OledBuffer) {

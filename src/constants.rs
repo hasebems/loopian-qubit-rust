@@ -15,8 +15,11 @@ pub const RINGLED_CMD_TX_MOVED: u8 = 0xa0; // 送信用Note Moveコマンド(Not
 pub const RINGLED_CMD_RX_ON: u8 = 0x9f; // 受信用Note Onコマンド
 pub const RINGLED_CMD_RX_OFF: u8 = 0x8f; // 受信用Note Offコマンド
 
-pub const PCA9544_NUM_CHANNELS: u8 = 4; // PCA9544のチャネル数
-pub const PCA9544_NUM_DEVICES: u8 = 4; // PCA9544の台数
+// チェック用
+pub const PCA9544_NUM_CHANNELS: u8 = 1; // PCA9544のチャネル数
+pub const PCA9544_NUM_DEVICES: u8 = 1; // PCA9544の台数
+//pub const PCA9544_NUM_CHANNELS: u8 = 4; // PCA9544のチャネル数
+//pub const PCA9544_NUM_DEVICES: u8 = 4; // PCA9544の台数
 pub const AT42QT_KEYS_PER_DEVICE: usize = 6; // AT42QT1070
 
 pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
