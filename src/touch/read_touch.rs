@@ -32,13 +32,19 @@ impl ReadTouch {
     ) {
         for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
+            #[cfg(not(feature = "test_mode"))]
             let ch_in_dev = Self::CH_CONVERTION[(ch % constants::PCA9544_NUM_CHANNELS) as usize];
+            #[cfg(feature = "test_mode")]
+            let ch_in_dev = Self::CH_CONVERTION[ch as usize];
             pca.select(i2c, dev, ch_in_dev).await.ok();
             at42.init(i2c).await.ok();
             // PCA9544のチャネルが最後のときに切断する
+            #[cfg(not(feature = "test_mode"))]
             if ch % constants::PCA9544_NUM_CHANNELS == constants::PCA9544_NUM_CHANNELS - 1 {
                 pca.disconnect(i2c, dev).await.ok();
             }
+            #[cfg(feature = "test_mode")]
+            pca.disconnect(i2c, dev).await.ok();
         }
     }
 
@@ -51,7 +57,10 @@ impl ReadTouch {
         let mut data = [0u16; constants::TOTAL_QT_KEYS];
         for ch in 0..(constants::TOTAL_CH as u8) {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
+            #[cfg(not(feature = "test_mode"))]
             let ch_in_dev = Self::CH_CONVERTION[(ch % constants::PCA9544_NUM_CHANNELS) as usize];
+            #[cfg(feature = "test_mode")]
+            let ch_in_dev = Self::CH_CONVERTION[ch as usize];
             pca.select(i2c, dev, ch_in_dev).await.ok();
 
             let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
@@ -70,9 +79,12 @@ impl ReadTouch {
                 }
             }
             // PCA9544のチャネルが最後のときに切断する
+            #[cfg(not(feature = "test_mode"))]
             if ch % constants::PCA9544_NUM_CHANNELS == constants::PCA9544_NUM_CHANNELS - 1 {
                 pca.disconnect(i2c, dev).await.ok();
             }
+            #[cfg(feature = "test_mode")]
+            pca.disconnect(i2c, dev).await.ok();
         }
         {
             // タッチセンサーの生データを Mutex で保護されたグローバル変数に保存
@@ -83,8 +95,10 @@ impl ReadTouch {
         if self.refference_counter == 0 {
             for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
                 let dev = ch / constants::PCA9544_NUM_CHANNELS;
-                let ch_in_dev =
-                    Self::CH_CONVERTION[(ch % constants::PCA9544_NUM_CHANNELS) as usize];
+                #[cfg(not(feature = "test_mode"))]
+                let ch_in_dev = Self::CH_CONVERTION[(ch % constants::PCA9544_NUM_CHANNELS) as usize];
+                #[cfg(feature = "test_mode")]
+                let ch_in_dev = Self::CH_CONVERTION[ch as usize];
                 pca.select(i2c, dev, ch_in_dev).await.ok();
 
                 let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
@@ -95,6 +109,7 @@ impl ReadTouch {
                     self.refference[sid + 5] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
                 }
                 // PCA9544のチャネルが最後のときに切断する
+                #[cfg(not(feature = "test_mode"))]
                 if ch % constants::PCA9544_NUM_CHANNELS == constants::PCA9544_NUM_CHANNELS - 1 {
                     pca.disconnect(i2c, dev).await.ok();
                 }

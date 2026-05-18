@@ -589,9 +589,8 @@ async fn adc_task(
                     AD_VALUE1.store(ad_value[0] as u32, Ordering::Relaxed);
                     AD_VALUE3.store(ad_value[1] as u32, Ordering::Relaxed);
                     samples[1] = ad_value[0] as u32;
-                    if MAX_ADC_CHANNELS > 3 {
-                        samples[3] = ad_value[1] as u32;
-                    }
+                    #[cfg(feature = "adc_ch4")]
+                    { samples[3] = ad_value[1] as u32; }
                 }
             }
             Err(_) => {

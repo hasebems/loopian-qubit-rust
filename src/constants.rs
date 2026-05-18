@@ -16,10 +16,15 @@ pub const RINGLED_CMD_RX_ON: u8 = 0x9f; // 受信用Note Onコマンド
 pub const RINGLED_CMD_RX_OFF: u8 = 0x8f; // 受信用Note Offコマンド
 
 // チェック用
-pub const PCA9544_NUM_CHANNELS: u8 = 1; // PCA9544のチャネル数
-pub const PCA9544_NUM_DEVICES: u8 = 1; // PCA9544の台数
-//pub const PCA9544_NUM_CHANNELS: u8 = 4; // PCA9544のチャネル数
-//pub const PCA9544_NUM_DEVICES: u8 = 4; // PCA9544の台数
+#[cfg(not(feature = "test_mode"))]
+pub const PCA9544_NUM_CHANNELS: u8 = 4; // PCA9544のチャネル数
+#[cfg(feature = "test_mode")]
+pub const PCA9544_NUM_CHANNELS: u8 = 1; // PCA9544のチャネル数 (テストモード)
+
+#[cfg(not(feature = "test_mode"))]
+pub const PCA9544_NUM_DEVICES: u8 = 4; // PCA9544の台数
+#[cfg(feature = "test_mode")]
+pub const PCA9544_NUM_DEVICES: u8 = 1; // PCA9544の台数 (テストモード)
 pub const AT42QT_KEYS_PER_DEVICE: usize = 6; // AT42QT1070
 
 pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
@@ -29,6 +34,9 @@ pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
 pub const MAX_TOUCH_POINTS_U8: u8 = MAX_TOUCH_POINTS as u8;
 
+#[cfg(feature = "adc_ch4")]
+pub const MAX_ADC_CHANNELS: usize = 4; // ADCのチャンネル数 (4ch構成)
+#[cfg(not(feature = "adc_ch4"))]
 pub const MAX_ADC_CHANNELS: usize = 3; // ADCのチャンネル数
 
 // MIDI

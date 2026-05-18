@@ -12,6 +12,7 @@ impl Pca9544 {
     where
         I2C: embedded_hal_async::i2c::I2c,
     {
+        #[cfg(not(feature = "test_mode"))]
         let ch = ch % constants::PCA9544_NUM_CHANNELS;
         i2c.write(Self::ADDR + dev, &[0x04 + ch]).await
     }

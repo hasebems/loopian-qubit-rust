@@ -505,7 +505,12 @@ where
             .iter_mut()
             .find(|tp| !tp.is_touched())
             .map(|tp| {
-                tp.new_touch(location, intensity as i16, self.midi_callback.clone(), work_mode);
+                tp.new_touch(
+                    location,
+                    intensity as i16,
+                    self.midi_callback.clone(),
+                    work_mode,
+                );
                 tp.id
             });
         if let Some(id) = id {
