@@ -12,8 +12,12 @@ impl Pca9544 {
     where
         I2C: embedded_hal_async::i2c::I2c,
     {
-        #[cfg(not(feature = "test_mode"))]
-        let ch = ch % constants::PCA9544_NUM_CHANNELS;
+        let num_channels = constants::PCA9544_NUM_CHANNELS;
+        let ch = if num_channels == 1 {
+            0
+        } else {
+            ch % num_channels
+        };
         i2c.write(Self::ADDR + dev, &[0x04 + ch]).await
     }
     pub async fn disconnect<I2C>(&self, i2c: &mut I2C, dev: u8) -> Result<(), I2C::Error>
