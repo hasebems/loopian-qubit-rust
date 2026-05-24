@@ -9,3 +9,5 @@
 
 `cargo clippy --features adc_ch4` のように個別に指定できます。
 
+git push したときの clippy
+`cargo clippy --all-features -- --deny=warnings`
