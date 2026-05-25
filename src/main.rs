@@ -87,6 +87,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 // 71: OLED初期化エラー
 // 72: 描画バッファ受信エラー
 // 73: 描画バッファ返却エラー
+// 74: Touch Sensor初期化タイムアウト
 
 // タッチイベントのデータ構造
 #[derive(Copy, Clone, Default)]
@@ -615,6 +616,9 @@ async fn adc_task(
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
+    const TOUCH_INIT_TIMEOUT_MS: u64 = 80;
+    const OLED_INIT_TIMEOUT_MS: u64 = 50;
+
     // AT42QT1070 と PCA9544 の生成
     let pca = devices::pca9544::Pca9544::new();
     let mut at42 = devices::at42qt::At42Qt1070::new();
@@ -625,12 +629,19 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
     // --- init phase ---
     let mut read_touch = touch::read_touch::ReadTouch::new(); // タッチイベントの状態を保持する構造体を生成
-    read_touch
-        .init_touch_sensors(&pca, &mut at42, &mut i2c)
-        .await;
+    let touch_init_result = with_timeout(
+        Duration::from_millis(TOUCH_INIT_TIMEOUT_MS),
+        read_touch.init_touch_sensors(&pca, &mut at42, &mut i2c),
+    )
+    .await;
+    if !matches!(touch_init_result, Ok(true)) {
+        ERROR_CODE.store(74, Ordering::Relaxed);
+    }
 
     // OLED初期化
-    if oled.init(&mut i2c).is_err() {
+    let oled_init_result =
+        with_timeout(Duration::from_millis(OLED_INIT_TIMEOUT_MS), oled.init(&mut i2c)).await;
+    if !matches!(oled_init_result, Ok(Ok(()))) {
         ERROR_CODE.store(71, Ordering::Relaxed);
     }
 
@@ -641,7 +652,7 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     loop {
         // OLED更新:UIタスクから描画済みバッファを受信（非ブロッキング）
         if let Ok(buffer) = BUFFER_TO_DISPLAY.try_receive() {
-            if oled.flush_buffer(&buffer, &mut i2c).is_err() {
+            if oled.flush_buffer(&buffer, &mut i2c).await.is_err() {
                 ERROR_CODE.store(72, Ordering::Relaxed);
             }
 

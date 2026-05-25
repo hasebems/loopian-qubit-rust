@@ -47,9 +47,12 @@ impl Oled {
     }
 
     /// ディスプレイを初期化（I2Cを借用）
-    pub fn init<I2C>(&mut self, i2c: &mut I2C) -> Result<(), display_interface::DisplayError>
+    pub async fn init<I2C>(
+        &mut self,
+        i2c: &mut I2C,
+    ) -> Result<(), display_interface::DisplayError>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
         // SSD1306初期化シーケンス
         self.send_commands(
@@ -72,19 +75,20 @@ impl Oled {
                 0xA6, // Set normal display (not inverted)
                 0xAF, // Display on
             ],
-        )?;
+        )
+        .await?;
 
         Ok(())
     }
 
     /// 複数のコマンドを送信
-    fn send_commands<I2C>(
+    async fn send_commands<I2C>(
         &self,
         i2c: &mut I2C,
         commands: &[u8],
     ) -> Result<(), display_interface::DisplayError>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
         let mut buf = [0u8; 32];
         buf[0] = 0x00; // Command mode
@@ -92,25 +96,26 @@ impl Oled {
         for chunk in commands.chunks(31) {
             buf[1..=chunk.len()].copy_from_slice(chunk);
             i2c.write(self.addr, &buf[..=chunk.len()])
+                .await
                 .map_err(|_| display_interface::DisplayError::BusWriteError)?;
         }
         Ok(())
     }
 
     /// バッファをディスプレイに転送
-    pub fn flush_buffer<I2C>(
+    pub async fn flush_buffer<I2C>(
         &self,
         buffer: &OledBuffer,
         i2c: &mut I2C,
     ) -> Result<(), display_interface::DisplayError>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
         // ページアドレス範囲を設定（Page0〜Page7）
-        self.send_commands(i2c, &[0x22, 0x00, 0x07])?;
+        self.send_commands(i2c, &[0x22, 0x00, 0x07]).await?;
 
         // カラムアドレス範囲を設定（0〜127）
-        self.send_commands(i2c, &[0x21, 0x00, 0x7F])?;
+        self.send_commands(i2c, &[0x21, 0x00, 0x7F]).await?;
 
         // データを送信（チャンク単位で）
         const CHUNK_SIZE: usize = 31;
@@ -119,6 +124,7 @@ impl Oled {
             data[0] = 0x40; // Data mode
             data[1..=chunk.len()].copy_from_slice(chunk);
             i2c.write(self.addr, &data[..=chunk.len()])
+                .await
                 .map_err(|_| display_interface::DisplayError::BusWriteError)?;
         }
 

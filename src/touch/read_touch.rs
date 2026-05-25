@@ -1,5 +1,6 @@
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::I2C1;
+use embassy_time::{Duration, with_timeout};
 use portable_atomic::Ordering;
 
 use crate::TOUCH_RAW_DATA;
@@ -15,6 +16,8 @@ pub struct ReadTouch {
 
 impl ReadTouch {
     const CH_CONVERTION: [u8; 4] = [3, 2, 1, 0];
+    const AT42_READ_TIMEOUT_MS: u64 = 2;
+    const INIT_I2C_TIMEOUT_MS: u64 = 3;
 
     fn channel_in_device(ch: u8) -> u8 {
         let num_channels = constants::PCA9544_NUM_CHANNELS;
@@ -46,17 +49,41 @@ impl ReadTouch {
         pca: &pca9544::Pca9544,
         at42: &mut at42qt::At42Qt1070,
         i2c: &mut I2c<'static, I2C1, i2c::Async>,
-    ) {
+    ) -> bool {
         for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
             let ch_in_dev = Self::convert_channel(ch);
-            pca.select(i2c, dev, ch_in_dev).await.ok();
-            at42.init(i2c).await.ok();
+            if with_timeout(
+                Duration::from_millis(Self::INIT_I2C_TIMEOUT_MS),
+                pca.select(i2c, dev, ch_in_dev),
+            )
+            .await
+            .is_err()
+            {
+                return false;
+            }
+            if with_timeout(
+                Duration::from_millis(Self::INIT_I2C_TIMEOUT_MS),
+                at42.init(i2c),
+            )
+            .await
+            .is_err()
+            {
+                return false;
+            }
             // PCA9544のチャネルが最後のときに切断する
-            if Self::is_last_channel(ch) {
-                pca.disconnect(i2c, dev).await.ok();
+            if Self::is_last_channel(ch)
+                && with_timeout(
+                    Duration::from_millis(Self::INIT_I2C_TIMEOUT_MS),
+                    pca.disconnect(i2c, dev),
+                )
+                .await
+                .is_err()
+            {
+                return false;
             }
         }
+        true
     }
 
     pub async fn touch_sensor_scan(
@@ -71,9 +98,15 @@ impl ReadTouch {
             let ch_in_dev = Self::convert_channel(ch);
             pca.select(i2c, dev, ch_in_dev).await.ok();
 
+            let start_ch = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
             let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
-            if let Ok(()) = at42.read_6key(i2c, &mut raw_data, false).await {
-                let start_ch = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
+            let read_result = with_timeout(
+                Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
+                at42.read_6key(i2c, &mut raw_data, false),
+            )
+            .await;
+
+            if let Ok(Ok(())) = read_result {
                 for (sid, rawd) in
                     (start_ch..).zip(raw_data.iter().take(constants::AT42QT_KEYS_PER_DEVICE))
                 {
@@ -84,6 +117,18 @@ impl ReadTouch {
                     }
                     self.raw_value[sid] = raw;
                     data[sid] = raw.saturating_sub(self.refference[sid]);
+                }
+            } else {
+                // 読み取り失敗時は前回値を維持してスキャン結果を連続化する
+                for (sid, (d, r)) in (start_ch..).zip(
+                    self.raw_value[start_ch..start_ch + constants::AT42QT_KEYS_PER_DEVICE]
+                        .iter()
+                        .zip(
+                            self.refference[start_ch..start_ch + constants::AT42QT_KEYS_PER_DEVICE]
+                                .iter(),
+                        ),
+                ) {
+                    data[sid] = d.saturating_sub(*r);
                 }
             }
             // PCA9544のチャネルが最後のときに切断する
@@ -103,9 +148,14 @@ impl ReadTouch {
                 let ch_in_dev = Self::convert_channel(ch);
                 pca.select(i2c, dev, ch_in_dev).await.ok();
 
+                let sid = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
                 let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
-                if let Ok(()) = at42.read_6key(i2c, &mut raw_data, true).await {
-                    let sid = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
+                let read_result = with_timeout(
+                    Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
+                    at42.read_6key(i2c, &mut raw_data, true),
+                )
+                .await;
+                if let Ok(Ok(())) = read_result {
                     self.refference[sid..(sid + constants::AT42QT_KEYS_PER_DEVICE)]
                         .copy_from_slice(&raw_data[..constants::AT42QT_KEYS_PER_DEVICE]);
                     self.refference[sid + 5] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
