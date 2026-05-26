@@ -10,12 +10,12 @@ use crate::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
 pub struct ReadTouch {
     raw_value: [u16; constants::TOTAL_QT_KEYS],
-    refference: [u16; constants::TOTAL_QT_KEYS],
-    refference_counter: usize,
+    reference: [u16; constants::TOTAL_QT_KEYS],
+    reference_counter: usize,
 }
 
 impl ReadTouch {
-    const CH_CONVERTION: [u8; 4] = [3, 2, 1, 0];
+    const CH_CONVERSION: [u8; 4] = [3, 2, 1, 0];
     const AT42_READ_TIMEOUT_MS: u64 = 2;
     const INIT_I2C_TIMEOUT_MS: u64 = 3;
 
@@ -33,14 +33,14 @@ impl ReadTouch {
     }
 
     fn convert_channel(ch: u8) -> u8 {
-        Self::CH_CONVERTION[Self::channel_in_device(ch) as usize]
+        Self::CH_CONVERSION[Self::channel_in_device(ch) as usize]
     }
 
     pub fn new() -> Self {
         Self {
             raw_value: [0u16; constants::TOTAL_QT_KEYS],
-            refference: [0u16; constants::TOTAL_QT_KEYS],
-            refference_counter: 0,
+            reference: [0u16; constants::TOTAL_QT_KEYS],
+            reference_counter: 0,
         }
     }
 
@@ -116,7 +116,7 @@ impl ReadTouch {
                         raw -= 256; // hiからloを読む間に数値が変化した場合の対策
                     }
                     self.raw_value[sid] = raw;
-                    data[sid] = raw.saturating_sub(self.refference[sid]);
+                    data[sid] = raw.saturating_sub(self.reference[sid]);
                 }
             } else {
                 // 読み取り失敗時は前回値を維持してスキャン結果を連続化する
