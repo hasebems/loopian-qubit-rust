@@ -47,10 +47,7 @@ impl Oled {
     }
 
     /// ディスプレイを初期化（I2Cを借用）
-    pub async fn init<I2C>(
-        &mut self,
-        i2c: &mut I2C,
-    ) -> Result<(), display_interface::DisplayError>
+    pub async fn init<I2C>(&mut self, i2c: &mut I2C) -> Result<(), display_interface::DisplayError>
     where
         I2C: embedded_hal_async::i2c::I2c,
     {

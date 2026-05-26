@@ -639,8 +639,11 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     }
 
     // OLED初期化
-    let oled_init_result =
-        with_timeout(Duration::from_millis(OLED_INIT_TIMEOUT_MS), oled.init(&mut i2c)).await;
+    let oled_init_result = with_timeout(
+        Duration::from_millis(OLED_INIT_TIMEOUT_MS),
+        oled.init(&mut i2c),
+    )
+    .await;
     if !matches!(oled_init_result, Ok(Ok(()))) {
         ERROR_CODE.store(71, Ordering::Relaxed);
     }

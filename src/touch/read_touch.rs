@@ -124,7 +124,7 @@ impl ReadTouch {
                     self.raw_value[start_ch..start_ch + constants::AT42QT_KEYS_PER_DEVICE]
                         .iter()
                         .zip(
-                            self.refference[start_ch..start_ch + constants::AT42QT_KEYS_PER_DEVICE]
+                            self.reference[start_ch..start_ch + constants::AT42QT_KEYS_PER_DEVICE]
                                 .iter(),
                         ),
                 ) {
@@ -142,7 +142,7 @@ impl ReadTouch {
             raw_data.copy_from_slice(&data);
         }
 
-        if self.refference_counter == 0 {
+        if self.reference_counter == 0 {
             for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
                 let dev = ch / constants::PCA9544_NUM_CHANNELS;
                 let ch_in_dev = Self::convert_channel(ch);
@@ -156,9 +156,9 @@ impl ReadTouch {
                 )
                 .await;
                 if let Ok(Ok(())) = read_result {
-                    self.refference[sid..(sid + constants::AT42QT_KEYS_PER_DEVICE)]
+                    self.reference[sid..(sid + constants::AT42QT_KEYS_PER_DEVICE)]
                         .copy_from_slice(&raw_data[..constants::AT42QT_KEYS_PER_DEVICE]);
-                    self.refference[sid + 5] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
+                    self.reference[sid + 5] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
                 }
                 // PCA9544のチャネルが最後のときに切断する
                 if Self::is_last_channel(ch) {
@@ -166,7 +166,7 @@ impl ReadTouch {
                 }
             }
         }
-        self.refference_counter = (self.refference_counter + 1) % 12;
+        self.reference_counter = (self.reference_counter + 1) % 12;
 
         POINT0.store(self.raw_value[0], Ordering::Relaxed);
         POINT1.store(self.raw_value[1], Ordering::Relaxed);
