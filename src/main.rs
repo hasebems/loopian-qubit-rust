@@ -19,7 +19,6 @@ use embassy_executor::Executor;
 use embassy_rp::Peri;
 use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 
@@ -80,9 +79,9 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 // 41: タッチイベントのバッファオーバーフロー
 // 42: MIDIイベントの送信失敗（USB未接続など）
 // 43: MIDIイベントのバッファオーバーフロー
-// 44: RingLEDキュー満杯
+// 44: (unused)
 // 45: RingLEDへの書き込みのタイムアウト
-// 51-54: MIDI RX Error
+// 51-54: (unused)
 // 61: ADC値取得エラー
 // 71: OLED初期化エラー
 // 72: 描画バッファ受信エラー
@@ -91,7 +90,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 // タッチイベントのデータ構造
 #[derive(Copy, Clone, Default)]
-struct TouchEvent(u8, u8, u8, f32); // (status, note, velocity, location)
+struct TouchEvent(u8, u8, u8); // (status, note, velocity)
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      Global static variables
@@ -108,6 +107,7 @@ static EXECUTOR1: StaticCell<embassy_executor::Executor> = StaticCell::new();
 
 // OLEDバッファ転送用チャンネル（ダブルバッファリング）
 use devices::ssd1306::OledBuffer;
+use embassy_sync::channel::Channel;
 
 static BUFFER_TO_DISPLAY: Channel<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -131,6 +131,7 @@ pub static TOUCH0: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
+pub static RINGLED_RX_BITS: AtomicU32 = AtomicU32::new(0); // 受信Note On/Off状態(1bit/LED)
 pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）
 pub static AD_VALUE0: AtomicU32 = AtomicU32::new(0); // ADCの値(A0)
 pub static AD_VALUE1: AtomicU32 = AtomicU32::new(0); // ADCの値(A1)
@@ -149,13 +150,6 @@ pub static TOUCH_RAW_DATA: Mutex<
         (constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES) as usize
             * constants::AT42QT_KEYS_PER_DEVICE],
 );
-
-// RINGLED用メッセージチャンネル
-static RINGLED_MESSAGE: Channel<
-    CriticalSectionRawMutex,
-    (u8, f32),
-    { constants::RINGLED_MESSAGE_SIZE },
-> = Channel::new();
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      Main entry point
@@ -283,7 +277,7 @@ fn main() -> ! {
 }
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//      RingLED Task: MIDIイベントに応じてNeopixelを制御
+//      RingLED Task: 共有状態(TOUCH0-3, RXビット)からNeopixelを制御
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 async fn ringled_task(
@@ -306,19 +300,22 @@ async fn ringled_task(
 
     let mut data = [RGBW::default(); constants::NUM_LEDS];
     loop {
-        // バグ対策: 1周期でキューを可能な限りドレインして、送信側の詰まりを防ぐ
-        let mut drained = false;
-        while let Ok((cmd, location)) = RINGLED_MESSAGE.try_receive() {
-            drained = true;
-            ring_led.set_color(&mut data, location, cmd);
-        }
-        if !drained {
-            ring_led.set_color(
-                &mut data,
-                constants::RINGLED_CMD_NONE as f32,
-                constants::RINGLED_CMD_NONE,
-            );
-        }
+        let to_touch_location = |v: i32| -> Option<f32> {
+            if (0..10000).contains(&v) {
+                Some(v as f32 / 100.0)
+            } else {
+                None
+            }
+        };
+        let touch_locations = [
+            to_touch_location(TOUCH0.load(Ordering::Relaxed)),
+            to_touch_location(TOUCH1.load(Ordering::Relaxed)),
+            to_touch_location(TOUCH2.load(Ordering::Relaxed)),
+            to_touch_location(TOUCH3.load(Ordering::Relaxed)),
+        ];
+        let rx_bits = RINGLED_RX_BITS.load(Ordering::Relaxed);
+
+        ring_led.render(&mut data, &touch_locations, rx_bits);
         // バグ対策: NeoPixel書き込みが固着してもタスク全体が停止しないようタイムアウト保護
         let write_result = with_timeout(Duration::from_millis(8), ws2812.write(&data)).await;
         if write_result.is_err() {
@@ -340,9 +337,9 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
     let send_buffer = RefCell::new([TouchEvent::default(); 8]);
     let send_index = RefCell::new(0);
     let mut pressure_midi = PressureMidiState::new();
-    let mut qt = QubitTouch::new(|status, note, velocity, location| {
+    let mut qt = QubitTouch::new(|status, note, velocity, _location| {
         // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信
-        let packet = TouchEvent(status, note, velocity, location);
+        let packet = TouchEvent(status, note, velocity);
         let mut buf = send_buffer.borrow_mut();
         let mut idx = send_index.borrow_mut();
         if *idx < buf.len() {
@@ -409,10 +406,6 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
                     // タイムアウトまたは送信エラー（USB未接続時など）
                     ERROR_CODE.store(42, Ordering::Relaxed);
                 }
-                // バグ対策: RingLEDキュー満杯でCore0全体が停止しないよう非ブロッキング送信にする
-                if RINGLED_MESSAGE.try_send((packet.0, packet.3)).is_err() {
-                    ERROR_CODE.store(44, Ordering::Relaxed);
-                }
             }
             *send_index.borrow_mut() = 0;
         } else {
@@ -455,6 +448,16 @@ async fn usb_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB>>
 async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
     let mut buf = [0; 64];
 
+    let set_rx_led = |note: u8, on: bool| {
+        let led = (note as usize).min(constants::NUM_LEDS - 1);
+        let bit = 1u32 << led;
+        if on {
+            RINGLED_RX_BITS.fetch_or(bit, Ordering::Relaxed);
+        } else {
+            RINGLED_RX_BITS.fetch_and(!bit, Ordering::Relaxed);
+        }
+    };
+
     loop {
         match receiver.read_packet(&mut buf).await {
             Ok(n) => {
@@ -467,32 +470,14 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
                         // Note On (Channel 0-15)
                         if (status & 0xF0) == 0x90 {
                             if velocity > 0 {
-                                // バグ対策: RingLEDキュー満杯でもmidi_rx_taskを止めない
-                                if RINGLED_MESSAGE
-                                    .try_send((constants::RINGLED_CMD_RX_ON, note as f32))
-                                    .is_err()
-                                {
-                                    ERROR_CODE.store(51, Ordering::Relaxed);
-                                }
+                                set_rx_led(note, true);
                             } else {
-                                // バグ対策: RingLEDキュー満杯でもmidi_rx_taskを止めない
-                                if RINGLED_MESSAGE
-                                    .try_send((constants::RINGLED_CMD_RX_OFF, note as f32))
-                                    .is_err()
-                                {
-                                    ERROR_CODE.store(52, Ordering::Relaxed);
-                                }
+                                set_rx_led(note, false);
                             }
                         }
                         // Note Off
                         else if (status & 0xF0) == 0x80 {
-                            // バグ対策: RingLEDキュー満杯でもmidi_rx_taskを止めない
-                            if RINGLED_MESSAGE
-                                .try_send((constants::RINGLED_CMD_RX_OFF, note as f32))
-                                .is_err()
-                            {
-                                ERROR_CODE.store(53, Ordering::Relaxed);
-                            }
+                            set_rx_led(note, false);
                         }
                     }
                 }

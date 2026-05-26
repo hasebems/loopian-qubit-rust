@@ -6,14 +6,10 @@
 
 pub const CORE1_STACK_SIZE: usize = 8192; // コア1のスタックサイズ
 
-// Message for Ringled
-pub const RINGLED_MESSAGE_SIZE: usize = 64; // バグ対策: 送受信の瞬間的バーストで詰まりにくくする
-pub const RINGLED_CMD_NONE: u8 = 0x00; // コマンドなし
+// Message for Ringled / touch callback status
 pub const RINGLED_CMD_TX_ON: u8 = 0x90; // 送信用Note Onコマンド
 pub const RINGLED_CMD_TX_OFF: u8 = 0x80; // 送信用Note Offコマンド
 pub const RINGLED_CMD_TX_MOVED: u8 = 0xa0; // 送信用Note Moveコマンド(NoteOff)
-pub const RINGLED_CMD_RX_ON: u8 = 0x9f; // 受信用Note Onコマンド
-pub const RINGLED_CMD_RX_OFF: u8 = 0x8f; // 受信用Note Offコマンド
 
 // チェック用
 #[cfg(not(feature = "test_mode"))]
@@ -32,7 +28,6 @@ pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
 
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
-pub const MAX_TOUCH_POINTS_U8: u8 = MAX_TOUCH_POINTS as u8;
 
 #[cfg(feature = "adc_ch4")]
 pub const MAX_ADC_CHANNELS: usize = 4; // ADCのチャンネル数 (4ch構成)
