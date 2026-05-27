@@ -19,13 +19,13 @@
 
 - SSD1306 による OLED Display の表示機能の実装
 - AT42QT1070 によるタッチセンサー機能の実装
-    - PCA9544 により96個のセンサー値を読み込む
+    - 4つの PCA9544 を利用し、16個の AT42QT、96個のセンサー値を読み込む
 
 ### NeoPixel (Core0)
 
-- NeoPixel(RGBW) をPIOで制御可能
-- USB MIDI の受信メッセージに反応させる
-- USB MIDI の送信メッセージにも反応させる
+- NeoPixel(RGBW) をPIOで制御(PioWs2812Program)
+- USB MIDI の受信メッセージをLEDで表示する
+- QubitTouch が算出したタッチ位置をLEDで表示する
 
 ## USB MIDI (Core0)
 
