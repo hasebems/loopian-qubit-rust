@@ -8,6 +8,10 @@ pub struct RingLed {
 }
 
 impl RingLed {
+    fn source_index_for_led(led_index: usize) -> usize {
+        (led_index + TOUCH_INDEX_SHIFT) % NUM_LEDS
+    }
+
     pub fn new() -> Self {
         Self { counter: 0 }
     }
@@ -23,6 +27,8 @@ impl RingLed {
         let phase = 0.5 * PI * time_sec; // 0.5pi rad/s
 
         for (i, led) in data.iter_mut().enumerate().take(NUM_LEDS) {
+            let source_index = Self::source_index_for_led(i);
+            let source_pos = source_index as f32;
             let led_angle = (i as f32 / num_leds_f) * 2.0 * PI;
             // 8x finer spatial wave and darker output for NeoPixel brightness perception.
             let wave = (sinf(led_angle * 8.0 - phase) + 1.0) * 0.5;
@@ -36,7 +42,7 @@ impl RingLed {
 
             // touch position: magenta glow around +/- 3 LEDs (circular wrap)
             for touch in touchkey_state.iter().flatten() {
-                let mut dist = (*touch - i as f32).abs();
+                let mut dist = (*touch - source_pos).abs();
                 dist = dist.min(num_leds_f - dist);
                 if dist <= 3.0 {
                     let intensity = 1.0 - dist / 3.0;
@@ -47,7 +53,7 @@ impl RingLed {
             }
 
             // rx key: only this LED lights cyan
-            if ((rxkey_bits >> i) & 1) != 0 {
+            if ((rxkey_bits >> source_index) & 1) != 0 {
                 g = g.saturating_add(120);
                 b = b.saturating_add(180);
             }

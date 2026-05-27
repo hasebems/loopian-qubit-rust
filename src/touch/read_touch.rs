@@ -36,6 +36,10 @@ impl ReadTouch {
         Self::CH_CONVERSION[Self::channel_in_device(ch) as usize]
     }
 
+    fn shifted_index(raw_index: usize) -> usize {
+        (raw_index + constants::TOUCH_INDEX_SHIFT) % constants::TOTAL_QT_KEYS
+    }
+
     pub fn new() -> Self {
         Self {
             raw_value: [0u16; constants::TOTAL_QT_KEYS],
@@ -110,25 +114,21 @@ impl ReadTouch {
                 for (sid, rawd) in
                     (start_ch..).zip(raw_data.iter().take(constants::AT42QT_KEYS_PER_DEVICE))
                 {
+                    let shifted_sid = Self::shifted_index(sid);
                     let mut raw = *rawd;
-                    let old = self.raw_value[sid];
+                    let old = self.raw_value[shifted_sid];
                     if old != 0 && raw > old + 200 {
                         raw -= 256; // hiからloを読む間に数値が変化した場合の対策
                     }
-                    self.raw_value[sid] = raw;
-                    data[sid] = raw.saturating_sub(self.reference[sid]);
+                    self.raw_value[shifted_sid] = raw;
+                    data[shifted_sid] = raw.saturating_sub(self.reference[shifted_sid]);
                 }
             } else {
                 // 読み取り失敗時は前回値を維持してスキャン結果を連続化する
-                for (sid, (d, r)) in (start_ch..).zip(
-                    self.raw_value[start_ch..start_ch + constants::AT42QT_KEYS_PER_DEVICE]
-                        .iter()
-                        .zip(
-                            self.reference[start_ch..start_ch + constants::AT42QT_KEYS_PER_DEVICE]
-                                .iter(),
-                        ),
-                ) {
-                    data[sid] = d.saturating_sub(*r);
+                for sid in start_ch..(start_ch + constants::AT42QT_KEYS_PER_DEVICE) {
+                    let shifted_sid = Self::shifted_index(sid);
+                    data[shifted_sid] =
+                        self.raw_value[shifted_sid].saturating_sub(self.reference[shifted_sid]);
                 }
             }
             // PCA9544のチャネルが最後のときに切断する
@@ -156,9 +156,16 @@ impl ReadTouch {
                 )
                 .await;
                 if let Ok(Ok(())) = read_result {
-                    self.reference[sid..(sid + constants::AT42QT_KEYS_PER_DEVICE)]
-                        .copy_from_slice(&raw_data[..constants::AT42QT_KEYS_PER_DEVICE]);
-                    self.reference[sid + 5] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
+                    for (offset, reference_raw) in raw_data
+                        .iter()
+                        .take(constants::AT42QT_KEYS_PER_DEVICE)
+                        .enumerate()
+                    {
+                        let shifted_sid = Self::shifted_index(sid + offset);
+                        self.reference[shifted_sid] = *reference_raw;
+                    }
+                    let shifted_last = Self::shifted_index(sid + 5);
+                    self.reference[shifted_last] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
                 }
                 // PCA9544のチャネルが最後のときに切断する
                 if Self::is_last_channel(ch) {

@@ -25,6 +25,9 @@ pub const AT42QT_KEYS_PER_DEVICE: usize = 6; // AT42QT1070
 
 pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
 pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
+// AT42の読み取りインデックスnを (n + TOUCH_INDEX_SHIFT) % TOTAL_QT_KEYS に再配置する
+// 96キー構成では「6 -> 0」「0 -> 90」となる
+pub const TOUCH_INDEX_SHIFT: usize = TOTAL_QT_KEYS - 6;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
 
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
