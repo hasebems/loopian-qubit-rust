@@ -79,7 +79,7 @@ async fn send_control_change(
     value: u8,
 ) -> Result<(), ()> {
     let result = with_timeout(
-        Duration::from_millis(5),
+        Duration::from_millis(MIDI_TX_TIMEOUT_MS),
         sender.write_packet(&[MIDI_CC_CIN, MIDI_CC_STATUS, controller, value]),
     )
     .await;

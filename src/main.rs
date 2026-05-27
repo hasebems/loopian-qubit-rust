@@ -398,7 +398,7 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
                     status | midi_channel
                 };
                 let result = with_timeout(
-                    Duration::from_millis(5),
+                    Duration::from_millis(MIDI_TX_TIMEOUT_MS),
                     sender.write_packet(&[status >> 4, status, packet.1, packet.2]),
                 )
                 .await;

@@ -44,3 +44,5 @@ pub const MIDI_CH_VIOLIN: u8 = 1; // バイオリン用MIDIチャンネル
 pub const MIDI_CH_FLOW: u8 = 12;
 pub const PIANO_OFFSET: u8 = KEYBD_LO - 4;
 pub const VIOLIN_OFFSET: u8 = 55; // バイオリンモードのMIDIノートオフセット
+
+pub const MIDI_TX_TIMEOUT_MS: u64 = 20;
