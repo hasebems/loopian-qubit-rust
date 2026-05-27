@@ -505,9 +505,9 @@ async fn core1_led_task(mut led: Output<'static>) {
 
             for _ in 0..tens {
                 led.set_low();
-                Timer::after_millis(100).await;
+                Timer::after_millis(150).await;
                 led.set_high();
-                Timer::after_millis(100).await;
+                Timer::after_millis(150).await;
             }
 
             // 十の位と一の位の区切り
@@ -515,9 +515,9 @@ async fn core1_led_task(mut led: Output<'static>) {
 
             for _ in 0..ones {
                 led.set_low();
-                Timer::after_millis(100).await;
+                Timer::after_millis(150).await;
                 led.set_high();
-                Timer::after_millis(100).await;
+                Timer::after_millis(150).await;
             }
 
             // 次の表示シーケンスまで待機
