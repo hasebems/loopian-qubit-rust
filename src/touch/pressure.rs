@@ -7,6 +7,7 @@ use embassy_usb::class::midi::Sender;
 use portable_atomic::Ordering;
 
 const PRESSURE_THRESHOLD: u32 = 100;
+pub const PRESSURE_BASELINE_WINDOW: usize = 1024;
 const ADJUSTMENT_TABLE: [u32; 4] = [256, 160, 256, 0]; // x/256
 const PRESSURE_SENSITIVITY: u32 = 20; // 大きいほど反応が悪くなる（MIDI値が低いまま）
 const CC11_MIN_VALUE: u8 = 20;
@@ -113,14 +114,23 @@ pub async fn send_pressure_cc11_if_needed(
 
 pub fn update_pressure(
     samples: &[u32; MAX_ADC_CHANNELS],
-    sums: &mut [u64; MAX_ADC_CHANNELS],
+    baseline_history: &mut [[u16; PRESSURE_BASELINE_WINDOW]; MAX_ADC_CHANNELS],
+    baseline_sums: &mut [u64; MAX_ADC_CHANNELS],
     adc_counter: u32,
+    baseline_index: usize,
 ) {
+    let valid_count = (adc_counter as usize).min(PRESSURE_BASELINE_WINDOW);
+
     if adc_counter > 100 {
         // センサーおのおの、前回までの積算値から平均値を計算する
         let mut averages = [0u32; MAX_ADC_CHANNELS];
+        let divisor = if valid_count == 0 {
+            1
+        } else {
+            valid_count as u64
+        };
         for i in 0..MAX_ADC_CHANNELS {
-            averages[i] = (sums[i] / adc_counter as u64) as u32;
+            averages[i] = (baseline_sums[i] / divisor) as u32;
         }
 
         // 今回のサンプルと平均値の差を計算し、サンプル側が大きい場合は0、小さい場合は差分値として保持
@@ -141,8 +151,18 @@ pub fn update_pressure(
         PRESSURE.store(total_pressure, Ordering::Relaxed);
     }
 
-    // 次回の平均値計算に備えて積算値を更新する
+    // 差分計算後に履歴と積算値を更新し、基準値を移動平均で保つ
     for i in 0..MAX_ADC_CHANNELS {
-        sums[i] = sums[i].wrapping_add(samples[i] as u64);
+        let new_sample = samples[i] as u16;
+        if valid_count < PRESSURE_BASELINE_WINDOW {
+            baseline_history[i][baseline_index] = new_sample;
+            baseline_sums[i] = baseline_sums[i].wrapping_add(new_sample as u64);
+        } else {
+            let old_sample = baseline_history[i][baseline_index] as u64;
+            baseline_history[i][baseline_index] = new_sample;
+            baseline_sums[i] = baseline_sums[i]
+                .saturating_sub(old_sample)
+                .saturating_add(new_sample as u64);
+        }
     }
 }

@@ -547,7 +547,9 @@ async fn adc_task(
     let mut ad_value = [0u16; 2];
     let mut a0b0_available = true;
     let mut adc_counter = 0u32;
-    let mut sums = [0u64; MAX_ADC_CHANNELS];
+    let mut baseline_index = 0usize;
+    let mut baseline_history = [[0u16; touch::pressure::PRESSURE_BASELINE_WINDOW]; MAX_ADC_CHANNELS];
+    let mut baseline_sums = [0u64; MAX_ADC_CHANNELS];
     let mut samples = [0u32; MAX_ADC_CHANNELS];
 
     loop {
@@ -590,8 +592,15 @@ async fn adc_task(
 
         // 圧力を計算
         if a0b0_available {
-            touch::pressure::update_pressure(&samples, &mut sums, adc_counter);
+            touch::pressure::update_pressure(
+                &samples,
+                &mut baseline_history,
+                &mut baseline_sums,
+                adc_counter,
+                baseline_index,
+            );
             adc_counter = adc_counter.wrapping_add(1);
+            baseline_index = (baseline_index + 1) % touch::pressure::PRESSURE_BASELINE_WINDOW;
         }
     }
 }
