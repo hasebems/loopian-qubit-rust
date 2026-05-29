@@ -465,21 +465,6 @@ where
         });
     }
     /// LEDを点灯させるためのコールバック関数をコールする
-    /*void lighten_leds(std::function<void(float, int16_t)> led_callback) {
-        bool empty = true;
-        for (auto& tp : touch_points_) {
-            if (tp.is_touched()) {
-                float location = tp.get_location();
-                int16_t intensity = tp.get_intensity();
-                led_callback(location, intensity);
-                empty = false;
-            }
-        }
-        if (empty) {
-            // Call the callback with default values if no touch points are active
-            led_callback(-1.0f, 0);
-        }
-    }*/
     pub fn lighten_leds<G>(&self, led_callback: G)
     where
         G: Fn(f32, i16),
