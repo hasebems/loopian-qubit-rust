@@ -694,10 +694,12 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
         // スイッチの状態を取得
         let switch_r_state = switch1.is_low();
         let switch_l_state = switch2.is_low();
-        if switch_r_state != switch1_prev && switch_r_state {
+        if (switch_r_state != switch1_prev) && switch_r_state {
             if switch_l_state {
                 // 両方のスイッチが同時に押された場合は、設定画面に直接遷移
                 ui_page = 4;
+                // 設定変更時にエラーコードをリセットする
+                ERROR_CODE.store(0, Ordering::Relaxed);
             } else if ui_page == 3 || ui_page == 4 {
                 ui_page = 0;
             } else {
@@ -705,17 +707,17 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
             }
             gui.change_page(ui_page); // ページ切替をGUIに通知
         }
-        if switch_l_state != switch2_prev && switch_l_state {
+        if (switch_l_state != switch2_prev) && switch_l_state {
             if switch_r_state {
                 // 両方のスイッチが同時に押された場合は、設定画面に直接遷移
                 ui_page = 4;
+                // 設定変更時にエラーコードをリセットする
+                ERROR_CODE.store(0, Ordering::Relaxed);
             } else if ui_page == 4 {
                 WORK_MODE.store(
                     (WORK_MODE.load(Ordering::Relaxed) + 1) % 2,
                     Ordering::Relaxed,
                 ); // 動作モードを切り替え
-                // 設定変更時にエラーコードをリセットする
-                ERROR_CODE.store(0, Ordering::Relaxed);
             } else if ui_page == 0 {
                 ui_page = 3;
             } else {
