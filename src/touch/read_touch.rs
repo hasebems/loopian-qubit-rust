@@ -6,11 +6,13 @@ use portable_atomic::Ordering;
 use crate::TOUCH_RAW_DATA;
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
+use crate::WORK_MODE_DISPLAY;
 use crate::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
 pub struct ReadTouch {
     raw_value: [u16; constants::TOTAL_QT_KEYS],
     reference: [u16; constants::TOTAL_QT_KEYS],
+    reference_adjust: [u16; constants::TOTAL_QT_KEYS],
     reference_counter: usize,
 }
 
@@ -44,6 +46,7 @@ impl ReadTouch {
         Self {
             raw_value: [0u16; constants::TOTAL_QT_KEYS],
             reference: [0u16; constants::TOTAL_QT_KEYS],
+            reference_adjust: [0u16; constants::TOTAL_QT_KEYS],
             reference_counter: 0,
         }
     }
@@ -90,12 +93,49 @@ impl ReadTouch {
         true
     }
 
+    pub async fn set_reference(&mut self,
+        pca: &pca9544::Pca9544,
+        at42: &mut at42qt::At42Qt1070,
+        i2c: &mut I2c<'static, I2C1, i2c::Async>
+    ) {
+        for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
+            let dev = ch / constants::PCA9544_NUM_CHANNELS;
+            let ch_in_dev = Self::convert_channel(ch);
+            pca.select(i2c, dev, ch_in_dev).await.ok();
+
+            let sid = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
+            let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
+            let read_result = with_timeout(
+                Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
+                at42.read_6key(i2c, &mut raw_data, true),
+            )
+            .await;
+            if let Ok(Ok(())) = read_result {
+                for (offset, reference_raw) in raw_data
+                    .iter()
+                    .take(constants::AT42QT_KEYS_PER_DEVICE)
+                    .enumerate()
+                {
+                    let shifted_sid = Self::shifted_index(sid + offset);
+                    self.reference[shifted_sid] = *reference_raw;
+                }
+                //let shifted_last = Self::shifted_index(sid + 5);
+                //self.reference[shifted_last] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
+            }
+            // PCA9544のチャネルが最後のときに切断する
+            if Self::is_last_channel(ch) {
+                pca.disconnect(i2c, dev).await.ok();
+            }
+        }
+    }
+
     pub async fn touch_sensor_scan(
         &mut self,
         pca: &pca9544::Pca9544,
         at42: &mut at42qt::At42Qt1070,
         i2c: &mut I2c<'static, I2C1, i2c::Async>,
     ) {
+        let work_mode_display = WORK_MODE_DISPLAY.load(Ordering::Relaxed);
         let mut data = [0u16; constants::TOTAL_QT_KEYS];
         for ch in 0..(constants::TOTAL_CH as u8) {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
@@ -121,14 +161,31 @@ impl ReadTouch {
                         raw -= 256; // hiからloを読む間に数値が変化した場合の対策
                     }
                     self.raw_value[shifted_sid] = raw;
-                    data[shifted_sid] = raw.saturating_sub(self.reference[shifted_sid]);
+                    if work_mode_display {
+                        // 表示モード中は補正値を大きい方向にのみ更新する
+                        let adjust = raw.saturating_sub(self.reference[shifted_sid]);
+                        if adjust > self.reference_adjust[shifted_sid] {
+                            self.reference_adjust[shifted_sid] = adjust;
+                        }
+                    }
+                    data[shifted_sid] = raw
+                        .saturating_sub(self.reference[shifted_sid])
+                        .saturating_sub(self.reference_adjust[shifted_sid]);
                 }
             } else {
                 // 読み取り失敗時は前回値を維持してスキャン結果を連続化する
                 for sid in start_ch..(start_ch + constants::AT42QT_KEYS_PER_DEVICE) {
                     let shifted_sid = Self::shifted_index(sid);
-                    data[shifted_sid] =
-                        self.raw_value[shifted_sid].saturating_sub(self.reference[shifted_sid]);
+                    let raw = self.raw_value[shifted_sid];
+                    if work_mode_display {
+                        let adjust = raw.saturating_sub(self.reference[shifted_sid]);
+                        if adjust > self.reference_adjust[shifted_sid] {
+                            self.reference_adjust[shifted_sid] = adjust;
+                        }
+                    }
+                    data[shifted_sid] = raw
+                        .saturating_sub(self.reference[shifted_sid])
+                        .saturating_sub(self.reference_adjust[shifted_sid]);
                 }
             }
             // PCA9544のチャネルが最後のときに切断する
@@ -143,35 +200,7 @@ impl ReadTouch {
         }
 
         if self.reference_counter == 0 {
-            for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
-                let dev = ch / constants::PCA9544_NUM_CHANNELS;
-                let ch_in_dev = Self::convert_channel(ch);
-                pca.select(i2c, dev, ch_in_dev).await.ok();
-
-                let sid = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
-                let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
-                let read_result = with_timeout(
-                    Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
-                    at42.read_6key(i2c, &mut raw_data, true),
-                )
-                .await;
-                if let Ok(Ok(())) = read_result {
-                    for (offset, reference_raw) in raw_data
-                        .iter()
-                        .take(constants::AT42QT_KEYS_PER_DEVICE)
-                        .enumerate()
-                    {
-                        let shifted_sid = Self::shifted_index(sid + offset);
-                        self.reference[shifted_sid] = *reference_raw;
-                    }
-                    let shifted_last = Self::shifted_index(sid + 5);
-                    self.reference[shifted_last] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
-                }
-                // PCA9544のチャネルが最後のときに切断する
-                if Self::is_last_channel(ch) {
-                    pca.disconnect(i2c, dev).await.ok();
-                }
-            }
+            self.set_reference(pca, at42, i2c).await;
         }
         self.reference_counter = (self.reference_counter + 1) % 12;
 
