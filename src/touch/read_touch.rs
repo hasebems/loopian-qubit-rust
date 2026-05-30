@@ -4,9 +4,9 @@ use embassy_time::{Duration, with_timeout};
 use portable_atomic::Ordering;
 
 use crate::TOUCH_RAW_DATA;
+use crate::WORK_MODE_DISPLAY;
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
-use crate::WORK_MODE_DISPLAY;
 use crate::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
 pub struct ReadTouch {
@@ -93,10 +93,11 @@ impl ReadTouch {
         true
     }
 
-    pub async fn set_reference(&mut self,
+    pub async fn set_reference(
+        &mut self,
         pca: &pca9544::Pca9544,
         at42: &mut at42qt::At42Qt1070,
-        i2c: &mut I2c<'static, I2C1, i2c::Async>
+        i2c: &mut I2c<'static, I2C1, i2c::Async>,
     ) {
         for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
@@ -119,8 +120,6 @@ impl ReadTouch {
                     let shifted_sid = Self::shifted_index(sid + offset);
                     self.reference[shifted_sid] = *reference_raw;
                 }
-                //let shifted_last = Self::shifted_index(sid + 5);
-                //self.reference[shifted_last] += 7; // 5キーのうち最後のキーはリファレンス値を高めに取る（タッチセンサーの特性による）
             }
             // PCA9544のチャネルが最後のときに切断する
             if Self::is_last_channel(ch) {

@@ -1,5 +1,5 @@
-use crate::constants::*;
 use crate::WORK_MODE_DISPLAY;
+use crate::constants::*;
 use core::f32::consts::PI;
 use libm::sinf;
 use portable_atomic::Ordering;
@@ -29,8 +29,10 @@ impl RingLed {
         let phase = 0.5 * PI * time_sec; // 0.5pi rad/s
         let color_phase = 0.2 * PI * time_sec; // 10s color cycle for background tint
         let background_tint_r = ((sinf(color_phase) + 1.0) * 0.5).clamp(0.0, 1.0);
-        let background_tint_g = ((sinf(color_phase + (2.0 * PI / 3.0)) + 1.0) * 0.5).clamp(0.0, 1.0);
-        let background_tint_b = ((sinf(color_phase + (4.0 * PI / 3.0)) + 1.0) * 0.5).clamp(0.0, 1.0);
+        let background_tint_g =
+            ((sinf(color_phase + (2.0 * PI / 3.0)) + 1.0) * 0.5).clamp(0.0, 1.0);
+        let background_tint_b =
+            ((sinf(color_phase + (4.0 * PI / 3.0)) + 1.0) * 0.5).clamp(0.0, 1.0);
         let work_mode_display = WORK_MODE_DISPLAY.load(Ordering::Relaxed);
         let setting_blink_on = (self.counter / 25).is_multiple_of(2);
 

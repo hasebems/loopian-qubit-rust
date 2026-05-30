@@ -550,7 +550,8 @@ async fn adc_task(
     let mut a0b0_available = true;
     let mut adc_counter = 0u32;
     let mut baseline_index = 0usize;
-    let mut baseline_history = [[0u16; touch::pressure::PRESSURE_BASELINE_WINDOW]; MAX_ADC_CHANNELS];
+    let mut baseline_history =
+        [[0u16; touch::pressure::PRESSURE_BASELINE_WINDOW]; MAX_ADC_CHANNELS];
     let mut baseline_sums = [0u64; MAX_ADC_CHANNELS];
     let mut samples = [0u32; MAX_ADC_CHANNELS];
 
