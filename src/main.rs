@@ -11,6 +11,8 @@ mod devices;
 mod touch;
 mod ui;
 
+use core::sync::atomic::AtomicBool;
+
 use cortex_m::asm;
 use portable_atomic::{AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
@@ -68,6 +70,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 // ERROR CODE 一覧(一の位も十の位も1-9の範囲)
 // 11: BUFFER_FROM_DISPLAYの初期投入に失敗
 // 12: BUFFER_FROM_DISPLAYの初期投入に失敗（2回目）
+// 13: ADC値取得エラー
+// 14: Touch Sensor初期化タイムアウト
 // 21: Core1 LED Taskの起動に失敗
 // 22: Core1 I2C Taskの起動に失敗
 // 23: Core1 OLED UI Taskの起動に失敗
@@ -79,14 +83,11 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 // 41: タッチイベントのバッファオーバーフロー
 // 42: MIDIイベントの送信失敗（USB未接続など）
 // 43: MIDIイベントのバッファオーバーフロー
-// 44: (unused)
-// 45: RingLEDへの書き込みのタイムアウト
-// 51-54: (unused)
-// 61: ADC値取得エラー
-// 71: OLED初期化エラー
-// 72: 描画バッファ受信エラー
-// 73: 描画バッファ返却エラー
-// 74: Touch Sensor初期化タイムアウト
+// 44: RingLEDへの書き込みのタイムアウト
+// 51: OLED初期化エラー
+// 52: 描画バッファ受信エラー
+// 53: 描画バッファ返却エラー
+// 54: MIDIイベントの受信エラー
 
 // タッチイベントのデータ構造
 #[derive(Copy, Clone, Default)]
@@ -139,6 +140,7 @@ pub static AD_VALUE2: AtomicU32 = AtomicU32::new(0); // ADCの値(B0)
 pub static AD_VALUE3: AtomicU32 = AtomicU32::new(0); // ADCの値(B1)
 pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果
 pub static WORK_MODE: AtomicU8 = AtomicU8::new(0); // 動作モード（Piano/Violin）
+pub static WORK_MODE_DISPLAY: AtomicBool = AtomicBool::new(false); // 動作モード変更表示状態
 
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
@@ -319,7 +321,7 @@ async fn ringled_task(
         // バグ対策: NeoPixel書き込みが固着してもタスク全体が停止しないようタイムアウト保護
         let write_result = with_timeout(Duration::from_millis(8), ws2812.write(&data)).await;
         if write_result.is_err() {
-            ERROR_CODE.store(45, Ordering::Relaxed);
+            ERROR_CODE.store(44, Ordering::Relaxed);
         }
         ticker.next().await;
     }
@@ -584,7 +586,7 @@ async fn adc_task(
                 }
             }
             Err(_) => {
-                ERROR_CODE.store(61, Ordering::Relaxed);
+                ERROR_CODE.store(13, Ordering::Relaxed);
             }
         }
         // AD処理完了後に状態を切り替え
@@ -629,7 +631,7 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     )
     .await;
     if !matches!(touch_init_result, Ok(true)) {
-        ERROR_CODE.store(74, Ordering::Relaxed);
+        ERROR_CODE.store(14, Ordering::Relaxed);
     }
 
     // OLED初期化
@@ -639,7 +641,7 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     )
     .await;
     if !matches!(oled_init_result, Ok(Ok(()))) {
-        ERROR_CODE.store(71, Ordering::Relaxed);
+        ERROR_CODE.store(51, Ordering::Relaxed);
     }
 
     let start = Instant::now();
@@ -650,12 +652,12 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         // OLED更新:UIタスクから描画済みバッファを受信（非ブロッキング）
         if let Ok(buffer) = BUFFER_TO_DISPLAY.try_receive() {
             if oled.flush_buffer(&buffer, &mut i2c).await.is_err() {
-                ERROR_CODE.store(72, Ordering::Relaxed);
+                ERROR_CODE.store(52, Ordering::Relaxed);
             }
 
             // バッファを返却
             if BUFFER_FROM_DISPLAY.try_send(buffer).is_err() {
-                ERROR_CODE.store(73, Ordering::Relaxed);
+                ERROR_CODE.store(53, Ordering::Relaxed);
             }
         }
 
@@ -709,8 +711,10 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
                 ui_page = 4;
                 // 設定変更時にエラーコードをリセットする
                 ERROR_CODE.store(0, Ordering::Relaxed);
+                WORK_MODE_DISPLAY.store(true, Ordering::Relaxed);
             } else if ui_page == 3 || ui_page == 4 {
                 ui_page = 0;
+                WORK_MODE_DISPLAY.store(false, Ordering::Relaxed);
             } else {
                 ui_page += 1;
             }
@@ -722,6 +726,7 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
                 ui_page = 4;
                 // 設定変更時にエラーコードをリセットする
                 ERROR_CODE.store(0, Ordering::Relaxed);
+                WORK_MODE_DISPLAY.store(true, Ordering::Relaxed);
             } else if ui_page == 4 {
                 WORK_MODE.store(
                     (WORK_MODE.load(Ordering::Relaxed) + 1) % 2,
