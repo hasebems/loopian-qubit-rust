@@ -1,8 +1,8 @@
 [package]
 edition = "2024"
 name = "pico_template"
-version = "0.1.0"
-license = "MIT OR Apache-2.0"
+version = "0.1.1"
+license = "MIT"
 
 [features]
 # テスト用: PCA9544を1チャネル×1台構成にする (デフォルトは4チャネル×4台)
