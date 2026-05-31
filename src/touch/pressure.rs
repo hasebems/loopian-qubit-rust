@@ -8,7 +8,8 @@ use portable_atomic::Ordering;
 
 const PRESSURE_THRESHOLD: u32 = 100;
 pub const PRESSURE_BASELINE_WINDOW: usize = 1024;
-const ADJUSTMENT_TABLE: [u32; 4] = [256, 160, 256, 0]; // x/256
+pub const PRESSURE_BASELINE_UPDATE_INTERVAL: u32 = 2;
+const ADJUSTMENT_TABLE: [u32; 4] = [256, 256, 256, 0]; // x/256
 const PRESSURE_SENSITIVITY: u32 = 20; // 大きいほど反応が悪くなる（MIDI値が低いまま）
 const CC11_MIN_VALUE: u8 = 20;
 const CC11_INDEX_MAX: usize = 100;
@@ -117,41 +118,51 @@ pub fn update_pressure(
     baseline_history: &mut [[u16; PRESSURE_BASELINE_WINDOW]; MAX_ADC_CHANNELS],
     baseline_sums: &mut [u64; MAX_ADC_CHANNELS],
     adc_counter: u32,
-    baseline_index: usize,
 ) {
-    let valid_count = (adc_counter as usize).min(PRESSURE_BASELINE_WINDOW);
+    let baseline_counter = adc_counter / PRESSURE_BASELINE_UPDATE_INTERVAL;
+    let valid_count = (baseline_counter as usize).min(PRESSURE_BASELINE_WINDOW);
 
-    if adc_counter > 100 {
-        // センサーおのおの、前回までの積算値から平均値を計算する
-        let mut averages = [0u32; MAX_ADC_CHANNELS];
-        let divisor = if valid_count == 0 {
-            1
-        } else {
-            valid_count as u64
-        };
-        for i in 0..MAX_ADC_CHANNELS {
-            averages[i] = (baseline_sums[i] / divisor) as u32;
-        }
+    if baseline_counter <= 100 {
+        // 起動直後は安定した基準値が得られないため、圧力を0にしておく
+        PRESSURE.store(0, Ordering::Relaxed);
+        return;
+    }
 
-        // 今回のサンプルと平均値の差を計算し、サンプル側が大きい場合は0、小さい場合は差分値として保持
-        let mut diffs = [0u32; MAX_ADC_CHANNELS];
-        for i in 0..MAX_ADC_CHANNELS {
-            diffs[i] = averages[i].saturating_sub(samples[i]);
-        }
+    // センサーおのおの、前回までの積算値から基準値を計算する
+    let mut averages = [0u32; MAX_ADC_CHANNELS];
+    let divisor = if valid_count == 0 {
+        1
+    } else {
+        valid_count as u64
+    };
+    for i in 0..MAX_ADC_CHANNELS {
+        averages[i] = (baseline_sums[i] / divisor) as u32;
+    }
 
-        // 差分値がある一定値以上なら印加圧力とみなし、４つのセンサーの圧力を加算して保存
-        let mut total_pressure = 0u32;
-        for (i, diff) in diffs.iter().enumerate() {
-            let adj_num = ADJUSTMENT_TABLE[i] * *diff / 256; // 調整値を計算
-            if adj_num >= PRESSURE_THRESHOLD {
-                let pressure = (adj_num * adj_num) / 100; // 差分値の二乗を圧力とする
-                total_pressure = total_pressure.saturating_add(pressure);
-            }
+    // 今回のサンプルと基準値の差を計算し、サンプル側が大きい場合は0、小さい場合は差分値として保持
+    let mut diffs = [0u32; MAX_ADC_CHANNELS];
+    for i in 0..MAX_ADC_CHANNELS {
+        diffs[i] = averages[i].saturating_sub(samples[i]);
+    }
+
+    // 差分値がある一定値以上なら印加圧力とみなし、４つのセンサーの圧力を加算して保存
+    let mut total_pressure = 0u32;
+    for (i, diff) in diffs.iter().enumerate() {
+        let adj_num = ADJUSTMENT_TABLE[i] * *diff / 256; // 調整値を計算
+        if adj_num >= PRESSURE_THRESHOLD {
+            let pressure = (adj_num * adj_num) / 100; // 差分値の二乗を圧力とする
+            total_pressure = total_pressure.saturating_add(pressure);
         }
-        PRESSURE.store(total_pressure, Ordering::Relaxed);
+    }
+    PRESSURE.store(total_pressure, Ordering::Relaxed);
+
+    // 基準値を更新しない場合はここで終了
+    if adc_counter % PRESSURE_BASELINE_UPDATE_INTERVAL != 0 {
+        return;
     }
 
     // 差分計算後に履歴と積算値を更新し、基準値を移動平均で保つ
+    let baseline_index = (baseline_counter as usize) % PRESSURE_BASELINE_WINDOW;
     for i in 0..MAX_ADC_CHANNELS {
         let new_sample = samples[i] as u16;
         if valid_count < PRESSURE_BASELINE_WINDOW {

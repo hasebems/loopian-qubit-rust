@@ -600,7 +600,6 @@ async fn adc_task(
                 &mut baseline_history,
                 &mut baseline_sums,
                 adc_counter,
-                baseline_index,
             );
             adc_counter = adc_counter.wrapping_add(1);
             baseline_index = (baseline_index + 1) % touch::pressure::PRESSURE_BASELINE_WINDOW;
