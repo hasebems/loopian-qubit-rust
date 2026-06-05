@@ -157,7 +157,7 @@ pub fn update_pressure(
     PRESSURE.store(total_pressure, Ordering::Relaxed);
 
     // 基準値を更新しない場合はここで終了
-    if adc_counter % PRESSURE_BASELINE_UPDATE_INTERVAL != 0 {
+    if !adc_counter.is_multiple_of(PRESSURE_BASELINE_UPDATE_INTERVAL) {
         return;
     }
 
