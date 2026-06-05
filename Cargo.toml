@@ -7,8 +7,6 @@ license = "MIT"
 [features]
 # テスト用: PCA9544を1チャネル×1台構成にする (デフォルトは4チャネル×4台)
 test_mode = []
-# ADCを4チャンネル構成にする (デフォルトは3チャンネル)
-adc_ch4 = []
 
 [dependencies]
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", branch = "main" }

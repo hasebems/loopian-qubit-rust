@@ -169,11 +169,11 @@ fn main() -> ! {
     let switch2 = Input::new(p.PIN_4, Pull::Up);
 
     // ADC
-    let (adc, adc_a1, adc_a2, adc_change) = (
+    let (adc, adc_a1, adc_a2, adc_a3) = (
         embassy_rp::adc::Adc::new(p.ADC, Irqs, embassy_rp::adc::Config::default()),
+        embassy_rp::adc::Channel::new_pin(p.PIN_26, Pull::None),
         embassy_rp::adc::Channel::new_pin(p.PIN_27, Pull::None),
         embassy_rp::adc::Channel::new_pin(p.PIN_28, Pull::None),
-        Output::new(p.PIN_5, Level::Low),
     );
     let adc_dma = embassy_rp::dma::Channel::new(p.DMA_CH1, Irqs);
 
@@ -267,11 +267,11 @@ fn main() -> ! {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(33, Ordering::Relaxed),
         }
-        match ringled_task(common, sm0, p.DMA_CH0, p.PIN_26, ws2812_program) {
+        match ringled_task(common, sm0, p.DMA_CH0, p.PIN_5, ws2812_program) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(34, Ordering::Relaxed),
         }
-        match adc_task(adc, adc_a1, adc_a2, adc_change, adc_dma) {
+        match adc_task(adc, adc_a1, adc_a2, adc_a3, adc_dma) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(35, Ordering::Relaxed),
         }
@@ -286,7 +286,7 @@ async fn ringled_task(
     mut common: embassy_rp::pio::Common<'static, PIO0>,
     sm: embassy_rp::pio::StateMachine<'static, PIO0, 0>,
     dma: Peri<'static, DMA_CH0>,
-    pin: Peri<'static, embassy_rp::peripherals::PIN_26>,
+    pin: Peri<'static, embassy_rp::peripherals::PIN_5>,
     program: &'static PioWs2812Program<'static, PIO0>,
 ) {
     // Neopixel on D0 (GP26)
@@ -542,12 +542,11 @@ async fn adc_task(
     mut adc: embassy_rp::adc::Adc<'static, embassy_rp::adc::Async>,
     adc_a1: embassy_rp::adc::Channel<'static>,
     adc_a2: embassy_rp::adc::Channel<'static>,
-    mut adc_change: Output<'static>,
+    adc_a3: embassy_rp::adc::Channel<'static>,
     mut adc_dma: embassy_rp::dma::Channel<'static>,
 ) {
-    let mut channels = [adc_a1, adc_a2];
-    let mut ad_value = [0u16; 2];
-    let mut a0b0_available = true;
+    let mut channels = [adc_a1, adc_a2, adc_a3];
+    let mut ad_value = [0u16; 3];
     let mut adc_counter = 0u32;
     let mut baseline_index = 0usize;
     let mut baseline_history =
@@ -556,14 +555,7 @@ async fn adc_task(
     let mut samples = [0u32; MAX_ADC_CHANNELS];
 
     loop {
-        // multiplexer の切り替え
-        if a0b0_available {
-            adc_change.set_low();
-        } else {
-            adc_change.set_high();
-        }
-
-        // マルチプレクサのセットルタイムと ADC読み込み準備時間を確保
+        // ADC読み込み準備時間を確保
         Timer::after_millis(5).await; // 1sensorあたり10msec
 
         match adc
@@ -571,39 +563,27 @@ async fn adc_task(
             .await
         {
             Ok(()) => {
-                if a0b0_available {
-                    AD_VALUE0.store(ad_value[0] as u32, Ordering::Relaxed);
-                    AD_VALUE2.store(ad_value[1] as u32, Ordering::Relaxed);
-                    samples[0] = ad_value[0] as u32;
-                    samples[2] = ad_value[1] as u32;
-                } else {
-                    AD_VALUE1.store(ad_value[0] as u32, Ordering::Relaxed);
-                    AD_VALUE3.store(ad_value[1] as u32, Ordering::Relaxed);
-                    samples[1] = ad_value[0] as u32;
-                    #[cfg(feature = "adc_ch4")]
-                    {
-                        samples[3] = ad_value[1] as u32;
-                    }
-                }
+                AD_VALUE0.store(ad_value[0] as u32, Ordering::Relaxed);
+                AD_VALUE1.store(ad_value[1] as u32, Ordering::Relaxed);
+                AD_VALUE2.store(ad_value[2] as u32, Ordering::Relaxed);
+                samples[0] = ad_value[0] as u32;
+                samples[1] = ad_value[1] as u32;
+                samples[2] = ad_value[2] as u32;
             }
             Err(_) => {
                 ERROR_CODE.store(13, Ordering::Relaxed);
             }
         }
-        // AD処理完了後に状態を切り替え
-        a0b0_available = !a0b0_available;
 
         // 圧力を計算
-        if a0b0_available {
-            touch::pressure::update_pressure(
-                &samples,
-                &mut baseline_history,
-                &mut baseline_sums,
-                adc_counter,
-            );
-            adc_counter = adc_counter.wrapping_add(1);
-            baseline_index = (baseline_index + 1) % touch::pressure::PRESSURE_BASELINE_WINDOW;
-        }
+        touch::pressure::update_pressure(
+            &samples,
+            &mut baseline_history,
+            &mut baseline_sums,
+            adc_counter,
+        );
+        adc_counter = adc_counter.wrapping_add(1);
+        baseline_index = (baseline_index + 1) % touch::pressure::PRESSURE_BASELINE_WINDOW;
     }
 }
 

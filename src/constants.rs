@@ -31,10 +31,6 @@ pub const TOUCH_INDEX_SHIFT: usize = TOTAL_QT_KEYS - 6;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
 
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
-
-#[cfg(feature = "adc_ch4")]
-pub const MAX_ADC_CHANNELS: usize = 4; // ADCのチャンネル数 (4ch構成)
-#[cfg(not(feature = "adc_ch4"))]
 pub const MAX_ADC_CHANNELS: usize = 3; // ADCのチャンネル数
 
 // MIDI
