@@ -102,7 +102,7 @@ struct TouchEvent(u8, u8, u8); // (status, note, velocity)
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
 // Core1 stack
-static mut CORE1_STACK: Stack<{ constants::CORE1_STACK_SIZE }> = Stack::new();
+static mut CORE1_STACK: Stack<{ CORE1_STACK_SIZE }> = Stack::new();
 static EXECUTOR0: StaticCell<embassy_executor::Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<embassy_executor::Executor> = StaticCell::new();
 
@@ -147,12 +147,9 @@ pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false);
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
     CriticalSectionRawMutex,
-    [u16; (constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES) as usize
-        * constants::AT42QT_KEYS_PER_DEVICE],
+    [u16; (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize * AT42QT_KEYS_PER_DEVICE],
 > = Mutex::new(
-    [0u16;
-        (constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES) as usize
-            * constants::AT42QT_KEYS_PER_DEVICE],
+    [0u16; (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize * AT42QT_KEYS_PER_DEVICE],
 );
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -302,7 +299,7 @@ async fn ringled_task(
     let mut ring_led = RingLed::new();
     let mut ticker = Ticker::every(embassy_time::Duration::from_millis(20));
 
-    let mut data = [RGBW::default(); constants::NUM_LEDS];
+    let mut data = [RGBW::default(); NUM_LEDS];
     loop {
         let to_touch_location = |v: i32| -> Option<f32> {
             if (0..10000).contains(&v) {
@@ -364,11 +361,14 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         Timer::after(embassy_time::Duration::from_millis(10)).await;
         // ticker.next().await; // タッチスキャンはtickerに合わせて実行
         let start = Instant::now();
-        let work_mode = WORK_MODE.load(Ordering::Relaxed);
+        let work_mode = WORK_MODE
+            .load(Ordering::Relaxed)
+            .try_into()
+            .unwrap_or(WorkMode::Piano);
 
         // タッチセンサの生データを取得してQubitTouchにセット
         // ロック保持時間を最小化し、以降の await をロック外で実行する
-        let mut touch_values = [0u16; constants::TOTAL_QT_KEYS];
+        let mut touch_values = [0u16; TOTAL_QT_KEYS];
         {
             let data = TOUCH_RAW_DATA.lock().await;
             touch_values.copy_from_slice(&*data);
@@ -391,12 +391,12 @@ async fn qubit_touch_task(mut sender: Sender<'static, Driver<'static, USB>>) {
             }
             for packet in packets.iter().take(idx) {
                 let status = packet.0 & 0xf0; // コマンド部分
-                let midi_channel = if work_mode == 0 {
-                    constants::MIDI_CH_FLOW
+                let midi_channel = if work_mode == WorkMode::Piano {
+                    MIDI_CH_FLOW
                 } else {
-                    constants::MIDI_CH_VIOLIN
+                    MIDI_CH_VIOLIN
                 };
-                let status = if status == constants::RINGLED_CMD_TX_MOVED {
+                let status = if status == RINGLED_CMD_TX_MOVED {
                     0x80 | midi_channel // 移動イベントはNote Offとして扱う
                 } else {
                     status | midi_channel
@@ -453,7 +453,7 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
     let mut buf = [0; 64];
 
     let set_rx_led = |note: u8, on: bool| {
-        let led = (note as usize).min(constants::NUM_LEDS - 1);
+        let led = (note as usize).min(NUM_LEDS - 1);
         let bit = 1u32 << led;
         if on {
             RINGLED_RX_BITS.fetch_or(bit, Ordering::Relaxed);

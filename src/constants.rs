@@ -42,3 +42,23 @@ pub const PIANO_OFFSET: u8 = KEYBD_LO - 4;
 pub const VIOLIN_OFFSET: u8 = 55; // バイオリンモードのMIDIノートオフセット
 
 pub const MIDI_TX_TIMEOUT_MS: u64 = 20;
+
+// Work mode
+#[repr(u8)]
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum WorkMode {
+    Piano = 0,
+    Violin = 1,
+}
+// u8 から WorkMode への変換を定義
+impl TryFrom<u8> for WorkMode {
+    type Error = ();
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(WorkMode::Piano),
+            1 => Ok(WorkMode::Violin),
+            _ => Err(()), // 定義外の数値の場合はエラー
+        }
+    }
+}

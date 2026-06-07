@@ -3,14 +3,14 @@
 //  Released under the MIT license
 //  https://opensource.org/licenses/mit-license.php
 //
-use crate::constants::{self, PIANO_OFFSET, VIOLIN_OFFSET};
+use crate::constants::*;
 use crate::{ANY_TOUCH, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 use portable_atomic::Ordering;
 
 // =========================================================
 //      Touch Constants
 // =========================================================
-pub const MAX_PADS: u16 = constants::TOTAL_QT_KEYS as u16; // MAX_SENS;
+pub const MAX_PADS: u16 = TOTAL_QT_KEYS as u16; // MAX_SENS;
 pub const TOUCH_THRESHOLD: u16 = 40; // Threshold for touch point detection
 pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec あたりの片側変化量
 pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
@@ -106,10 +106,10 @@ where
         location: f32,
         intensity: i16,
         callback: F,
-        work_mode: u8,
+        work_mode: WorkMode,
         velocity_query: impl Fn(u8, i16) -> u8,
     ) {
-        if work_mode == 1 {
+        if work_mode == WorkMode::Violin {
             self.new_location = Self::new_location_violin;
             self.offset_note = VIOLIN_OFFSET;
         } else {
@@ -130,7 +130,7 @@ where
                 let note = self.real_crnt_note.saturating_add(self.offset_note);
                 let note_on_velocity = velocity_query(note, self.intensity);
                 midi_callback(
-                    constants::RINGLED_CMD_TX_ON | self.id as u8,
+                    RINGLED_CMD_TX_ON | self.id as u8,
                     note,
                     note_on_velocity,
                     self.center_location,
@@ -165,13 +165,13 @@ where
                 let note = updated_note.saturating_add(self.offset_note);
                 let note_on_velocity = velocity_query(note, self.intensity);
                 midi_callback(
-                    constants::RINGLED_CMD_TX_ON | self.id as u8,
+                    RINGLED_CMD_TX_ON | self.id as u8,
                     note,
                     note_on_velocity,
                     self.center_location,
                 );
                 midi_callback(
-                    constants::RINGLED_CMD_TX_MOVED | self.id as u8, // Note Off と同じ
+                    RINGLED_CMD_TX_MOVED | self.id as u8, // Note Off と同じ
                     self.real_crnt_note + self.offset_note,
                     0x40,
                     self.center_location,
@@ -190,7 +190,7 @@ where
         // MIDI Note Off
         if let Some(ref midi_callback) = self.midi_callback {
             midi_callback(
-                constants::RINGLED_CMD_TX_OFF | self.id as u8,
+                RINGLED_CMD_TX_OFF | self.id as u8,
                 self.real_crnt_note + self.offset_note,
                 0x40,
                 self.center_location,
@@ -282,7 +282,7 @@ where
     F: Fn(u8, u8, u8, f32) + Clone,
 {
     pads: [Pad; MAX_PADS as usize], // パッドの状態を保持する配列
-    touch_points: [TouchPoint<F>; constants::MAX_TOUCH_POINTS], // Store detected touch points
+    touch_points: [TouchPoint<F>; MAX_TOUCH_POINTS], // Store detected touch points
     midi_callback: F,               // MIDI callback function
     touch_count: usize,             // Current number of touch points
     last_note: u8,                  // 最後に送信したMIDIノート番号
@@ -296,14 +296,14 @@ where
     F: Fn(u8, u8, u8, f32) + Clone,
 {
     fn note_on_velocity_from_context(
-        work_mode: u8,
+        work_mode: WorkMode,
         last_note: u8,
         on_time: u32,
         off_time: u32,
         note: u8,
         intensity: i16,
     ) -> u8 {
-        if work_mode == 1 {
+        if work_mode == WorkMode::Violin {
             Self::calc_violin_note_on_velocity_from(last_note, on_time, off_time, note)
         } else {
             Self::default_note_on_velocity(intensity)
@@ -427,9 +427,9 @@ where
         }
     }
     /// 差分の符号が変化した時、その位置の値がある一定の値以上なら、そこをタッチポイントとする
-    pub fn seek_and_update_touch_point(&mut self, work_mode: u8) {
-        let mut temp_touch_point: [(f32, f32, i16); constants::MAX_TOUCH_POINTS] =
-            [(INIT_VAL, INIT_VAL, 0); constants::MAX_TOUCH_POINTS];
+    pub fn seek_and_update_touch_point(&mut self, work_mode: WorkMode) {
+        let mut temp_touch_point: [(f32, f32, i16); MAX_TOUCH_POINTS] =
+            [(INIT_VAL, INIT_VAL, 0); MAX_TOUCH_POINTS];
         let mut temp_index = 0;
 
         // 1: 全パッドを走査し、差分の符号が変化した箇所をタッチポイントとみなし、temp_touch_point に保存
@@ -449,7 +449,7 @@ where
     }
     fn scan_pads(
         &mut self,
-        temp_touch_point: &mut [(f32, f32, i16); constants::MAX_TOUCH_POINTS],
+        temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
         temp_index: &mut usize,
     ) {
         let mut diff_before: i16 = 0;
@@ -469,7 +469,7 @@ where
                         0,
                     );
                     *temp_index += 1;
-                    if *temp_index >= constants::MAX_TOUCH_POINTS {
+                    if *temp_index >= MAX_TOUCH_POINTS {
                         break; // Prevent overflow of touch points
                     }
                 }
@@ -480,7 +480,7 @@ where
     }
     fn decide_touch_point(
         &mut self,
-        temp_touch_point: &mut [(f32, f32, i16); constants::MAX_TOUCH_POINTS],
+        temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
         temp_index: &mut usize,
     ) {
         for tp in temp_touch_point.iter_mut().take(*temp_index) {
@@ -507,12 +507,11 @@ where
     }
     fn collate_touch_point(
         &mut self,
-        temp_touch_point: &[(f32, f32, i16); constants::MAX_TOUCH_POINTS],
+        temp_touch_point: &[(f32, f32, i16); MAX_TOUCH_POINTS],
         temp_index: usize,
-        work_mode: u8,
+        work_mode: WorkMode,
     ) {
-        let mut display_index: [bool; constants::MAX_TOUCH_POINTS] =
-            [false; constants::MAX_TOUCH_POINTS];
+        let mut display_index: [bool; MAX_TOUCH_POINTS] = [false; MAX_TOUCH_POINTS];
         let mut latest_note: Option<u8> = None;
         let velocity_ctx = (work_mode, self.last_note, self.on_time, self.off_time);
         for tp in temp_touch_point.iter().take(temp_index) {
@@ -598,7 +597,12 @@ where
             led_callback(-1.0, 0);
         }
     }
-    fn new_touch_point(&mut self, location: f32, intensity: u16, work_mode: u8) -> Option<u8> {
+    fn new_touch_point(
+        &mut self,
+        location: f32,
+        intensity: u16,
+        work_mode: WorkMode,
+    ) -> Option<u8> {
         let velocity_ctx = (work_mode, self.last_note, self.on_time, self.off_time);
 
         let touched = self
@@ -633,8 +637,7 @@ where
         }
     }
     fn erase_touch_point(&mut self) {
-        let mut display_ids: [Option<usize>; constants::MAX_TOUCH_POINTS] =
-            [None; constants::MAX_TOUCH_POINTS];
+        let mut display_ids: [Option<usize>; MAX_TOUCH_POINTS] = [None; MAX_TOUCH_POINTS];
         let mut display_count = 0;
         let mut released_note: Option<u8> = None;
         let mut released_on_time: Option<u32> = None;

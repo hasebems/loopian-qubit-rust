@@ -10,7 +10,7 @@ const PRESSURE_THRESHOLD: u32 = 100;
 pub const PRESSURE_BASELINE_WINDOW: usize = 512;
 const ADJUSTMENT_TABLE: [u32; 4] = [200, 200, 270, 0]; // x/256
 const BASELINE_WEAKENED_DIFF_PERCENT: u32 = 50;
-const PRESSURE_SENSITIVITY: u32 = 20; // 大きいほど反応が悪くなる（MIDI値が低いまま）
+const PRESSURE_SENSITIVITY: u32 = 16; // 大きいほど反応が悪くなる（MIDI値が低いまま）
 const CC11_MIN_VALUE: u8 = 20;
 const CC11_INDEX_MAX: usize = 100;
 const CC11_SEND_DEADBAND: u8 = 4;
@@ -20,23 +20,23 @@ const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
 const MIDI_CC_ALL_SOUND_OFF: u8 = 120;
 const MIDI_CC_EXPRESSION: u8 = 11;
 const CC11_TABLE: [u8; CC11_INDEX_MAX + 1] = [
-    0, 3, 6, 9, 12, 15, 18, 20, 23, 25, 28, 30, 32, 34, 36, 38, 40, 42, 44, 45, 47, 49, 50, 52, 54,
-    55, 56, 58, 59, 61, 62, 63, 64, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81,
-    82, 83, 83, 84, 85, 86, 86, 87, 88, 89, 89, 90, 91, 91, 92, 93, 93, 94, 94, 95, 96, 96, 97, 97,
-    98, 98, 99, 100, 100, 101, 101, 102, 102, 103, 103, 103, 104, 104, 105, 105, 106, 106, 106,
-    107, 107, 108, 108, 108, 109, 109, 110, 110,
+    40, 43, 45, 48, 50, 52, 54, 56, 58, 59, 61, 62, 64, 65, 66, 67, 69, 70, 71, 72, 73, 74, 75, 76,
+    77, 78, 78, 79, 80, 81, 82, 82, 83, 84, 84, 85, 86, 86, 87, 88, 88, 89, 89, 90, 91, 91, 92, 92,
+    93, 93, 94, 94, 95, 95, 96, 96, 97, 97, 98, 98, 98, 99, 99, 100, 100, 100, 101, 101, 102, 102,
+    102, 103, 103, 103, 104, 104, 105, 105, 105, 106, 106, 106, 107, 107, 107, 108, 108, 108, 108,
+    109, 109, 109, 110, 110, 110, 111, 111, 111, 111, 112, 112,
 ];
 
 pub struct PressureMidiState {
     last_sent_cc11: u8,
-    previous_work_mode: u8,
+    previous_work_mode: WorkMode,
 }
 
 impl PressureMidiState {
     pub const fn new() -> Self {
         Self {
             last_sent_cc11: CC11_MIN_VALUE,
-            previous_work_mode: 0,
+            previous_work_mode: WorkMode::Piano,
         }
     }
 
@@ -45,11 +45,11 @@ impl PressureMidiState {
         CC11_MIN_VALUE
     }
 
-    fn entered_violin_mode(&self, work_mode: u8) -> bool {
-        self.previous_work_mode != 1 && work_mode == 1
+    fn entered_violin_mode(&self, work_mode: WorkMode) -> bool {
+        self.previous_work_mode != WorkMode::Violin && work_mode == WorkMode::Violin
     }
 
-    fn update_work_mode(&mut self, work_mode: u8) {
+    fn update_work_mode(&mut self, work_mode: WorkMode) {
         self.previous_work_mode = work_mode;
     }
 
@@ -94,9 +94,9 @@ async fn send_control_change(
 pub async fn send_pressure_cc11_if_needed(
     sender: &mut Sender<'static, Driver<'static, USB>>,
     pressure_midi: &mut PressureMidiState,
-    work_mode: u8,
+    work_mode: WorkMode,
 ) -> Result<(), ()> {
-    if work_mode != 1 {
+    if work_mode != WorkMode::Violin {
         pressure_midi.update_work_mode(work_mode);
         return Ok(());
     }

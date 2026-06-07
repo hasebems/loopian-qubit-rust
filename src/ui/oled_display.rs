@@ -1,3 +1,4 @@
+use crate::constants::*;
 use core::fmt::Write;
 use embedded_graphics::image::{Image, ImageRaw};
 use embedded_graphics::mono_font::MonoTextStyle;
@@ -268,9 +269,12 @@ fn display4(buffer: &mut OledBuffer, counter: u32) {
     let _ = write!(text, "up/down   quit");
     let _ = Text::new(&text, Point::new(20, 56), style_small).draw(buffer);
 
-    let work_mode = WORK_MODE.load(core::sync::atomic::Ordering::Relaxed);
+    let work_mode = WORK_MODE
+        .load(core::sync::atomic::Ordering::Relaxed)
+        .try_into()
+        .unwrap_or(WorkMode::Piano);
     if counter % 10 < 5 {
-        if work_mode == 0 {
+        if work_mode == WorkMode::Piano {
             let _ = Rectangle::new(Point::new(8, 10), Size::new(100, 14))
                 .into_styled(outline)
                 .draw(buffer);
