@@ -1,5 +1,5 @@
-use crate::{PRESSURE, DEBUG_VALUE};
 use crate::constants::*;
+use crate::{ANY_TOUCH, DEBUG_VALUE, PRESSURE};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
 use embassy_time::{Duration, with_timeout};
@@ -7,13 +7,14 @@ use embassy_usb::class::midi::Sender;
 use portable_atomic::Ordering;
 
 const PRESSURE_THRESHOLD: u32 = 100;
-pub const PRESSURE_BASELINE_WINDOW: usize = 1024;
+pub const PRESSURE_BASELINE_WINDOW: usize = 512;
 const ADJUSTMENT_TABLE: [u32; 4] = [200, 200, 270, 0]; // x/256
+const BASELINE_WEAKENED_DIFF_PERCENT: u32 = 50;
 const PRESSURE_SENSITIVITY: u32 = 20; // 大きいほど反応が悪くなる（MIDI値が低いまま）
 const CC11_MIN_VALUE: u8 = 20;
 const CC11_INDEX_MAX: usize = 100;
-const CC11_SEND_DEADBAND: u8 = 2;
-const CC11_MAX_STEP: u8 = 5;
+const CC11_SEND_DEADBAND: u8 = 4;
+const CC11_MAX_STEP: u8 = 8;
 const MIDI_CC_CIN: u8 = 0x0b;
 const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
 const MIDI_CC_ALL_SOUND_OFF: u8 = 120;
@@ -128,12 +129,7 @@ pub fn update_pressure(
 
     if work_mode_display || *baseline_wptr < PRESSURE_BASELINE_WINDOW {
         // ワークモードでは基準値の更新のみ行う（センサーを触っていないことが前提）
-        update_baseline_history(
-            samples,
-            baseline_history,
-            baseline_sums,
-            baseline_wptr,
-        );
+        update_baseline_history(samples, baseline_history, baseline_sums, baseline_wptr);
         return;
     }
 
@@ -151,21 +147,22 @@ pub fn update_pressure(
 
     // 差分値がある一定値以上なら印加圧力とみなし、４つのセンサーの圧力を加算して保存
     let mut total_pressure = 0u32;
-    let mut updated = false;
+    let mut baseline_samples = *samples;
     for (i, diff) in diffs.iter().enumerate() {
         let adj_num = ADJUSTMENT_TABLE[i] * *diff / 256; // 調整値を計算
         if adj_num >= PRESSURE_THRESHOLD {
             let pressure = (adj_num * adj_num) / 100; // 差分値の二乗を圧力とする
             total_pressure = total_pressure.saturating_add(pressure);
-            updated = true;
         }
+        baseline_samples[i] =
+            averages[i].saturating_sub(diffs[i] * BASELINE_WEAKENED_DIFF_PERCENT / 100);
     }
     PRESSURE.store(total_pressure, Ordering::Relaxed);
 
-    // 基準値の更新処理（操作されていないときのみ更新する）
-    if !updated {
+    // 基準値の更新
+    if !ANY_TOUCH.load(Ordering::Relaxed) {
         update_baseline_history(
-            samples,
+            &baseline_samples,
             baseline_history,
             baseline_sums,
             baseline_wptr,

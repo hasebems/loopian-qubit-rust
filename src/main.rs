@@ -142,6 +142,7 @@ pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果
 pub static WORK_MODE: AtomicU8 = AtomicU8::new(0); // 動作モード（Piano/Violin）
 pub static WORK_MODE_DISPLAY: AtomicBool = AtomicBool::new(false); // 動作モード変更表示状態
 pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用
+pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false);
 
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<

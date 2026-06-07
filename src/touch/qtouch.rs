@@ -4,7 +4,8 @@
 //  https://opensource.org/licenses/mit-license.php
 //
 use crate::constants::{self, PIANO_OFFSET, VIOLIN_OFFSET};
-use crate::{TOUCH0, TOUCH1, TOUCH2, TOUCH3};
+use crate::{ANY_TOUCH, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
+use portable_atomic::Ordering;
 
 // =========================================================
 //      Touch Constants
@@ -683,8 +684,10 @@ where
         if touched {
             self.on_time = latest_on_time;
             self.off_time = 0;
+            ANY_TOUCH.store(true, Ordering::Relaxed);
         } else {
             self.off_time = self.off_time.wrapping_add(1);
+            ANY_TOUCH.store(false, Ordering::Relaxed);
         }
     }
 
