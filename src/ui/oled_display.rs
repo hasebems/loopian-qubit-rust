@@ -30,6 +30,8 @@ use crate::{
     TOUCH3,
     //ERROR_CODE,
     WORK_MODE,
+    //WORK_MODE_DISPLAY,
+    //DEBUG_VALUE,
 };
 
 pub struct GraphicsDisplay {
@@ -122,12 +124,12 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
         .into_styled(outline)
         .draw(buffer);
 
-    let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
 
     let mut text1: String<32> = String::new();
     let _ = write!(text1, "Cntr: {}", counter);
-    let _ = Text::new(&text1, Point::new(6, 16), style_big).draw(buffer);
+    let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
 
     let ad_value1 = AD_VALUE0.load(core::sync::atomic::Ordering::Relaxed);
     draw_bar(buffer, 0, ad_value1);
@@ -140,17 +142,17 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
 
     text1.clear();
     let _ = write!(text1, "Prs:");
-    let _ = Text::new(&text1, Point::new(6, 32), style_big).draw(buffer);
+    let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
 
     let pressure = PRESSURE.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
     let _ = write!(text1, "Calc.Prs: {:>6}", pressure);
-    let _ = Text::new(&text1, Point::new(6, 44), style_small).draw(buffer);
+    let _ = Text::new(&text1, Point::new(6, 40), style_small).draw(buffer);
 
     let elapsed_time = ELAPSED_TIME.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Time: {}", elapsed_time);
-    let _ = Text::new(&text1, Point::new(6, 56), style_small).draw(buffer);
+    let _ = write!(text1, "Elapse: {}", elapsed_time);
+    let _ = Text::new(&text1, Point::new(6, 52), style_small).draw(buffer);
 }
 
 fn display2(buffer: &mut OledBuffer) {

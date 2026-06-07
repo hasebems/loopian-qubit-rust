@@ -1,4 +1,4 @@
-use crate::PRESSURE;
+use crate::{PRESSURE, DEBUG_VALUE};
 use crate::constants::*;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
@@ -8,8 +8,7 @@ use portable_atomic::Ordering;
 
 const PRESSURE_THRESHOLD: u32 = 100;
 pub const PRESSURE_BASELINE_WINDOW: usize = 1024;
-pub const PRESSURE_BASELINE_UPDATE_INTERVAL: u32 = 2;
-const ADJUSTMENT_TABLE: [u32; 4] = [256, 256, 256, 0]; // x/256
+const ADJUSTMENT_TABLE: [u32; 4] = [200, 200, 270, 0]; // x/256
 const PRESSURE_SENSITIVITY: u32 = 20; // 大きいほど反応が悪くなる（MIDI値が低いまま）
 const CC11_MIN_VALUE: u8 = 20;
 const CC11_INDEX_MAX: usize = 100;
@@ -117,26 +116,31 @@ pub fn update_pressure(
     samples: &[u32; MAX_ADC_CHANNELS],
     baseline_history: &mut [[u16; PRESSURE_BASELINE_WINDOW]; MAX_ADC_CHANNELS],
     baseline_sums: &mut [u64; MAX_ADC_CHANNELS],
+    baseline_wptr: &mut usize,
     adc_counter: u32,
+    work_mode_display: bool,
 ) {
-    let baseline_counter = adc_counter / PRESSURE_BASELINE_UPDATE_INTERVAL;
-    let valid_count = (baseline_counter as usize).min(PRESSURE_BASELINE_WINDOW);
-
-    if baseline_counter <= 100 {
+    if adc_counter <= 100 {
         // 起動直後は安定した基準値が得られないため、圧力を0にしておく
         PRESSURE.store(0, Ordering::Relaxed);
         return;
     }
 
+    if work_mode_display || *baseline_wptr < PRESSURE_BASELINE_WINDOW {
+        // ワークモードでは基準値の更新のみ行う（センサーを触っていないことが前提）
+        update_baseline_history(
+            samples,
+            baseline_history,
+            baseline_sums,
+            baseline_wptr,
+        );
+        return;
+    }
+
     // センサーおのおの、前回までの積算値から基準値を計算する
     let mut averages = [0u32; MAX_ADC_CHANNELS];
-    let divisor = if valid_count == 0 {
-        1
-    } else {
-        valid_count as u64
-    };
     for i in 0..MAX_ADC_CHANNELS {
-        averages[i] = (baseline_sums[i] / divisor) as u32;
+        averages[i] = (baseline_sums[i] / PRESSURE_BASELINE_WINDOW as u64) as u32;
     }
 
     // 今回のサンプルと基準値の差を計算し、サンプル側が大きい場合は0、小さい場合は差分値として保持
@@ -147,33 +151,44 @@ pub fn update_pressure(
 
     // 差分値がある一定値以上なら印加圧力とみなし、４つのセンサーの圧力を加算して保存
     let mut total_pressure = 0u32;
+    let mut updated = false;
     for (i, diff) in diffs.iter().enumerate() {
         let adj_num = ADJUSTMENT_TABLE[i] * *diff / 256; // 調整値を計算
         if adj_num >= PRESSURE_THRESHOLD {
             let pressure = (adj_num * adj_num) / 100; // 差分値の二乗を圧力とする
             total_pressure = total_pressure.saturating_add(pressure);
+            updated = true;
         }
     }
     PRESSURE.store(total_pressure, Ordering::Relaxed);
 
-    // 基準値を更新しない場合はここで終了
-    if !adc_counter.is_multiple_of(PRESSURE_BASELINE_UPDATE_INTERVAL) {
-        return;
+    // 基準値の更新処理（操作されていないときのみ更新する）
+    if !updated {
+        update_baseline_history(
+            samples,
+            baseline_history,
+            baseline_sums,
+            baseline_wptr,
+        );
     }
+}
 
+fn update_baseline_history(
+    samples: &[u32; MAX_ADC_CHANNELS],
+    baseline_history: &mut [[u16; PRESSURE_BASELINE_WINDOW]; MAX_ADC_CHANNELS],
+    baseline_sums: &mut [u64; MAX_ADC_CHANNELS],
+    baseline_wptr: &mut usize,
+) {
     // 差分計算後に履歴と積算値を更新し、基準値を移動平均で保つ
-    let baseline_index = (baseline_counter as usize) % PRESSURE_BASELINE_WINDOW;
+    let baseline_index = *baseline_wptr % PRESSURE_BASELINE_WINDOW;
     for i in 0..MAX_ADC_CHANNELS {
         let new_sample = samples[i] as u16;
-        if valid_count < PRESSURE_BASELINE_WINDOW {
-            baseline_history[i][baseline_index] = new_sample;
-            baseline_sums[i] = baseline_sums[i].wrapping_add(new_sample as u64);
-        } else {
-            let old_sample = baseline_history[i][baseline_index] as u64;
-            baseline_history[i][baseline_index] = new_sample;
-            baseline_sums[i] = baseline_sums[i]
-                .saturating_sub(old_sample)
-                .saturating_add(new_sample as u64);
-        }
+        let old_sample = baseline_history[i][baseline_index] as u64;
+        baseline_history[i][baseline_index] = new_sample;
+        baseline_sums[i] = baseline_sums[i]
+            .saturating_sub(old_sample)
+            .saturating_add(new_sample as u64);
     }
+    *baseline_wptr = baseline_wptr.wrapping_add(1);
+    DEBUG_VALUE.store(*baseline_wptr as u32, Ordering::Relaxed);
 }

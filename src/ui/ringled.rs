@@ -40,12 +40,15 @@ impl RingLed {
             let source_index = Self::source_index_for_led(i);
             let source_pos = source_index as f32;
             let led_angle = (i as f32 / num_leds_f) * 2.0 * PI;
+
             // 8x finer spatial wave and darker output for NeoPixel brightness perception.
             let wave = (sinf(led_angle * 8.0 - phase) + 1.0) * 0.5;
             let wave_shaped = wave * wave;
+
             // Make the dark part clearly off instead of keeping a constant floor brightness.
             let background_level = ((wave_shaped - 0.18) / 0.82).clamp(0.0, 1.0);
             let white = (background_level * 20.0).clamp(0.0, 255.0) as u8;
+            let mut white_out = 0;
 
             let mut r = 0u8;
             let mut g = 0u8;
@@ -69,18 +72,19 @@ impl RingLed {
                     g = g.saturating_add(120);
                     b = b.saturating_add(180);
                 }
-            }
 
-            let white_out = if work_mode_display && setting_blink_on && i % 6 == 0 {
-                24
+                if white > 0 && r == 0 && g == 0 && b == 0 {
+                    let tint_strength = background_level * 14.0;
+                    r = (background_tint_r * tint_strength).clamp(0.0, 255.0) as u8;
+                    g = (background_tint_g * tint_strength).clamp(0.0, 255.0) as u8;
+                    b = (background_tint_b * tint_strength).clamp(0.0, 255.0) as u8;
+                }
             } else {
-                0
-            };
-            if !work_mode_display && white > 0 && r == 0 && g == 0 && b == 0 {
-                let tint_strength = background_level * 14.0;
-                r = (background_tint_r * tint_strength).clamp(0.0, 255.0) as u8;
-                g = (background_tint_g * tint_strength).clamp(0.0, 255.0) as u8;
-                b = (background_tint_b * tint_strength).clamp(0.0, 255.0) as u8;
+                white_out = if setting_blink_on && i % 6 == 0 {
+                    24
+                } else {
+                    0
+                };
             }
 
             *led = RGBW {

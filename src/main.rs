@@ -141,6 +141,7 @@ pub static AD_VALUE3: AtomicU32 = AtomicU32::new(0); // ADCの値(B1)
 pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果
 pub static WORK_MODE: AtomicU8 = AtomicU8::new(0); // 動作モード（Piano/Violin）
 pub static WORK_MODE_DISPLAY: AtomicBool = AtomicBool::new(false); // 動作モード変更表示状態
+pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用
 
 // タッチセンサの生データ格納用（16bit/key）
 pub static TOUCH_RAW_DATA: Mutex<
@@ -545,6 +546,8 @@ async fn adc_task(
     adc_a3: embassy_rp::adc::Channel<'static>,
     mut adc_dma: embassy_rp::dma::Channel<'static>,
 ) {
+    const ADC_READ_TIMEOUT_MS: u64 = 20;
+
     let mut channels = [adc_a1, adc_a2, adc_a3];
     let mut ad_value = [0u16; 3];
     let mut adc_counter = 0u32;
@@ -556,34 +559,46 @@ async fn adc_task(
 
     loop {
         // ADC読み込み準備時間を確保
-        Timer::after_millis(5).await; // 1sensorあたり10msec
+        Timer::after_millis(10).await; // 1sensorあたり10msec
 
-        match adc
-            .read_many_multichannel(&mut channels, &mut ad_value, 0, &mut adc_dma)
-            .await
-        {
-            Ok(()) => {
-                AD_VALUE0.store(ad_value[0] as u32, Ordering::Relaxed);
-                AD_VALUE1.store(ad_value[1] as u32, Ordering::Relaxed);
-                AD_VALUE2.store(ad_value[2] as u32, Ordering::Relaxed);
-                samples[0] = ad_value[0] as u32;
-                samples[1] = ad_value[1] as u32;
-                samples[2] = ad_value[2] as u32;
-            }
+        let read_result = with_timeout(
+            Duration::from_millis(ADC_READ_TIMEOUT_MS),
+            adc.read_many_multichannel(&mut channels, &mut ad_value, 0, &mut adc_dma),
+        )
+        .await;
+
+        match read_result {
+            Ok(adc_result) => match adc_result {
+                Ok(()) => {
+                    AD_VALUE0.store(ad_value[0] as u32, Ordering::Relaxed);
+                    AD_VALUE1.store(ad_value[1] as u32, Ordering::Relaxed);
+                    AD_VALUE2.store(ad_value[2] as u32, Ordering::Relaxed);
+                    samples[0] = ad_value[0] as u32;
+                    samples[1] = ad_value[1] as u32;
+                    samples[2] = ad_value[2] as u32;
+                }
+                Err(_) => {
+                    // ADC内部エラー
+                    ERROR_CODE.store(13, Ordering::Relaxed);
+                }
+            },
             Err(_) => {
+                // タイムアウトエラー
                 ERROR_CODE.store(13, Ordering::Relaxed);
             }
         }
 
         // 圧力を計算
+        let wmd = WORK_MODE_DISPLAY.load(Ordering::Relaxed);
         touch::pressure::update_pressure(
             &samples,
             &mut baseline_history,
             &mut baseline_sums,
+            &mut baseline_index,
             adc_counter,
+            wmd,
         );
         adc_counter = adc_counter.wrapping_add(1);
-        baseline_index = (baseline_index + 1) % touch::pressure::PRESSURE_BASELINE_WINDOW;
     }
 }
 
