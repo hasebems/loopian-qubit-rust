@@ -6,9 +6,13 @@
 
 pub const CORE1_STACK_SIZE: usize = 8192; // コア1のスタックサイズ
 
+pub const MIDI_NOTE_ON: u8 = 0x90;
+pub const MIDI_NOTE_OFF: u8 = 0x80;
+pub const MIDI_CC: u8 = 0xb0;
+
 // Message for Ringled / touch callback status
-pub const RINGLED_CMD_TX_ON: u8 = 0x90; // 送信用Note Onコマンド
-pub const RINGLED_CMD_TX_OFF: u8 = 0x80; // 送信用Note Offコマンド
+pub const RINGLED_CMD_TX_ON: u8 = MIDI_NOTE_ON; // 送信用Note Onコマンド
+pub const RINGLED_CMD_TX_OFF: u8 = MIDI_NOTE_OFF; // 送信用Note Offコマンド
 pub const RINGLED_CMD_TX_MOVED: u8 = 0xa0; // 送信用Note Moveコマンド(NoteOff)
 
 // チェック用

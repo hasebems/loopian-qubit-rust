@@ -1,5 +1,5 @@
 use crate::constants::*;
-use crate::{ANY_TOUCH, DEBUG_VALUE, PRESSURE};
+use crate::{ANY_TOUCH, PRESSURE};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
 use embassy_time::{Duration, with_timeout};
@@ -14,7 +14,7 @@ const PRESSURE_SENSITIVITY: u32 = 16; // 大きいほど反応が悪くなる（
 const CC11_MIN_VALUE: u8 = 20;
 const CC11_INDEX_MAX: usize = 100;
 const CC11_SEND_DEADBAND: u8 = 4;
-const CC11_MAX_STEP: u8 = 8;
+const CC11_MAX_STEP: u8 = 4;
 const MIDI_CC_CIN: u8 = 0x0b;
 const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
 const MIDI_CC_ALL_SOUND_OFF: u8 = 120;
@@ -187,5 +187,4 @@ fn update_baseline_history(
             .saturating_add(new_sample as u64);
     }
     *baseline_wptr = baseline_wptr.wrapping_add(1);
-    DEBUG_VALUE.store(*baseline_wptr as u32, Ordering::Relaxed);
 }

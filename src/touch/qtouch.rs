@@ -4,7 +4,7 @@
 //  https://opensource.org/licenses/mit-license.php
 //
 use crate::constants::*;
-use crate::{ANY_TOUCH, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
+use crate::{ANY_TOUCH, DEBUG_VALUE, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 use portable_atomic::Ordering;
 
 // =========================================================
@@ -20,6 +20,12 @@ type NewLocationFn = fn(u8, f32) -> Result<u8, u8>;
 
 const INIT_VAL: f32 = 100.0; // Invalid location initially
 const RELEASE_WAITING_TIME: u32 = 5; // Number of cycles to wait before considering a touch point released
+const HISTORY_SIZE: usize = 128; // Number of past locations
+const TOUCH_SAMPLE_PERIOD_SEC: f32 = 0.01; // 10ms tick
+const FEW_HZ_MIN: f32 = 1.5;
+const FEW_HZ_MAX: f32 = 8.0;
+const OSC_MIN_PEAK_TO_PEAK: f32 = 0.5;
+const OSC_DEADBAND: f32 = 0.12;
 
 const NEW_NOTE: u8 = 0xff;
 const TOUCH_POINT_ERROR: u8 = 0xfe;
@@ -77,7 +83,9 @@ where
     no_update_time: u32,
     offset_note: u8, // MIDI Note offset
     new_location: NewLocationFn,
-    midi_callback: Option<F>, // MIDI callback function
+    midi_callback: Option<F>,              // MIDI callback function
+    history_idx: usize,                    // Store the last index for each touch point
+    location_history: [f32; HISTORY_SIZE], // Store past locations for each possible note
 }
 impl<F> TouchPoint<F>
 where
@@ -97,6 +105,8 @@ where
             offset_note: PIANO_OFFSET,
             new_location: Self::new_location_piano,
             midi_callback: None,
+            history_idx: 0,
+            location_history: [0f32; HISTORY_SIZE], // Store past locations for each possible note
         }
     }
 
@@ -119,6 +129,8 @@ where
         let new_note = (self.new_location)(NEW_NOTE, location);
         if let Ok(crnt_note) = new_note {
             self.center_location = location;
+            self.location_history[self.history_idx] = location; // Store the initial location in history
+            self.history_idx = (self.history_idx + 1) % HISTORY_SIZE; // Update the history index
             self.real_crnt_note = crnt_note; // Set the current note
             self.intensity = intensity;
             self.is_updated = true;
@@ -157,6 +169,8 @@ where
         self.intensity = intensity as i16;
         self.is_updated = true;
         self.is_touched = true;
+        self.location_history[self.history_idx] = location; // Store the updated location in history
+        self.history_idx = (self.history_idx + 1) % HISTORY_SIZE; // Update the history index
         if let Ok(updated_note) = (self.new_location)(self.real_crnt_note, location) {
             // MIDI Note On & Off
             if let Some(ref midi_callback) = self.midi_callback
@@ -217,6 +231,64 @@ where
         self.touching_time = self.touching_time.wrapping_add(1);
         self.no_update_time = self.touching_time;
         self.is_updated = false;
+    }
+    /// location_history(128サンプル)から往復(半周期ごとの符号反転)を検出し、数Hzなら周波数を返す
+    fn detect_few_hz_round_trip_hz(&self) -> Option<f32> {
+        // 新規起動直後の0埋めや静止状態を除外
+        let mut min_v = f32::INFINITY;
+        let mut max_v = f32::NEG_INFINITY;
+        let mut sum = 0.0;
+        // location_history全体を走査して、最小値・最大値・平均値を計算する
+        for i in 0..HISTORY_SIZE {
+            let idx = (self.history_idx + i) % HISTORY_SIZE;
+            let v = self.location_history[idx];
+            min_v = min_v.min(v);
+            max_v = max_v.max(v);
+            sum += v;
+        }
+
+        let peak_to_peak = max_v - min_v;
+        if !peak_to_peak.is_finite() || peak_to_peak < OSC_MIN_PEAK_TO_PEAK {
+            return None;
+        }
+
+        let mean = sum / HISTORY_SIZE as f32;
+        let deadband = OSC_DEADBAND.max(peak_to_peak * 0.08);
+        let mut state: i8 = 0; // -1: below mean, +1: above mean
+        let mut crossings: u16 = 0;
+
+        for i in 0..HISTORY_SIZE {
+            let idx = (self.history_idx + i) % HISTORY_SIZE;
+            let centered = self.location_history[idx] - mean;
+            let next_state = if centered > deadband {
+                1
+            } else if centered < -deadband {
+                -1
+            } else {
+                state
+            };
+
+            // state が0から非0に、あるいは非0から反転する crossing を数える
+            if state != 0 && next_state != state {
+                crossings = crossings.saturating_add(1);
+            }
+            state = next_state;
+        }
+
+        if crossings < 2 {
+            return None;
+        }
+
+        let duration_sec = (HISTORY_SIZE as f32 - 1.0) * TOUCH_SAMPLE_PERIOD_SEC;
+        if duration_sec <= 0.0 {
+            return None;
+        }
+        let freq_hz = crossings as f32 / (2.0 * duration_sec);
+        if (FEW_HZ_MIN..=FEW_HZ_MAX).contains(&freq_hz) {
+            Some(freq_hz)
+        } else {
+            None
+        }
     }
     //private:
     /// crnt_note : 0-(MAX_SENS-1) 現在の位置、NEW_NOTE は新規ノート
@@ -289,12 +361,14 @@ where
     on_time: u32,                   // 最後のタッチが開始してから離されるまでの時間
     // タッチ中の TouchPoint は、最後の TouchPoint の touching_time
     off_time: u32, // 最後のタッチが離されてからの時間
+    vibrato: u8,   // ビブラートの強さ (0-127)
     _debug: i16,
 }
 impl<F> QubitTouch<F>
 where
     F: Fn(u8, u8, u8, f32) + Clone,
 {
+    //　タッチポイントの状況から、Note On のベロシティを決定する
     fn note_on_velocity_from_context(
         work_mode: WorkMode,
         last_note: u8,
@@ -309,7 +383,7 @@ where
             Self::default_note_on_velocity(intensity)
         }
     }
-
+    // Violin モードの Note On ベロシティ計算:
     fn calc_violin_note_on_velocity_from(
         last_note: u8,
         on_time: u32,
@@ -358,7 +432,7 @@ where
         velocity = velocity.clamp(32, 112);
         velocity as u8
     }
-
+    // デフォルトの Note On ベロシティ計算: 強度に基づいて 100..255 の範囲で線形に決定
     fn default_note_on_velocity(intensity: i16) -> u8 {
         if intensity < 0 {
             0
@@ -378,6 +452,7 @@ where
             last_note: 0,
             on_time: 0,
             off_time: 0,
+            vibrato: 0,
             _debug: 0,
         }
     }
@@ -444,8 +519,8 @@ where
         // 4: 更新のなかったタッチポイントを削除する
         self.erase_touch_point();
 
-        // 5: タッチ継続中は on_time を最新タッチの経過時間に、未タッチ時は off_time を進める
-        self.update_touch_durations();
+        // 5: 時間計測とビブラート捕捉
+        self.update_durations_and_vibrato(work_mode);
     }
     fn scan_pads(
         &mut self,
@@ -673,14 +748,18 @@ where
         }
     }
 
-    fn update_touch_durations(&mut self) {
+    fn update_durations_and_vibrato(&mut self, work_mode: WorkMode) {
         let mut touched = false;
         let mut latest_on_time = self.on_time;
+        let mut few_hz_detected: Option<f32> = None;
 
         for tp in self.touch_points.iter() {
             if tp.is_touched() {
                 touched = true;
                 latest_on_time = tp.touching_time;
+                if work_mode == WorkMode::Violin && few_hz_detected.is_none() {
+                    few_hz_detected = tp.detect_few_hz_round_trip_hz();
+                }
             }
         }
 
@@ -688,9 +767,25 @@ where
             self.on_time = latest_on_time;
             self.off_time = 0;
             ANY_TOUCH.store(true, Ordering::Relaxed);
+            let vib = few_hz_detected.map_or(0, |hz| (hz * 10.0) as u32).min(127) as u8;
+            if vib != self.vibrato {
+                let dpt = (vib * 2).min(48);
+                (self.midi_callback)(
+                    MIDI_CC, 1,   // CC number for vibrato
+                    dpt, // CC value for pitch bend (centered at 64)
+                    0.0, // location is not relevant for vibrato command
+                );
+                (self.midi_callback)(
+                    MIDI_CC, 19, // CC number for vibrato
+                    vib, 0.0, // location is not relevant for vibrato command
+                );
+                self.vibrato = vib;
+            }
+            DEBUG_VALUE.store(vib as u32, Ordering::Relaxed);
         } else {
             self.off_time = self.off_time.wrapping_add(1);
             ANY_TOUCH.store(false, Ordering::Relaxed);
+            DEBUG_VALUE.store(0, Ordering::Relaxed);
         }
     }
 
