@@ -20,12 +20,13 @@ type NewLocationFn = fn(u8, f32) -> Result<u8, u8>;
 
 const INIT_VAL: f32 = 100.0; // Invalid location initially
 const RELEASE_WAITING_TIME: u32 = 5; // Number of cycles to wait before considering a touch point released
+const CANDIDATE_MERGE_RANGE: f32 = 1.6; // Merge close candidates in the same cycle
 const HISTORY_SIZE: usize = 128; // Number of past locations
 const TOUCH_SAMPLE_PERIOD_SEC: f32 = 0.01; // 10ms tick
 const FEW_HZ_MIN: f32 = 1.5;
 const FEW_HZ_MAX: f32 = 8.0;
-const OSC_MIN_PEAK_TO_PEAK: f32 = 0.5;
-const OSC_DEADBAND: f32 = 0.12;
+const OSC_MIN_PEAK_TO_PEAK: f32 = 0.3;
+const OSC_DEADBAND: f32 = 0.1;
 
 const NEW_NOTE: u8 = 0xff;
 const TOUCH_POINT_ERROR: u8 = 0xfe;
@@ -513,6 +514,9 @@ where
         // 2: タッチポイントの前後のパッドの値を足し、平均をとってパッドの位置と強度を確定する
         self.decide_touch_point(&mut temp_touch_point, &mut temp_index);
 
+        // 2.5: 同一周期内の近接候補を統合し、1つのタッチ候補として扱う
+        self.merge_close_candidates(&mut temp_touch_point, &mut temp_index);
+
         // 3: 前回値と比較し、近いものを紐付け、タッチポイントを更新または追加する
         self.collate_touch_point(&temp_touch_point, temp_index, work_mode);
 
@@ -579,6 +583,61 @@ where
                 *tp = (tp.0, INIT_VAL, 0);
             }
         }
+    }
+    /// 同一周期内で近接した候補を1つに統合する
+    fn merge_close_candidates(
+        &mut self,
+        temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
+        temp_index: &mut usize,
+    ) {
+        let mut merged: [(f32, f32, i16); MAX_TOUCH_POINTS] =
+            [(INIT_VAL, INIT_VAL, 0); MAX_TOUCH_POINTS];
+        let mut merged_count = 0usize;
+        let mut used = [false; MAX_TOUCH_POINTS];
+
+        for i in 0..*temp_index {
+            if used[i] {
+                continue;
+            }
+            let seed = temp_touch_point[i];
+            if seed.1 == INIT_VAL {
+                used[i] = true;
+                continue;
+            }
+            used[i] = true;
+
+            // 同一クラスタ内は「最も強い候補」を代表として残す
+            let mut best = seed;
+            let seed_loc = seed.1;
+            for j in (i + 1)..*temp_index {
+                if used[j] {
+                    continue;
+                }
+                let cand = temp_touch_point[j];
+                if cand.1 == INIT_VAL {
+                    used[j] = true;
+                    continue;
+                }
+                if (cand.1 - seed_loc).abs() <= CANDIDATE_MERGE_RANGE {
+                    used[j] = true;
+                    if cand.2 > best.2 {
+                        best = cand;
+                    }
+                }
+            }
+
+            if merged_count < MAX_TOUCH_POINTS {
+                merged[merged_count] = best;
+                merged_count += 1;
+            }
+        }
+
+        temp_touch_point[..merged_count].copy_from_slice(&merged[..merged_count]);
+        for tp in temp_touch_point.iter_mut().skip(merged_count) {
+            *tp = (INIT_VAL, INIT_VAL, 0);
+        }
+        *temp_index = merged_count;
+        self.touch_count = merged_count;
     }
     fn collate_touch_point(
         &mut self,
