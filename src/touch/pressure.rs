@@ -9,7 +9,8 @@ use portable_atomic::Ordering;
 const PRESSURE_THRESHOLD: u32 = 100;
 pub const PRESSURE_BASELINE_WINDOW: usize = 512;
 const ADJUSTMENT_TABLE: [u32; 4] = [200, 200, 270, 0]; // x/256
-const BASELINE_WEAKENED_DIFF_PERCENT: u32 = 50;
+const BASELINE_RISE_TRACK_PERCENT: u32 = 10;    // 100に近いほど基準値がサンプルの上昇に追従しやすくなり、ドリフト耐性が下がる
+const BASELINE_FALL_TRACK_PERCENT: u32 = 50;    // 100に近いほど基準値がサンプルの下降に追従しやすくなり、復帰が速くなる
 const PRESSURE_SENSITIVITY: u32 = 16; // 大きいほど反応が悪くなる（MIDI値が低いまま）
 const CC11_MIN_VALUE: u8 = 20;
 const CC11_INDEX_MAX: usize = 100;
@@ -154,8 +155,18 @@ pub fn update_pressure(
             let pressure = (adj_num * adj_num) / 100; // 差分値の二乗を圧力とする
             total_pressure = total_pressure.saturating_add(pressure);
         }
-        baseline_samples[i] =
-            averages[i].saturating_sub(diffs[i] * BASELINE_WEAKENED_DIFF_PERCENT / 100);
+
+        // 基準値更新は「上昇時」と「下降時」で追従率を分ける。
+        // 上昇追従を小さくするとドリフト耐性が上がり、下降追従を大きくすると復帰が速くなる。
+        let avg = averages[i];
+        let sample = samples[i];
+        baseline_samples[i] = if sample >= avg {
+            let rise = sample - avg;
+            avg.saturating_add(rise * BASELINE_RISE_TRACK_PERCENT / 100)
+        } else {
+            let fall = avg - sample;
+            avg.saturating_sub(fall * BASELINE_FALL_TRACK_PERCENT / 100)
+        };
     }
     PRESSURE.store(total_pressure, Ordering::Relaxed);
 
