@@ -15,19 +15,26 @@ const TOUCH_LATCH_OFF_LIMIT: u16 = 20; // タッチセンサーの値がこの�
 const TOUCH_NOISE_FLOOR: u16 = 8; // タッチセンサーの値がこの値以下の場合、ノイズとして無視する。
 const TOUCH_DIFF_GAIN_DEFAULT_X256: u16 = 256; // 1.0
 
+// コンパイル時のみに走る関数
+const fn set_touch_gain_if_in_bounds(
+    table: &mut [u16; constants::TOTAL_QT_KEYS],
+    idx: usize,
+    gain_x256: u16,
+) {
+    if idx < constants::TOTAL_QT_KEYS {
+        table[idx] = gain_x256;
+    }
+}
+
+// コンパイル時のみに走る関数
 const fn build_touch_diff_gain_table() -> [u16; constants::TOTAL_QT_KEYS] {
     let mut table = [TOUCH_DIFF_GAIN_DEFAULT_X256; constants::TOTAL_QT_KEYS];
-    if constants::TOTAL_QT_KEYS > 0 {
-        table[0] = TOUCH_DIFF_GAIN_DEFAULT_X256;
-    }
     // キーごとの感度補正をここで設定する。例: 1.2倍は 307。
-    table[12] = 384; // 1.5倍
-    table[18] = 332; // 1.3倍
-    table[30] = 332; // 1.3倍
-    table[42] = 384; // 1.5倍
-    table[90] = 384; // 1.5倍
-    // table[10] = 307;
-    // table[25] = 282; // 1.1倍
+    set_touch_gain_if_in_bounds(&mut table, 12, 384); // 1.5倍
+    set_touch_gain_if_in_bounds(&mut table, 18, 332); // 1.3倍
+    set_touch_gain_if_in_bounds(&mut table, 30, 332); // 1.3倍
+    set_touch_gain_if_in_bounds(&mut table, 42, 384); // 1.5倍
+    set_touch_gain_if_in_bounds(&mut table, 90, 384); // 1.5倍
     table
 }
 
