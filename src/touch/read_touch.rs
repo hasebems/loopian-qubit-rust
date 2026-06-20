@@ -10,7 +10,7 @@ use crate::devices::{at42qt, pca9544};
 use crate::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
 // read_touch 内で完結する ON/OFF ヒステリシス制限
-const TOUCH_LATCH_ON_LIMIT: u16 = 38; // タッチセンサーの値がこの値以上のときにタッチONとみなす。値が大きいほどタッチONの判定が厳しくなり、誤検出が減るが、反応も悪くなる。
+const TOUCH_LATCH_ON_LIMIT: u16 = 32; // タッチセンサーの値がこの値以上のときにタッチONとみなす。値が大きいほどタッチONの判定が厳しくなり、誤検出が減るが、反応も悪くなる。
 const TOUCH_LATCH_OFF_LIMIT: u16 = 20; // タッチセンサーの値がこの値以下のときにタッチOFFとみなす。値が小さいほどタッチOFFの判定が厳しくなり、誤検出が減るが、反応も悪くなる。
 const TOUCH_NOISE_FLOOR: u16 = 8; // タッチセンサーの値がこの値以下の場合、ノイズとして無視する。
 const TOUCH_DIFF_GAIN_DEFAULT_X256: u16 = 256; // 1.0
