@@ -8,7 +8,7 @@ use portable_atomic::Ordering;
 
 const PRESSURE_THRESHOLD: u32 = 100;
 pub const PRESSURE_BASELINE_WINDOW: usize = 512;
-const ADJUSTMENT_TABLE: [u32; 4] = [200, 200, 270, 0]; // x/256
+const ADJUSTMENT_TABLE: [u32; 4] = [250, 200, 250, 0]; // x/256
 const BASELINE_RISE_TRACK_PERCENT: u32 = 10; // 100に近いほど基準値がサンプルの上昇に追従しやすくなり、ドリフト耐性が下がる
 const BASELINE_FALL_TRACK_PERCENT: u32 = 50; // 100に近いほど基準値がサンプルの下降に追従しやすくなり、復帰が速くなる
 const PRESSURE_SENSITIVITY: u32 = 16; // 大きいほど反応が悪くなる（MIDI値が低いまま）
