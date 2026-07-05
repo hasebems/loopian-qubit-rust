@@ -641,7 +641,6 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     }
 
     let start = Instant::now();
-    let mut loop_times = 0u64;
 
     // Task Loop
     loop {
@@ -665,10 +664,9 @@ async fn core1_i2c_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         // 他のタスクに処理を譲る
         embassy_futures::yield_now().await;
 
-        // 時間計測
-        loop_times = loop_times.wrapping_add(1);
+        // core1_i2c_task起動からの経過時間(us)
         let elapsed_time = start.elapsed().as_micros();
-        ELAPSED_TIME.store(elapsed_time / loop_times, Ordering::Relaxed);
+        ELAPSED_TIME.store(elapsed_time, Ordering::Relaxed);
     }
 }
 
