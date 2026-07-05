@@ -9,43 +9,11 @@ use crate::constants;
 use crate::devices::{at42qt, pca9544};
 use crate::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
-// read_touch 内で完結する ON/OFF ヒステリシス制限
-const TOUCH_LATCH_ON_LIMIT: u16 = 32; // タッチセンサーの値がこの値以上のときにタッチONとみなす。値が大きいほどタッチONの判定が厳しくなり、誤検出が減るが、反応も悪くなる。
-const TOUCH_LATCH_OFF_LIMIT: u16 = 20; // タッチセンサーの値がこの値以下のときにタッチOFFとみなす。値が小さいほどタッチOFFの判定が厳しくなり、誤検出が減るが、反応も悪くなる。
-const TOUCH_NOISE_FLOOR: u16 = 8; // タッチセンサーの値がこの値以下の場合、ノイズとして無視する。
-const TOUCH_DIFF_GAIN_DEFAULT_X256: u16 = 256; // 1.0
-
-// コンパイル時のみに走る関数
-const fn set_touch_gain_if_in_bounds(
-    table: &mut [u16; constants::TOTAL_QT_KEYS],
-    idx: usize,
-    gain_x256: u16,
-) {
-    if idx < constants::TOTAL_QT_KEYS {
-        table[idx] = gain_x256;
-    }
-}
-
-// コンパイル時のみに走る関数
-const fn build_touch_diff_gain_table() -> [u16; constants::TOTAL_QT_KEYS] {
-    let mut table = [TOUCH_DIFF_GAIN_DEFAULT_X256; constants::TOTAL_QT_KEYS];
-    // キーごとの感度補正をここで設定する。例: 1.2倍は 307。
-    set_touch_gain_if_in_bounds(&mut table, 12, 384); // 1.5倍
-    set_touch_gain_if_in_bounds(&mut table, 18, 332); // 1.3倍
-    set_touch_gain_if_in_bounds(&mut table, 30, 332); // 1.3倍
-    set_touch_gain_if_in_bounds(&mut table, 42, 384); // 1.5倍
-    set_touch_gain_if_in_bounds(&mut table, 90, 384); // 1.5倍
-    table
-}
-
-const TOUCH_DIFF_GAIN_TABLE: [u16; constants::TOTAL_QT_KEYS] = build_touch_diff_gain_table();
-
 pub struct ReadTouch {
     raw_value: [u16; constants::TOTAL_QT_KEYS],
     reference: [u16; constants::TOTAL_QT_KEYS],
     reference_adjust: [u16; constants::TOTAL_QT_KEYS],
     reference_counter: usize,
-    touch_latched: [bool; constants::TOTAL_QT_KEYS],
 }
 
 impl ReadTouch {
@@ -74,34 +42,12 @@ impl ReadTouch {
         (raw_index + constants::TOUCH_INDEX_SHIFT) % constants::TOTAL_QT_KEYS
     }
 
-    fn apply_touch_hysteresis(&mut self, sid: usize, signal: u16) -> u16 {
-        let latched = self.touch_latched[sid];
-        self.touch_latched[sid] = if latched {
-            signal > TOUCH_LATCH_OFF_LIMIT
-        } else {
-            signal >= TOUCH_LATCH_ON_LIMIT
-        };
-
-        if self.touch_latched[sid] {
-            signal
-        } else {
-            signal.saturating_sub(TOUCH_NOISE_FLOOR)
-        }
-    }
-
-    fn apply_diff_gain(&self, sid: usize, signal: u16) -> u16 {
-        let gain = TOUCH_DIFF_GAIN_TABLE[sid] as u32;
-        let scaled = (signal as u32).saturating_mul(gain) / 256;
-        scaled.min(u16::MAX as u32) as u16
-    }
-
     pub fn new() -> Self {
         Self {
             raw_value: [0u16; constants::TOTAL_QT_KEYS],
             reference: [0u16; constants::TOTAL_QT_KEYS],
             reference_adjust: [0u16; constants::TOTAL_QT_KEYS],
             reference_counter: 0,
-            touch_latched: [false; constants::TOTAL_QT_KEYS],
         }
     }
 
@@ -222,11 +168,9 @@ impl ReadTouch {
                         }
                     }
 
-                    let signal = raw
+                    data[shifted_sid] = raw
                         .saturating_sub(self.reference[shifted_sid])
                         .saturating_sub(self.reference_adjust[shifted_sid]);
-                    let scaled_signal = self.apply_diff_gain(shifted_sid, signal);
-                    data[shifted_sid] = self.apply_touch_hysteresis(shifted_sid, scaled_signal);
                 }
             } else {
                 // 読み取り失敗時は前回値を維持してスキャン結果を連続化する
@@ -240,11 +184,9 @@ impl ReadTouch {
                         }
                     }
 
-                    let signal = raw
+                    data[shifted_sid] = raw
                         .saturating_sub(self.reference[shifted_sid])
                         .saturating_sub(self.reference_adjust[shifted_sid]);
-                    let scaled_signal = self.apply_diff_gain(shifted_sid, signal);
-                    data[shifted_sid] = self.apply_touch_hysteresis(shifted_sid, scaled_signal);
                 }
             }
             // PCA9544のチャネルが最後のときに切断する
