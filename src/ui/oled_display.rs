@@ -72,7 +72,7 @@ impl GraphicsDisplay {
         )
         .draw(buffer);
         let _ = Text::new(
-            concat!("       ", env!("BUILD_TIME")),
+            concat!("       ", env!("BUILD_VERSION")),
             Point::new(30, 56),
             style_small,
         )
