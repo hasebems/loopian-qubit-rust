@@ -27,6 +27,8 @@ const FEW_HZ_MIN: f32 = 1.5;
 const FEW_HZ_MAX: f32 = 8.0;
 const OSC_MIN_PEAK_TO_PEAK: f32 = 0.3;
 const OSC_DEADBAND: f32 = 0.1;
+const SINGLE_PAD_SPIKE_RATIO_PERMILLE: i16 = 70; // 周辺の何%以上の強度があれば、単発パルスと見なすか
+const SINGLE_PAD_SPIKE_NEIGHBOR_DIV: i16 = 4; // 周辺の最大強度が中心の何分の1以下なら、単発パルスと見なすか
 
 const NEW_NOTE: u8 = 0xff;
 const TOUCH_POINT_ERROR: u8 = 0xfe;
@@ -566,6 +568,8 @@ where
             let tp_idx = tp.0 as i32;
             let mut sum: i16 = 0;
             let mut locate: f32 = 0.0;
+            let mut center_value: i16 = 0;
+            let mut max_neighbor_value: i16 = 0;
 
             for j in 0..(FINGER_RANGE * 2 + 1) {
                 let window_idx = j as i32 - FINGER_RANGE as i32;
@@ -573,9 +577,22 @@ where
                 let tp_value = neighbor_pad.get_crnt() as i16;
                 sum += tp_value;
                 locate += (tp_idx + window_idx) as f32 * tp_value as f32; // Wrap around to ensure valid index
+                if window_idx == 0 {
+                    center_value = tp_value;
+                } else if tp_value > max_neighbor_value {
+                    max_neighbor_value = tp_value;
+                }
             }
 
             if sum > 0 {
+                // 単発パルス対策: 中心1電極が過度に支配的で近傍が弱い候補は無効化する
+                let center_dominant = center_value * 100 >= sum * SINGLE_PAD_SPIKE_RATIO_PERMILLE;
+                let weak_neighbors = max_neighbor_value * SINGLE_PAD_SPIKE_NEIGHBOR_DIV <= center_value;
+                if center_dominant && weak_neighbors {
+                    *tp = (tp.0, INIT_VAL, 0);
+                    continue;
+                }
+
                 locate /= sum as f32; // Calculate the average location based on intensity
                 *tp = (tp.0, locate, sum);
             } else {
