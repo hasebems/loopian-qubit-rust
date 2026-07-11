@@ -12,7 +12,7 @@ const ADJUSTMENT_TABLE: [u32; 4] = [250, 200, 250, 0]; // x/256
 const BASELINE_RISE_TRACK_PERCENT: u32 = 10; // 100に近いほど基準値がサンプルの上昇に追従しやすくなり、ドリフト耐性が下がる
 const BASELINE_FALL_TRACK_PERCENT: u32 = 50; // 100に近いほど基準値がサンプルの下降に追従しやすくなり、復帰が速くなる
 const PRESSURE_SENSITIVITY: u32 = 16; // 大きいほど反応が悪くなる（MIDI値が低いまま）
-const CC11_MIN_VALUE: u8 = 20;
+const CC11_MIN_VALUE: u8 = 60;
 const CC11_INDEX_MAX: usize = 100;
 const CC11_SEND_DEADBAND: u8 = 4;
 const CC11_MAX_STEP: u8 = 4;
@@ -20,12 +20,12 @@ const MIDI_CC_CIN: u8 = 0x0b;
 const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
 const MIDI_CC_ALL_SOUND_OFF: u8 = 120;
 const MIDI_CC_EXPRESSION: u8 = 11;
-const CC11_TABLE: [u8; CC11_INDEX_MAX + 1] = [
-    40, 43, 45, 48, 50, 52, 54, 56, 58, 59, 61, 62, 64, 65, 66, 67, 69, 70, 71, 72, 73, 74, 75, 76,
-    77, 78, 78, 79, 80, 81, 82, 82, 83, 84, 84, 85, 86, 86, 87, 88, 88, 89, 89, 90, 91, 91, 92, 92,
-    93, 93, 94, 94, 95, 95, 96, 96, 97, 97, 98, 98, 98, 99, 99, 100, 100, 100, 101, 101, 102, 102,
-    102, 103, 103, 103, 104, 104, 105, 105, 105, 106, 106, 106, 107, 107, 107, 108, 108, 108, 108,
-    109, 109, 109, 110, 110, 110, 111, 111, 111, 111, 112, 112,
+const CC11_PRESSURE_TABLE: [u8; CC11_INDEX_MAX + 1] = [ // 100段階の圧力を 100段階のCC11に変換するためのテーブル
+    0, 4, 8, 11, 14, 17, 19, 22, 24, 27, 29, 31, 33, 34, 36, 38, 40, 41, 43, 44, 45, 47, 48, 49,
+    51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 67, 68, 69, 70, 71, 71, 72,
+    73, 73, 74, 75, 76, 76, 77, 77, 78, 79, 79, 80, 81, 81, 82, 82, 83, 83, 84, 85, 85, 86, 86, 87,
+    87, 88, 88, 89, 89, 90, 90, 91, 91, 91, 92, 92, 93, 93, 94, 94, 94, 95, 95, 96, 96, 97, 97, 97,
+    98, 98, 99, 99, 100,
 ];
 
 pub struct PressureMidiState {
@@ -73,7 +73,7 @@ impl PressureMidiState {
 
 pub fn pressure_to_cc11(pressure: u32) -> u8 {
     let index = (pressure / PRESSURE_SENSITIVITY).min(CC11_INDEX_MAX as u32) as usize;
-    CC11_TABLE[index]
+    ((CC11_PRESSURE_TABLE[index] as u16 * 5) / 10) as u8 + CC11_MIN_VALUE
 }
 
 async fn send_control_change(

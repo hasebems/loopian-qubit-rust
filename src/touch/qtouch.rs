@@ -11,7 +11,7 @@ use portable_atomic::Ordering;
 //      Touch Constants
 // =========================================================
 pub const MAX_PADS: u16 = TOTAL_QT_KEYS as u16; // MAX_SENS;
-pub const TOUCH_THRESHOLD: u16 = 40; // Threshold for touch point detection
+pub const TOUCH_THRESHOLD: u16 = 32; // Threshold for touch point detection
 pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec あたりの片側変化量
 pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
 pub const HISTERESIS: f32 = 0.7; // Hysteresis value for touch point detection
