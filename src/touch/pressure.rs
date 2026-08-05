@@ -11,16 +11,16 @@ pub const PRESSURE_BASELINE_WINDOW: usize = 512;
 const ADJUSTMENT_TABLE: [u32; 4] = [250, 200, 250, 0]; // x/256
 const BASELINE_RISE_TRACK_PERCENT: u32 = 10; // 100に近いほど基準値がサンプルの上昇に追従しやすくなり、ドリフト耐性が下がる
 const BASELINE_FALL_TRACK_PERCENT: u32 = 50; // 100に近いほど基準値がサンプルの下降に追従しやすくなり、復帰が速くなる
-const PRESSURE_SENSITIVITY: u32 = 16; // 大きいほど反応が悪くなる（MIDI値が低いまま）
-const CC11_MIN_VALUE: u8 = 60;
-const CC11_INDEX_MAX: usize = 100;
-const CC11_SEND_DEADBAND: u8 = 4;
-const CC11_MAX_STEP: u8 = 4;
-const MIDI_CC_CIN: u8 = 0x0b;
+const PRESSURE_SENSITIVITY: u32 = 10; // Pressure生値を割って、EXP_PRESSURE_TABLEのインデックスに変換するための係数
+const EXP_MIN_VALUE: u8 = 60;  // この値を最小値、127を最大値として、Expの値は変化する
+const EXP_SEND_DEADBAND: u8 = 4; // この値未満の変化は送信せず、ジッタ由来の細かい更新を抑える
+const EXP_MAX_STEP: u8 = 4; // 1回の送信での変化量を制限し、急激な増減を段階的に追従させる
+const MIDI_CC_EXPRESSION: u8 = 11;
+const MIDI_CC_INPUT_CH: u8 = 0x0b;
 const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
 const MIDI_CC_ALL_SOUND_OFF: u8 = 120;
-const MIDI_CC_EXPRESSION: u8 = 11;
-const CC11_PRESSURE_TABLE: [u8; CC11_INDEX_MAX + 1] = [ // 100段階の圧力を 100段階のCC11に変換するためのテーブル
+const EXP_INDEX_MAX: usize = 100;
+const EXP_PRESSURE_TABLE: [u8; EXP_INDEX_MAX + 1] = [ // 100段階の圧力を 100段階のCC11に変換するためのテーブル
     0, 4, 8, 11, 14, 17, 19, 22, 24, 27, 29, 31, 33, 34, 36, 38, 40, 41, 43, 44, 45, 47, 48, 49,
     51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 67, 68, 69, 70, 71, 71, 72,
     73, 73, 74, 75, 76, 76, 77, 77, 78, 79, 79, 80, 81, 81, 82, 82, 83, 83, 84, 85, 85, 86, 86, 87,
@@ -36,14 +36,14 @@ pub struct PressureMidiState {
 impl PressureMidiState {
     pub const fn new() -> Self {
         Self {
-            last_sent_cc11: CC11_MIN_VALUE,
+            last_sent_cc11: EXP_MIN_VALUE,
             previous_work_mode: WorkMode::Piano,
         }
     }
 
     pub fn reset_for_violin_mode(&mut self) -> u8 {
-        self.last_sent_cc11 = CC11_MIN_VALUE;
-        CC11_MIN_VALUE
+        self.last_sent_cc11 = EXP_MIN_VALUE;
+        EXP_MIN_VALUE
     }
 
     fn entered_violin_mode(&self, work_mode: WorkMode) -> bool {
@@ -58,12 +58,12 @@ impl PressureMidiState {
         let target = pressure_to_cc11(PRESSURE.load(Ordering::Relaxed));
         let delta = target as i16 - self.last_sent_cc11 as i16;
         // 目標値との差が小さい間は送信せず、ジッタ由来の細かい更新を抑える。
-        if delta.unsigned_abs() < CC11_SEND_DEADBAND as u16 {
+        if delta.unsigned_abs() < EXP_SEND_DEADBAND as u16 {
             return None;
         }
 
         // 1回あたりの変化量を制限し、急激な増減を段階的に追従させる。
-        let step = delta.clamp(-(CC11_MAX_STEP as i16), CC11_MAX_STEP as i16);
+        let step = delta.clamp(-(EXP_MAX_STEP as i16), EXP_MAX_STEP as i16);
         let candidate = (self.last_sent_cc11 as i16 + step) as u8;
         // 送信予定値を次回比較の基準として保持する。
         self.last_sent_cc11 = candidate;
@@ -72,8 +72,9 @@ impl PressureMidiState {
 }
 
 pub fn pressure_to_cc11(pressure: u32) -> u8 {
-    let index = (pressure / PRESSURE_SENSITIVITY).min(CC11_INDEX_MAX as u32) as usize;
-    ((CC11_PRESSURE_TABLE[index] as u16 * 5) / 10) as u8 + CC11_MIN_VALUE
+    let index = (pressure / PRESSURE_SENSITIVITY).min(EXP_INDEX_MAX as u32) as usize;
+    let variable_range = 127 - EXP_MIN_VALUE;
+    ((EXP_PRESSURE_TABLE[index] * variable_range) / 100).saturating_add(EXP_MIN_VALUE)
 }
 
 async fn send_control_change(
@@ -83,7 +84,7 @@ async fn send_control_change(
 ) -> Result<(), ()> {
     let result = with_timeout(
         Duration::from_millis(MIDI_TX_TIMEOUT_MS),
-        sender.write_packet(&[MIDI_CC_CIN, MIDI_CC_STATUS, controller, value]),
+        sender.write_packet(&[MIDI_CC_INPUT_CH, MIDI_CC_STATUS, controller, value]),
     )
     .await;
     if result.is_err() {
