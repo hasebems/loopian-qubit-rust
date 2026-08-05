@@ -587,7 +587,8 @@ where
             if sum > 0 {
                 // 単発パルス対策: 中心1電極が過度に支配的で近傍が弱い候補は無効化する
                 let center_dominant = center_value * 100 >= sum * SINGLE_PAD_SPIKE_RATIO_PERMILLE;
-                let weak_neighbors = max_neighbor_value * SINGLE_PAD_SPIKE_NEIGHBOR_DIV <= center_value;
+                let weak_neighbors =
+                    max_neighbor_value * SINGLE_PAD_SPIKE_NEIGHBOR_DIV <= center_value;
                 if center_dominant && weak_neighbors {
                     *tp = (tp.0, INIT_VAL, 0);
                     continue;

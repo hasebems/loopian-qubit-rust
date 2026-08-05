@@ -16,7 +16,10 @@ fn main() {
     // Emit build date and time as environment variables
     let now = chrono::Local::now();
     println!("cargo:rustc-env=BUILD_DATE={}", now.format("%y-%m-%d"));
-    println!("cargo:rustc-env=BUILD_VERSION=v{}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "cargo:rustc-env=BUILD_VERSION=v{}",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Put the linker script somewhere the linker can find it
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
