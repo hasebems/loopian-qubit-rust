@@ -8,13 +8,13 @@ use portable_atomic::Ordering;
 
 const PRESSURE_THRESHOLD: u32 = 100;
 pub const PRESSURE_BASELINE_WINDOW: usize = 512;
-const ADJUSTMENT_TABLE: [u32; 4] = [250, 200, 250, 0]; // x/256
+const ADJUSTMENT_TABLE: [u32; 4] = [256, 256, 256, 0]; // x/256
 const BASELINE_RISE_TRACK_PERCENT: u32 = 10; // 100に近いほど基準値がサンプルの上昇に追従しやすくなり、ドリフト耐性が下がる
 const BASELINE_FALL_TRACK_PERCENT: u32 = 50; // 100に近いほど基準値がサンプルの下降に追従しやすくなり、復帰が速くなる
-const PRESSURE_SENSITIVITY: u32 = 10; // Pressure生値を割って、EXP_PRESSURE_TABLEのインデックスに変換するための係数
-const EXP_MIN_VALUE: u8 = 60; // この値を最小値、127を最大値として、Expの値は変化する
+const PRESSURE_SENSITIVITY: u32 = 6; // Pressure生値を割って、EXP_PRESSURE_TABLEのインデックスに変換するための係数
+const EXP_MIN_VALUE: u8 = 40; // この値を最小値、127を最大値として、Expの値は変化する
 const EXP_SEND_DEADBAND: u8 = 4; // この値未満の変化は送信せず、ジッタ由来の細かい更新を抑える
-const EXP_MAX_STEP: u8 = 4; // 1回の送信での変化量を制限し、急激な増減を段階的に追従させる
+const EXP_MAX_STEP: u8 = 2; // 1回の送信での変化量を制限し、急激な増減を段階的に追従させる
 const MIDI_CC_EXPRESSION: u8 = 11;
 const MIDI_CC_INPUT_CH: u8 = 0x0b;
 const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
@@ -74,8 +74,9 @@ impl PressureMidiState {
 
 pub fn pressure_to_cc11(pressure: u32) -> u8 {
     let index = (pressure / PRESSURE_SENSITIVITY).min(EXP_INDEX_MAX as u32) as usize;
-    let variable_range = 127 - EXP_MIN_VALUE;
-    ((EXP_PRESSURE_TABLE[index] * variable_range) / 100).saturating_add(EXP_MIN_VALUE)
+    let variable_range = (127 - EXP_MIN_VALUE) as u32;
+    let scaled = (EXP_PRESSURE_TABLE[index] as u32 * variable_range) / 100;
+    (scaled + EXP_MIN_VALUE as u32).min(127) as u8
 }
 
 async fn send_control_change(

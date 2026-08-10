@@ -393,29 +393,29 @@ where
         off_time: u32,
         note: u8,
     ) -> u8 {
-        // 10ms tick前提: 1秒=100, 3秒=300
+        // 10ms tick前提
         const BASE_VELOCITY: i16 = 64;
-        const ONE_SEC_TICKS: u32 = 100;
-        const THREE_SEC_TICKS: u32 = 300;
+        const SMALLER_SEC: u32 = 50; // 500ms
+        const MAX_SEC: u32 = 300; // 3秒
 
         // on_time補正:
-        // - 1秒未満: 0..+32 を線形加算
-        // - 1秒超〜3秒: 0..-32 を線形減算
-        let on_adjust = if on_time < ONE_SEC_TICKS {
-            on_time as i16 * 32 / ONE_SEC_TICKS as i16
+        // - SMALLER_SEC未満: 0..+56 を線形加算（速いほど大きい）
+        // - SMALLER_SEC超〜MAX_SEC: 0..-32 を線形減算（遅いほど小さい）
+        let on_adjust = if on_time < SMALLER_SEC {
+            ((SMALLER_SEC - on_time) * 56 / SMALLER_SEC) as i16
         } else {
-            let over = (on_time - ONE_SEC_TICKS).min(THREE_SEC_TICKS - ONE_SEC_TICKS);
-            -(over as i16 * 32 / (THREE_SEC_TICKS - ONE_SEC_TICKS) as i16)
+            let over = (on_time - SMALLER_SEC).min(MAX_SEC - SMALLER_SEC);
+            -((over * 32 / (MAX_SEC - SMALLER_SEC)) as i16)
         };
 
-        // off_time補正:
+        // off_time(staccato)補正:
         // - 0: 補正なし
-        // - 0超〜1秒未満: +24..0 を線形加算
-        // - 1秒以上: 補正なし
+        // - 0超〜SMALLER_SEC未満: +24..0 を線形加算
+        // - SMALLER_SEC以上: 補正なし
         let off_adjust = if off_time == 0 {
             0
-        } else if off_time < ONE_SEC_TICKS {
-            (((ONE_SEC_TICKS - off_time) as i16) * 24 / (ONE_SEC_TICKS as i16 - 1)).max(0)
+        } else if off_time < SMALLER_SEC {
+            (((SMALLER_SEC - off_time) as i16) * 24 / (SMALLER_SEC as i16 - 1)).max(0)
         } else {
             0
         };
