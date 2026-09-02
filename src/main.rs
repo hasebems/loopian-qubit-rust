@@ -465,23 +465,30 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
     loop {
         match receiver.read_packet(&mut buf).await {
             Ok(n) => {
-                for packet in buf[0..n].chunks(4) {
-                    if packet.len() == 4 {
-                        let status = packet[1];
-                        let note = packet[2];
-                        let velocity = packet[3];
+                let work_mode = WORK_MODE
+                    .load(Ordering::Relaxed)
+                    .try_into()
+                    .unwrap_or(WorkMode::Piano);
 
-                        // Note On (Channel 0-15)
-                        if (status & 0xF0) == 0x90 {
-                            if velocity > 0 {
-                                set_rx_led(note, true);
-                            } else {
+                if work_mode != WorkMode::Violin {
+                    for packet in buf[0..n].chunks(4) {
+                        if packet.len() == 4 {
+                            let status = packet[1];
+                            let note = packet[2];
+                            let velocity = packet[3];
+
+                            // Note On (Channel 0-15)
+                            if (status & 0xF0) == 0x90 {
+                                if velocity > 0 {
+                                    set_rx_led(note, true);
+                                } else {
+                                    set_rx_led(note, false);
+                                }
+                            }
+                            // Note Off
+                            else if (status & 0xF0) == 0x80 {
                                 set_rx_led(note, false);
                             }
-                        }
-                        // Note Off
-                        else if (status & 0xF0) == 0x80 {
-                            set_rx_led(note, false);
                         }
                     }
                 }
@@ -726,6 +733,7 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
                     (WORK_MODE.load(Ordering::Relaxed) + 1) % 2,
                     Ordering::Relaxed,
                 ); // 動作モードを切り替え
+                RINGLED_RX_BITS.store(0, Ordering::Relaxed); // 受信Note On表示を全キャンセル
             } else if ui_page == 0 {
                 ui_page = 3;
             } else {
