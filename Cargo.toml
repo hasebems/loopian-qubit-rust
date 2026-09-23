@@ -1,12 +1,14 @@
 [package]
 edition = "2024"
 name = "pico_template"
-version = "0.2.3"  # 26.9.2 以降
+version = "0.3.0"  # 26.9.23 以降
 license = "MIT"
 
 [features]
 # テスト用: PCA9544を1チャネル×1台構成にする (デフォルトは4チャネル×4台)
 test_mode = []
+# テスト用: PCA9544 を使わず AT42QT1070 1個を I2C に直結する (キー数は test_mode と同じ 6)
+no_pca9544 = ["test_mode"]
 
 [dependencies]
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", branch = "main" }
