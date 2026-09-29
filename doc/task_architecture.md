@@ -134,7 +134,7 @@ loop {
 ```
 
 - `SCAN_PERIOD_MS` の初期値は **10ms**。`QubitTouch` の中の時間の定数（`TOUCH_SAMPLE_PERIOD_SEC` = 0.01、`RELEASE_WAITING_TIME`、ベロシティ計算の 10ms tick など）は「10ms 毎に呼ばれる」ことを前提にしているため。これで改修前と同じ振る舞いになる
-- **解析する周期**: `SCAN_PERIOD_MS` を 10ms より短くする場合（デバッグ環境での 2ms など）でも、解析は 10ms 毎に行う。`ANALYSIS_DIVIDER = 10 / SCAN_PERIOD_MS` フレームに 1 回解析する。そのため `SCAN_PERIOD_MS` は 10 の約数（1, 2, 5, 10）に限る
+- **解析する周期**: `SCAN_PERIOD_MS` を 10ms より短くする場合（デバッグ環境での 2ms など）でも、解析は 10ms 毎に行う。`ANALYSIS_DIVIDER = ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS` フレームに 1 回解析する（`ANALYSIS_PERIOD_MS` = 10）。そのため `SCAN_PERIOD_MS` は 10 の約数（1, 2, 5, 10）に限り、倍数であることをコンパイル時に確認する。3 つの定数は `constants.rs` に置く
 - 毎フレームの解析（フレーム駆動）と、`QubitTouch` の時間基準化は、`touch_baseline.md`（速さ検出）の段階で行う
 - `ReadTouch` と `QubitTouch` は同じタスクの中の構造体で、値は関数呼び出しで渡す。今の `TOUCH_RAW_DATA`（Mutex）は不要になる
 - 読み取り中に `SETTING_MODE`（§4.5）を参照する。基準値の補正（現状の `reference_adjust`）は、今の段階では従来どおり
@@ -160,21 +160,24 @@ loop {
 
 **ノートイベントの出力**
 
-- `QubitTouch` の MIDI コールバックは、ノートイベントを `MIDI_TX` に `try_send` する。今の `RefCell` のバッファ（`send_buffer` / `send_index`）は不要になる
+- `QubitTouch` の MIDI コールバックは、ノートイベントを `tasks::midi::queue_midi` で `MIDI_TX` に `try_send` する。今の `RefCell` のバッファ（`send_buffer` / `send_index`）は不要になる
+- コールバックは `Fn + Clone` なので、動作モードは解析の直前に読んで `Cell` でコールバックに渡す
 - チャンネルの決定（Piano: `MIDI_CH_FLOW`、Violin: `MIDI_CH_VIOLIN`）と、`RINGLED_CMD_TX_MOVED` を Note Off に読み替える処理は、`touch_task` 側で行ってから `MIDI_TX` に入れる。`midi_tx_task` は受け取ったものをそのまま送るだけにする
-- キューがあふれたらエラーコードに記録する
+- キューがあふれたらエラーコード（22）に記録し、あふれた回数と最大使用数を診断用に数える
 
 ### 4.2 Core0: midi_tx_task
 
-- `MIDI_TX: Channel<CriticalSectionRawMutex, MidiMessage, 16>` を受信し、`Sender` で送る。送信は `with_timeout(MIDI_TX_TIMEOUT_MS)` で包む
-- `MidiMessage` は USB MIDI の 4 バイトのパケット
+- `MIDI_TX: Channel<CriticalSectionRawMutex, MidiPacket, 16>` を受信し、`Sender` で送る。送信は `with_timeout(MIDI_TX_TIMEOUT_MS)` で包む
+- `MidiPacket`（`[u8; 4]`）は USB MIDI の 4 バイトのパケット（CIN, status, data1, data2）
+- エラー 23（MIDI 送信のタイムアウト）は改修前と同じく、タイムアウトのときだけ記録する（`write_packet` のエラーは記録しない）
 - 書き手は Core1（`touch_task`）と Core0（`pressure_task`）。`CriticalSectionRawMutex` はコアをまたいでも排他が効き、受信側の起床もコアをまたいで働く
 - USB が詰まっても、送信を待つのはこのタスクだけになり、タッチの解析は止まらない（P5 の解消）
 
 ### 4.3 Core0: pressure_task
 
 - 現在の `adc_task` の処理に、`qubit_touch_task` の中にある CC11 の送信判定（`send_pressure_cc11_if_needed`）を移す
-- CC11 と、Violin モードに入ったときの All Sound Off・CC11 の初期値は、`MIDI_TX` に入れる。`pressure.rs` の送信関数は、`Sender` を直接使う形から `MIDI_TX` に入れる形に変える
+- CC11 と、Violin モードに入ったときの All Sound Off・CC11 の初期値は、`MIDI_TX` に入れる。`pressure.rs` の送信関数は、`Sender` を直接使う `async` 関数から、送るパケットを引数の関数に渡す同期関数（`pressure_cc11_if_needed`）に変え、`pressure_task` が `queue_midi` を渡す
+- 改修前は送信に失敗すると、その回の CC の処理を途中で打ち切っていた。キューに入れる形では打ち切らない
 - 圧力と CC11 は同じタスクで扱う方が、流れを追いやすい。10ms 周期は変えない
 - CC11 の判定に使う `ANY_TOUCH` は Core1 が書く Atomic。コアをまたいでも問題ない
 - 注意: Violin モードに入ったときの All Sound Off（Core0）と、その後のノート（Core1）は、同じ `MIDI_TX` を通るが、コアが違うので順序は厳密には保証されない。モードの切替は設定画面（`SETTING_MODE`、タッチしない前提）で行うので、実用上は問題ないと考える
@@ -190,7 +193,7 @@ loop {
     3. `midi_tx_task` を `InterruptExecutor`（優先度付き）に移す。`Cargo.toml` では `executor-interrupt` がすでに有効
 - 起動画面の描画と転送も `ui_task` の最初に行う
 - **OLED の初期化の前に 100ms 待つ**（`OLED_POWER_ON_WAIT_MS`）。改修前は、タッチセンサの初期化が終わってから OLED を初期化していたので、自然に待ち時間があった。I2C を分けると起動直後に並行して走るため、電源投入直後の OLED が初期化コマンドを受け付けられるように待つ
-- **転送のタイムアウトは 50ms**（`OLED_FLUSH_TIMEOUT_MS`）。1 画面（1024 バイト）の転送は 400kHz で約 25ms かかる見積もりなので、余裕を持たせる。失敗・タイムアウトはエラー 52 に記録する
+- **転送のタイムアウトは 50ms**（`OLED_FLUSH_TIMEOUT_MS`）。1 画面（1024 バイト）の転送は 400kHz で約 25ms かかる見積もりなので、余裕を持たせる。失敗・タイムアウトはエラー 43 に記録する
 
 ### 4.5 共有状態の整理（`src/shared.rs`）
 
@@ -198,16 +201,17 @@ loop {
 
 | 名前 | 型 | 書き手 | 読み手 | 備考 |
 |---|---|---|---|---|
-| `MIDI_TX` | `Channel<MidiMessage, 16>` | touch (C1), pressure (C0) | midi_tx (C0) | 新規。コアをまたぐ |
+| `MIDI_TX` | `Channel<MidiPacket, 16>` | touch (C1), pressure (C0) | midi_tx (C0) | 新規。コアをまたぐ |
 | `TOUCH0`–`TOUCH3` | `AtomicI32` | touch (C1) | ringled, ui (C0) | 変更なし |
 | `ANY_TOUCH` | `AtomicBool` | touch (C1) | pressure (C0) | 変更なし |
 | `PRESSURE` | `AtomicU32` | pressure (C0) | pressure, ui (C0) | 変更なし |
-| `RINGLED_RX_BITS` | `[AtomicU32; 3]` | midi_rx (C0) | ringled (C0) | **96 ビットに拡張（§2.3）** |
-| `WORK_MODE` | `AtomicU8` | ui (C0) | touch (C1), pressure, midi_rx (C0) | 変更なし |
+| `RINGLED_RX_BITS` | `[AtomicU32; RINGLED_RX_WORDS]` | midi_rx, ui（モード切替時の全消去）(C0) | ringled (C0) | **LED の数のビット列に拡張（§2.3）**。96 キーで 3 語 |
+| `WORK_MODE` | `AtomicU8` | ui (C0) | touch (C1), pressure, midi_rx, ui (C0) | 変更なし |
 | `SETTING_MODE` | `AtomicBool` | ui (C0) | touch (C1), pressure, ringled (C0) | 旧 `WORK_MODE_DISPLAY`。設定画面（基準値の補正中）であることを表すので、名前を意味に合わせる |
-| `ERROR_CODE` | `AtomicU8` | 全タスク | status_led, ui (C0) | `src/error.rs` へ（§4.7） |
+| `ERROR_CODE` | `AtomicU8` | 全タスク | status_led, ui (C0) | `src/error.rs` へ移し、外からは見えないようにする。`error::set` / `clear` / `get` で扱う（§4.7） |
 | `POINT0`–`POINT5`, `DEBUG_VALUE`, `AD_VALUE*` | Atomic | 各タスク | ui (C0) | デバッグ表示用。`debug_env.md` の段階で PC 側に移し、整理する |
-| `SCAN_TIME_*`, `ANALYSIS_TIME_*`, `PERIOD_OVERRUN`, `UI_DRAW_TIME` など | Atomic | 各タスク | ui (C0) | 新規。診断用（§4.6） |
+| `SCAN_TIME`, `ANALYSIS_TIME`, `UI_DRAW_TIME` | `TimeStat`（最小・平均・最大の Atomic の組） | touch (C1)、ui (C0) | ui (C0) | 新規。診断用（§4.6） |
+| `PERIOD_OVERRUN`, `MIDI_TX_MAX_USED`, `MIDI_TX_OVERFLOW` | `AtomicU32` | touch (C1)、`queue_midi` の呼び出し元 | ui (C0) | 新規。診断用（§4.6） |
 
 - `TOUCH_RAW_DATA` と `ELAPSED_TIME` は廃止する
 - `Ordering::Relaxed` を基本とする方針は変えない
@@ -216,32 +220,44 @@ loop {
 
 改修の効果（周期の安定・遅れの減少）を確かめるため、OLED に診断ページを 1 つ用意する。デバッグ環境ができるまでは、これが唯一の確認手段になる。
 
-- `touch_task`: スキャン時間と解析時間（それぞれ最小・平均・最大）、周期を超えた回数
-- `ui_task` の描画時間
-- `MIDI_TX` のキューの最大使用数、あふれた回数
+- 置き場所は OLED の **page 5**。左右スイッチで巡回するページを 0→1→2→3→5→0 にする（改修前は 0→1→2→3→0）。4 は設定画面のまま
+- 表示する内容（時間は us）
+    - `touch_task`: スキャン時間と解析時間（それぞれ最小・平均・最大）、周期を超えた回数
+    - `ui_task` の描画時間（転送は含まない。最小・平均・最大）
+    - `MIDI_TX` のキューの最大使用数、あふれた回数
+    - エラーコード
+- 平均は 1/16 の指数移動平均。最小・最大と回数は、設定画面に入ったとき（エラーコードのクリアと同時）に `reset_diagnostics()` でリセットする
+- 段階 5 では診断ページがまだ無いので、`PERIOD_OVERRUN` を page 3 に仮に表示し、段階 6 で診断ページに移す
 
 ### 4.7 エラーコード（`src/error.rs`）
 
-- `ERROR_CODE` と、コードの定数（例: `pub const ADC_READ: u8 = 13;`）を `src/error.rs` に集める。数値の直書きをやめる（P8）
-- 一の位・十の位とも 1–9 で採番する約束事は変えない
-- タスクの増減に合わせて、spawn 失敗のコードを振り直す。案:
+- `ERROR_CODE` と、コードの定数（例: `pub const ADC_READ: u8 = 32;`）を `src/error.rs` に集める。数値の直書きをやめる（P8）
+- 記録・消去・読み出しは `error::set(error::XXX)` / `error::clear()` / `error::get()` で行う。panic ハンドラは `error::PANIC`（55）を書く
+- 改修前の番号との互換は取らず、全体を振り直す。**十の位は機能の分類、一の位はその中の番号とし、どちらも 1–5 の範囲にする**（点滅の回数を数えやすくするため）
+- USB・MIDI 系の 3 つのタスク（usb, midi_tx, midi_rx）の起動失敗は 1 つのコードにまとめる。起動失敗はタスクのプールが足りないなどの作り込みの誤りで、起動直後に必ず起きるので、どのタスクかはコードを見れば分かる
 
-| コード | 意味 | 旧 |
-|---|---|---|
-| 11, 12 | （廃止: OLED ダブルバッファの初期投入） | 11, 12 |
-| 13 | ADC 値の取得エラー | 13 |
-| 14 | タッチセンサ初期化タイムアウト | 14 |
-| 21 | touch_task の起動に失敗（Core1） | 22 |
-| 31–38 | Core0 の各タスクの起動に失敗（midi_tx, usb, midi_rx, ringled, pressure, ui, status_led, debug_stream） | 31–35, 21, 23 |
-| 41 | `MIDI_TX` のキューあふれ | 41, 43 |
-| 42 | MIDI 送信の失敗（タイムアウト・USB 未接続など） | 42 |
-| 44 | RingLED への書き込みのタイムアウト | 44 |
-| 51 | OLED 初期化エラー | 51 |
-| 52 | OLED 転送エラー | 52 |
-| 53 | （廃止: 描画バッファ返却エラー） | 53 |
-| 54 | MIDI 受信エラー | 54 |
+| コード | 分類 | 意味 | 定数 |
+|---|---|---|---|
+| 11 | タッチ | touch_task の起動に失敗（Core1） | `SPAWN_TOUCH` |
+| 12 | タッチ | タッチセンサ初期化タイムアウト | `TOUCH_INIT_TIMEOUT` |
+| 21 | USB・MIDI | usb_task / midi_tx_task / midi_rx_task の起動に失敗 | `SPAWN_USB_MIDI` |
+| 22 | USB・MIDI | `MIDI_TX` のキューあふれ | `MIDI_TX_QUEUE_FULL` |
+| 23 | USB・MIDI | MIDI 送信のタイムアウト（USB 未接続など） | `MIDI_TX_TIMEOUT` |
+| 24 | USB・MIDI | MIDI 受信エラー | `MIDI_RX` |
+| 25 | USB・MIDI | （予約: debug_stream_task の起動に失敗。`doc/debug_env.md`） | ― |
+| 31 | 圧力 | pressure_task の起動に失敗 | `SPAWN_PRESSURE` |
+| 32 | 圧力 | ADC 値の取得エラー（タイムアウトを含む） | `ADC_READ` |
+| 41 | 表示 | ui_task の起動に失敗 | `SPAWN_UI` |
+| 42 | 表示 | OLED 初期化エラー | `OLED_INIT` |
+| 43 | 表示 | OLED 転送エラー（タイムアウトを含む） | `OLED_FLUSH` |
+| 44 | 表示 | ringled_task の起動に失敗 | `SPAWN_RINGLED` |
+| 45 | 表示 | RingLED への書き込みのタイムアウト | `RINGLED_WRITE_TIMEOUT` |
+| 51 | システム | status_led_task の起動に失敗（LED では表示できないので、OLED の診断ページで確認する） | `SPAWN_STATUS_LED` |
+| 55 | システム | panic（`status_led_task` が Core0 にあるため、Core0 で panic したときは LED では表示できない。§8） | `PANIC` |
 
-番号は実装時に確定し、CLAUDE.md の一覧も更新する。
+改修前のコード（11, 12, 21, 23, 43, 53 など）は、ダブルバッファの廃止やタスクの統合で意味を失ったので、対応は取らない。
+
+コードの一覧は `src/error.rs` の定数と、その先頭のコメントを正とする。
 
 ### 4.8 ソースの配置
 
@@ -269,14 +285,14 @@ src/
 
 ### 4.9 スタックとメモリ
 
-- Core1 のスタック（`CORE1_STACK_SIZE` = 8KB）: `QubitTouch`（履歴などを含む）が Core1 に移るが、embassy のタスクの状態（future）は static に置かれるので、スタックへの影響は `await` をまたがない局所変数の分だけ。`qtouch.rs` の関数内の一時配列の大きさは、実装時に確認する
+- Core1 のスタック: **`CORE1_STACK_SIZE` を 8KB → 16KB にする**。`QubitTouch` は約 3.7KB、`ReadTouch` は約 0.6KB ある（コンパイル時に確認）。embassy のタスクの状態（future）は static に置かれるが、初期化のときに一時的にスタックへ置かれることがあるため、余裕を持たせる。RP2350 の RAM（520KB）に対しては小さい
 - Core0 のスタック（`memory.x` の `_stack_size` = 8KB）: 同様。OLED のバッファ（1KB）は 2 つから 1 つに減る
 
 ## 5. ハードウェアの改修
 
 OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_modify.md` に分けて記述する。
 
-- 段階 3 より前に改修を済ませる。改修前の基板では、段階 3 以降のファームの OLED は表示されない（エラー 51）
+- 段階 3 より前に改修を済ませる。改修前の基板では、段階 3 以降のファームの OLED は表示されない（エラー 42）
 - 改修後の基板では、逆に `main` ブランチのファームの OLED が表示されなくなる（`doc/hw_modify.md` §5）
 
 ## 6. 作業の段階
@@ -336,7 +352,7 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 
 - `MIDI_TX` の要素は USB MIDI の 4 バイトのパケット（`MidiPacket = [u8; 4]`）。送る側は `tasks::midi::queue_midi` で `try_send` する
 - `pressure.rs` の CC 送信は、USB を直接使う `async` 関数から、送るパケットを引数の関数に渡す同期関数（`pressure_cc11_if_needed`）に変えた。以前は送信に失敗すると `?` でその回の処理を打ち切っていたが、キューに入れる形では打ち切らない
-- `midi_tx_task` のエラー 42 は、改修前と同じくタイムアウトのときだけ記録する（`write_packet` のエラーは記録しない）
+- `midi_tx_task` のエラー 42（現在の番号では 23）は、改修前と同じくタイムアウトのときだけ記録する（`write_packet` のエラーは記録しない）
 - 段階 4 の時点では、解析（`qubit_touch_task`）は Core0 のままで、コールバックからキューに入れる形にした
 
 **段階 5**
@@ -352,7 +368,8 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 - 診断ページの内容: スキャン・解析・描画の時間（us、最小/平均/最大）、周期超過回数、`MIDI_TX` の最大使用数/あふれた回数、エラーコード。平均は 1/16 の指数移動平均
 - 最小・最大と回数は、設定画面に入ったとき（エラーコードのクリアと同時）にリセットする
 - 計測値は `shared.rs` の `TimeStat`（最小・平均・最大の組）にまとめた。`ELAPSED_TIME` は廃止した
-- エラーコードは `error.rs` の定数にし、`error::set` / `clear` / `get` で扱う。`ERROR_CODE` 自体は `error.rs` の外から見えないようにした。最終的な割り当ては §4.7 の案のとおり（`debug_stream_task` 用の 38 は未使用）
+- エラーコードは `error.rs` の定数にし、`error::set` / `clear` / `get` で扱う。`ERROR_CODE` 自体は `error.rs` の外から見えないようにした
+- その後、改修前の番号との互換は不要として、十の位・一の位とも 1–5 の範囲に振り直した（§4.7）。panic は 255 から 55 に変えた
 
 ## 7. 他の設計書への影響
 
@@ -370,4 +387,5 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 - 96 キー構成で、スキャン＋解析が 10ms を超えることが常態化するか。段階 5 以降、`PERIOD_OVERRUN` を見て、常態化するようなら §4.1 のとおりタスクを分けるなどの対処を考える
 - OLED の描画時間が Core0 の MIDI 送信に与える影響。段階 3 以降、MIDI の送信の遅れなど問題が見えたら §4.4 の対処を行う
 - `InterruptExecutor` を使うかどうか（§4.4）
+- **Core0 で panic したときの表示**: 段階 3 で `status_led_task` を Core0 に移したため、Core0 で panic すると LED の点滅も止まり、エラー 55 を表示できない（Core1 の panic は Core0 の LED で 55 と表示される）。改修前は LED のタスクが Core1 にあったので、Core0 の panic も表示できた。対策としては、panic ハンドラの中で LED を直接点滅させる（Executor に頼らないビジーループ）などが考えられる
 - `pressure_task`（ADC）を Core1 に置く案。センシングをまとめる考え方もあるが、Core1 の周期を乱す要因を増やさないため、今回は Core0 に置く

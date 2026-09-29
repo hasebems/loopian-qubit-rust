@@ -71,7 +71,8 @@ debug_stream = []   # USB CDC でタッチの生値を PC に送る
 
 ### 3.3 スキャン（Core1、`read_touch.rs` と `touch_task`）
 
-- スキャンループを `Ticker` で周期実行にする。周期は `SCAN_PERIOD_US`（Atomic）で持ち、PC からのコマンドで変えられるようにする
+- スキャンループは `touch_task` の `Ticker` で周期実行している（`task_architecture.md` §4.1）。改修後の時点では周期は `constants.rs` の `SCAN_PERIOD_MS`（const、10ms）なので、デバッグ環境ではこれを `SCAN_PERIOD_US`（Atomic）にして、PC からのコマンドで変えられるようにする
+    - 周期を変えたときは `Ticker` を作り直し、解析の間引き（`ANALYSIS_DIVIDER = 10ms / 周期`）も実行時に計算し直す。周期は 10ms の約数（1, 2, 5, 10ms）に限る
     - 既定は **2ms**。チップの更新（8ms 周期）より速く読むことで、チップが実際にいつ値を更新しているか、読み取り中に hi/lo がずれる頻度はどのくらいか、を観察できる
     - 最終構成（96 キー）では 1 周に 8ms 前後かかるため、2ms では読めない。最終的なアルゴリズムは 8ms 周期のデータで評価する（PC 側で間引いて再現できる。§4.4）
 - 読み取った値は **補正前の生値** のまま送る。hi/lo ずれ補正（`raw -= 256`）も含め、補正はすべて PC 側で試す
@@ -99,7 +100,7 @@ pub struct DebugFrame {
 | Note On / Off | `touch_task`（Core1）の MIDI コールバック | ノート番号、ベロシティ、位置 |
 | スイッチ | `ui_task`（Core0） | 左右スイッチの押下・解放 |
 | 動作モード・設定画面 | `ui_task`（Core0） | Piano / Violin の切替、`SETTING_MODE` の変化 |
-| エラー | `ERROR_CODE` の変化 | エラーコード |
+| エラー | エラーコード（`error::get()`）の変化 | エラーコード |
 | マーカー | PC からのコマンド | 実験者が付ける目印（「ここからゆっくり触る」など） |
 
 `DEBUG_EVENTS: Channel<CriticalSectionRawMutex, DebugEvent, 16>` に `try_send` する。時刻は各タスクで `Instant::now()` から取る（両コアで同じタイマーを使っているので、フレームの時刻と比べられる）。
@@ -120,7 +121,7 @@ loop {
 - `write_packet` がタイムアウトしたら切断されたとみなし、`wait_connection` に戻る
 - パケットの長さがちょうど 64 の倍数になったときは、長さ 0 のパケットを送る（USB バルク転送で、受信側に区切りを知らせるため）
 - `start` コマンドを受けるまではフレームを送らない（§5.2）
-- spawn に失敗したら、既存の約束事どおりエラーコードに記録する（36 を割り当てる）
+- spawn に失敗したら、既存の約束事どおりエラーコードに記録する（25 を割り当てる。`task_architecture.md` §4.7 で予約済み）
 
 ### 3.6 OLED
 

@@ -36,7 +36,7 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 | 内蔵 LED | GP25 | Active Low。ハートビート / エラーコード表示 |
 | USB | USB MIDI (VID 0x1209 / PID 0x3691) | |
 
-回路図は `mcuboard_schematic.pdf`、I2C ロックアップの調査記録は `doc/i2c_problem260802.md`。OLED を I2C0 に移すハードウェア改修は `doc/hw_modify.md`（改修前の基板では OLED が表示されず、エラー 51 になる）。
+回路図は `mcuboard_schematic.pdf`、I2C ロックアップの調査記録は `doc/i2c_problem260802.md`。OLED を I2C0 に移すハードウェア改修は `doc/hw_modify.md`（改修前の基板では OLED が表示されず、エラー 42 になる）。
 
 ## アーキテクチャ
 
@@ -58,7 +58,7 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 ### タスク間の受け渡し
 
 - 共有状態は `src/shared.rs` にまとめ、各項目に書き手と読み手をコメントで書く。基本は `portable_atomic` の Atomic（`Ordering::Relaxed`）で、各タスクは共有状態をポーリングして独立周期で動く（経緯は `doc/ringled_modify.md`）
-- 例外は MIDI 送信の `MIDI_TX`（容量 16 の `Channel`）。書き手は `touch_task`（Core1）と `pressure_task`（Core0）で、`tasks::midi::queue_midi` で `try_send` する（待たない。あふれたら捨ててエラー 41）
+- 例外は MIDI 送信の `MIDI_TX`（容量 16 の `Channel`）。書き手は `touch_task`（Core1）と `pressure_task`（Core0）で、`tasks::midi::queue_midi` で `try_send` する（待たない。あふれたら捨ててエラー 22）
 - コアをまたぐのは `MIDI_TX` と Atomic だけ。タッチの生データはコアをまたがない
 - `TOUCH0-3` はタッチ位置 ×100（0–9999）、10000 は未タッチ
 - `RINGLED_RX_BITS` は `[AtomicU32; RINGLED_RX_WORDS]`（1 ビット/LED、LED n は `[n / 32]` の `n % 32` ビット目）
@@ -85,8 +85,8 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 
 ## エラー処理の約束事
 
-- パニックさせない方針。失敗は `error::set(error::XXX)` で 2 桁のコードを記録し、内蔵 LED が十の位 → 一の位の回数だけ点滅する。panic ハンドラは 255（`error::PANIC`）を書く
-- コードは `src/error.rs` に定数で定義する（1x: 初期化・入力、2x: Core1 のタスクの起動失敗、3x: Core0 のタスクの起動失敗、4x: MIDI・LED の出力、5x: OLED・MIDI の受信）。新しいエラーを追加するときは、一の位・十の位とも 1–9 の範囲で採番する
+- パニックさせない方針。失敗は `error::set(error::XXX)` で 2 桁のコードを記録し、内蔵 LED が十の位 → 一の位の回数だけ点滅する。panic ハンドラは 55（`error::PANIC`）を書く。ただし LED を点滅させる `status_led_task` は Core0 にあるので、Core0 で panic したときや `status_led_task` の起動に失敗したとき（51）は LED では表示できない
+- コードは `src/error.rs` に定数で定義する。十の位は機能の分類（1x: タッチ、2x: USB・MIDI、3x: 圧力、4x: 表示、5x: システム）、一の位はその中の番号で、点滅を数えやすいよう **どちらも 1–5 の範囲** で採番する
 - I2C・MIDI 送信・NeoPixel 書き込みなど、ハードウェア待ちは `with_timeout` で包み、1 つのデバイスが固まってもタスク全体が止まらないようにする
 - タスクの spawn 失敗もエラーコードに記録する（`match task(...) { Ok(token) => spawner.spawn(token), Err(_) => ... }`）
 

@@ -55,7 +55,7 @@ macro_rules! make_static {
     }};
 }
 
-// パニックハンドラ: エラーカウントを最大値にして永久ループ
+// パニックハンドラ: エラーコード PANIC (55) を書いて永久ループ
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     error::set(error::PANIC);
@@ -169,15 +169,15 @@ fn main() -> ! {
     executor0.run(|spawner| {
         match tasks::midi::midi_tx_task(sender) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => error::set(error::SPAWN_MIDI_TX),
+            Err(_) => error::set(error::SPAWN_USB_MIDI),
         }
         match usb_task(usb) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => error::set(error::SPAWN_USB),
+            Err(_) => error::set(error::SPAWN_USB_MIDI),
         }
         match tasks::midi::midi_rx_task(receiver) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => error::set(error::SPAWN_MIDI_RX),
+            Err(_) => error::set(error::SPAWN_USB_MIDI),
         }
         match tasks::ringled::ringled_task(common, sm0, p.DMA_CH0, p.PIN_5, ws2812_program) {
             Ok(token) => spawner.spawn(token),
