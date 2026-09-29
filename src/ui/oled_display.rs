@@ -12,7 +12,7 @@ use embedded_graphics::text::Text;
 use heapless::String;
 
 use crate::devices::ssd1306::OledBuffer;
-use crate::{
+use crate::shared::{
     AD_VALUE0,
     AD_VALUE1,
     AD_VALUE2,

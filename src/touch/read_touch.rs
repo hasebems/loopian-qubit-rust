@@ -3,11 +3,11 @@ use embassy_rp::peripherals::I2C1;
 use embassy_time::{Duration, with_timeout};
 use portable_atomic::Ordering;
 
-use crate::TOUCH_RAW_DATA;
-use crate::WORK_MODE_DISPLAY;
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
-use crate::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
+use crate::shared::TOUCH_RAW_DATA;
+use crate::shared::WORK_MODE_DISPLAY;
+use crate::shared::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
 pub struct ReadTouch {
     raw_value: [u16; constants::TOTAL_QT_KEYS],

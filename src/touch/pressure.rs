@@ -1,5 +1,5 @@
 use crate::constants::*;
-use crate::{ANY_TOUCH, PRESSURE};
+use crate::shared::{ANY_TOUCH, PRESSURE};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
 use embassy_time::{Duration, with_timeout};

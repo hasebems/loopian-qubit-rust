@@ -4,7 +4,7 @@
 //  https://opensource.org/licenses/mit-license.php
 //
 use crate::constants::*;
-use crate::{ANY_TOUCH, DEBUG_VALUE, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
+use crate::shared::{ANY_TOUCH, DEBUG_VALUE, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 use portable_atomic::Ordering;
 
 // =========================================================

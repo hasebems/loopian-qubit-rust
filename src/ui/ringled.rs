@@ -1,5 +1,5 @@
-use crate::WORK_MODE_DISPLAY;
 use crate::constants::*;
+use crate::shared::WORK_MODE_DISPLAY;
 use core::f32::consts::PI;
 use libm::sinf;
 use portable_atomic::Ordering;
