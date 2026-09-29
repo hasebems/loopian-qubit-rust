@@ -20,12 +20,13 @@ pub static ERROR_CODE: AtomicU8 = AtomicU8::new(0);
 // 32: USB Taskの起動に失敗
 // 33: MIDI RX Taskの起動に失敗
 // 34: RingLED Taskの起動に失敗
-// 35: ADC Taskの起動に失敗
+// 35: Pressure Task (ADC) の起動に失敗
 // 36: UI Taskの起動に失敗
 // 37: Status LED Taskの起動に失敗
-// 41: タッチイベントのバッファオーバーフロー
-// 42: MIDIイベントの送信失敗（USB未接続など）
-// 43: MIDIイベントのバッファオーバーフロー
+// 38: MIDI TX Taskの起動に失敗
+// 41: MIDI送信キュー (MIDI_TX) のあふれ
+// 42: MIDIイベントの送信失敗（タイムアウト。USB未接続など）
+// 43: （廃止）MIDIイベントのバッファオーバーフロー → 41 へ
 // 44: RingLEDへの書き込みのタイムアウト
 // 51: OLED初期化エラー
 // 52: OLED転送エラー（タイムアウトを含む）

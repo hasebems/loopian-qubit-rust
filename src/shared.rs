@@ -10,10 +10,19 @@
 use core::sync::atomic::AtomicBool;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use portable_atomic::{AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64};
 
 use crate::constants::*;
+
+/// USB MIDI のパケット（CIN, status, data1, data2）
+pub type MidiPacket = [u8; 4];
+pub const MIDI_TX_QUEUE_SIZE: usize = 16;
+// 送信する MIDI パケット: qubit_touch_task (ノート), pressure_task (CC) → midi_tx_task
+// 送る側は try_send で待たない。USB が詰まっても送る側のタスクは止まらない
+pub static MIDI_TX: Channel<CriticalSectionRawMutex, MidiPacket, MIDI_TX_QUEUE_SIZE> =
+    Channel::new();
 
 // 表示用変数: read_touch → OLED (page 2)
 pub static POINT0: AtomicU16 = AtomicU16::new(0);
@@ -32,16 +41,16 @@ pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
 pub static RINGLED_RX_BITS: [AtomicU32; RINGLED_RX_WORDS] =
     [const { AtomicU32::new(0) }; RINGLED_RX_WORDS];
 pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）: touch_scan_task
-// ADCの値: adc_task → OLED (page 1)
+// ADCの値: pressure_task → OLED (page 1)
 pub static AD_VALUE0: AtomicU32 = AtomicU32::new(0); // ADCの値(A0)
 pub static AD_VALUE1: AtomicU32 = AtomicU32::new(0); // ADCの値(A1)
 pub static AD_VALUE2: AtomicU32 = AtomicU32::new(0); // ADCの値(B0)
 pub static AD_VALUE3: AtomicU32 = AtomicU32::new(0); // ADCの値(B1)
-pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果: adc_task → CC11送信, OLED (page 1)
+pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果: pressure_task → CC11送信, OLED (page 1)
 // 動作モード（Piano/Violin）: ui_task → qubit_touch_task, midi_rx_task, OLED
 pub static WORK_MODE: AtomicU8 = AtomicU8::new(0);
 // 動作モード変更表示状態（設定画面、基準値の補正中）
-// ui_task → read_touch, adc_task, ringled
+// ui_task → read_touch, pressure_task, ringled
 pub static WORK_MODE_DISPLAY: AtomicBool = AtomicBool::new(false);
 pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用: qtouch(ビブラート) → OLED (page 1)
 pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false); // qtouch → 圧力計算

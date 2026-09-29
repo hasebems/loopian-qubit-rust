@@ -3,14 +3,16 @@ use portable_atomic::Ordering;
 
 use crate::constants::*;
 use crate::error::ERROR_CODE;
-use crate::shared::{AD_VALUE0, AD_VALUE1, AD_VALUE2, WORK_MODE_DISPLAY};
+use crate::shared::{AD_VALUE0, AD_VALUE1, AD_VALUE2, WORK_MODE, WORK_MODE_DISPLAY};
+use crate::tasks::midi::queue_midi;
 use crate::touch;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//      ADC Task (Core0): GP27/GP28 の連続サンプリング
+//      Pressure Task (Core0): ADC (GP26/27/28) の連続サンプリング、圧力の計算、
+//      Violin モードの CC11 (Expression) の送信
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
-pub async fn adc_task(
+pub async fn pressure_task(
     mut adc: embassy_rp::adc::Adc<'static, embassy_rp::adc::Async>,
     adc_a1: embassy_rp::adc::Channel<'static>,
     adc_a2: embassy_rp::adc::Channel<'static>,
@@ -27,6 +29,7 @@ pub async fn adc_task(
         [[0u16; touch::pressure::PRESSURE_BASELINE_WINDOW]; MAX_ADC_CHANNELS];
     let mut baseline_sums = [0u64; MAX_ADC_CHANNELS];
     let mut samples = [0u32; MAX_ADC_CHANNELS];
+    let mut pressure_midi = touch::pressure::PressureMidiState::new();
 
     loop {
         // ADC読み込み準備時間を確保
@@ -70,5 +73,12 @@ pub async fn adc_task(
             wmd,
         );
         adc_counter = adc_counter.wrapping_add(1);
+
+        // Violin モードの CC11 (と、モードに入ったときの All Sound Off) を送信キューに入れる
+        let work_mode = WORK_MODE
+            .load(Ordering::Relaxed)
+            .try_into()
+            .unwrap_or(WorkMode::Piano);
+        touch::pressure::pressure_cc11_if_needed(&mut pressure_midi, work_mode, queue_midi);
     }
 }

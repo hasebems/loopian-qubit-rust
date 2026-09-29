@@ -1,9 +1,5 @@
 use crate::constants::*;
-use crate::shared::{ANY_TOUCH, PRESSURE};
-use embassy_rp::peripherals::USB;
-use embassy_rp::usb::Driver;
-use embassy_time::{Duration, with_timeout};
-use embassy_usb::class::midi::Sender;
+use crate::shared::{ANY_TOUCH, MidiPacket, PRESSURE};
 use portable_atomic::Ordering;
 
 const PRESSURE_THRESHOLD: u32 = 100;
@@ -79,42 +75,30 @@ pub fn pressure_to_cc11(pressure: u32) -> u8 {
     (scaled + EXP_MIN_VALUE as u32).min(127) as u8
 }
 
-async fn send_control_change(
-    sender: &mut Sender<'static, Driver<'static, USB>>,
-    controller: u8,
-    value: u8,
-) -> Result<(), ()> {
-    let result = with_timeout(
-        Duration::from_millis(MIDI_TX_TIMEOUT_MS),
-        sender.write_packet(&[MIDI_CC_INPUT_CH, MIDI_CC_STATUS, controller, value]),
-    )
-    .await;
-    if result.is_err() {
-        return Err(());
-    }
-    Ok(())
+fn control_change_packet(controller: u8, value: u8) -> MidiPacket {
+    [MIDI_CC_INPUT_CH, MIDI_CC_STATUS, controller, value]
 }
 
-pub async fn send_pressure_cc11_if_needed(
-    sender: &mut Sender<'static, Driver<'static, USB>>,
+/// Violin モードで送るべき CC（All Sound Off / CC11）を決め、パケットを send に渡す
+pub fn pressure_cc11_if_needed(
     pressure_midi: &mut PressureMidiState,
     work_mode: WorkMode,
-) -> Result<(), ()> {
+    mut send: impl FnMut(MidiPacket),
+) {
     if work_mode != WorkMode::Violin {
         pressure_midi.update_work_mode(work_mode);
-        return Ok(());
+        return;
     }
 
     if pressure_midi.entered_violin_mode(work_mode) {
         let init_cc11 = pressure_midi.reset_for_violin_mode();
-        send_control_change(sender, MIDI_CC_ALL_SOUND_OFF, 0).await?;
-        send_control_change(sender, MIDI_CC_EXPRESSION, init_cc11).await?;
+        send(control_change_packet(MIDI_CC_ALL_SOUND_OFF, 0));
+        send(control_change_packet(MIDI_CC_EXPRESSION, init_cc11));
     } else if let Some(cc11_value) = pressure_midi.next_cc11_to_send() {
-        send_control_change(sender, MIDI_CC_EXPRESSION, cc11_value).await?;
+        send(control_change_packet(MIDI_CC_EXPRESSION, cc11_value));
     }
 
     pressure_midi.update_work_mode(work_mode);
-    Ok(())
 }
 
 pub fn update_pressure(

@@ -169,9 +169,13 @@ fn main() -> ! {
     // Core0もExecutorを回す（必須）
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
-        match tasks::touch::qubit_touch_task(sender) {
+        match tasks::touch::qubit_touch_task() {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(31, Ordering::Relaxed),
+        }
+        match tasks::midi::midi_tx_task(sender) {
+            Ok(token) => spawner.spawn(token),
+            Err(_) => ERROR_CODE.store(38, Ordering::Relaxed),
         }
         match usb_task(usb) {
             Ok(token) => spawner.spawn(token),
@@ -185,7 +189,7 @@ fn main() -> ! {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(34, Ordering::Relaxed),
         }
-        match tasks::pressure::adc_task(adc, adc_a1, adc_a2, adc_a3, adc_dma) {
+        match tasks::pressure::pressure_task(adc, adc_a1, adc_a2, adc_a3, adc_dma) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(35, Ordering::Relaxed),
         }

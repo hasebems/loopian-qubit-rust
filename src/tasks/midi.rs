@@ -1,11 +1,38 @@
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
-use embassy_usb::class::midi::Receiver;
+use embassy_time::{Duration, with_timeout};
+use embassy_usb::class::midi::{Receiver, Sender};
 use portable_atomic::Ordering;
 
 use crate::constants::*;
 use crate::error::ERROR_CODE;
-use crate::shared::{RINGLED_RX_BITS, WORK_MODE};
+use crate::shared::{MIDI_TX, MidiPacket, RINGLED_RX_BITS, WORK_MODE};
+
+/// MIDI パケットを送信キューに入れる（待たない）。キューが一杯なら捨ててエラーを記録する
+pub fn queue_midi(packet: MidiPacket) {
+    if MIDI_TX.try_send(packet).is_err() {
+        ERROR_CODE.store(41, Ordering::Relaxed);
+    }
+}
+
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      MIDI TX Task: 送信キューの MIDI パケットを USB MIDI に送る
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#[embassy_executor::task]
+pub async fn midi_tx_task(mut sender: Sender<'static, Driver<'static, USB>>) {
+    loop {
+        let packet = MIDI_TX.receive().await;
+        let result = with_timeout(
+            Duration::from_millis(MIDI_TX_TIMEOUT_MS),
+            sender.write_packet(&packet),
+        )
+        .await;
+        if result.is_err() {
+            // タイムアウト（USB未接続時など）
+            ERROR_CODE.store(42, Ordering::Relaxed);
+        }
+    }
+}
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      MIDI RX Task: USB経由で受信したMIDIイベントの処理

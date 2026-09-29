@@ -8,10 +8,11 @@
 //! | タスク              | コア  | 周期          | ファイル        |
 //! |---------------------|-------|---------------|-----------------|
 //! | qubit_touch_task    | Core0 | 10ms          | touch.rs        |
+//! | midi_tx_task        | Core0 | MIDI_TX で起動 | midi.rs        |
 //! | midi_rx_task        | Core0 | USB受信で起動 | midi.rs         |
 //! | usb_task            | Core0 | 常駐          | main.rs         |
 //! | ringled_task        | Core0 | 20ms          | ringled.rs      |
-//! | adc_task            | Core0 | 10ms          | pressure.rs     |
+//! | pressure_task       | Core0 | 10ms          | pressure.rs     |
 //! | ui_task             | Core0 | 100ms         | ui.rs           |
 //! | status_led_task     | Core0 | 常駐          | status_led.rs   |
 //! | touch_scan_task     | Core1 | 周期なし      | touch_scan.rs   |
