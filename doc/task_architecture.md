@@ -189,6 +189,8 @@ loop {
     2. 更新周期を下げる
     3. `midi_tx_task` を `InterruptExecutor`（優先度付き）に移す。`Cargo.toml` では `executor-interrupt` がすでに有効
 - 起動画面の描画と転送も `ui_task` の最初に行う
+- **OLED の初期化の前に 100ms 待つ**（`OLED_POWER_ON_WAIT_MS`）。改修前は、タッチセンサの初期化が終わってから OLED を初期化していたので、自然に待ち時間があった。I2C を分けると起動直後に並行して走るため、電源投入直後の OLED が初期化コマンドを受け付けられるように待つ
+- **転送のタイムアウトは 50ms**（`OLED_FLUSH_TIMEOUT_MS`）。1 画面（1024 バイト）の転送は 400kHz で約 25ms かかる見積もりなので、余裕を持たせる。失敗・タイムアウトはエラー 52 に記録する
 
 ### 4.5 共有状態の整理（`src/shared.rs`）
 
@@ -296,6 +298,39 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 - 段階 1 は他と独立しているので、`main` から分岐した `fix_ringled_rx_bits` ブランチで行い、`main` に入れて本番用のファームにも反映する。`task_architecture` ブランチには、その後で `main` から取り込む
 - 段階 2 は差分が大きいが、中身は移動だけにする。レビューで「移動以外の変更が無い」ことを確かめやすくするため
 - 段階 4 で先に `MIDI_TX` を作っておくと、段階 5 で解析を Core1 に移すときに、MIDI の出口を変えずに済む
+
+### 6.1 実装の記録
+
+各段階を実装したときに、設計から補ったこと・途中の状態を記録する。
+
+**段階 1**（`fix_ringled_rx_bits` → `main`）
+
+- `RINGLED_RX_BITS` を `[AtomicU32; RINGLED_RX_WORDS]` にした。`RINGLED_RX_WORDS = NUM_LEDS.div_ceil(32)` なので、`test_mode`（6 キー）では 1 語になる
+- 不具合は 2026-05-27 の `8671a50`（RingLED をイベント駆動から共有状態の参照に変えたとき）で入った。それ以前は `[bool; NUM_LEDS]` で正しく扱えていた
+
+**段階 2**
+
+- タスクの関数名は変えずに `tasks/` に移した。移したタスクの本体は、元の `main.rs` と一字一句同じ（スクリプトで照合）
+- 途中のファイル名: `qubit_touch_task` は `tasks/touch.rs`、`adc_task` は `tasks/pressure.rs`、`core1_i2c_task` は `tasks/core1_i2c.rs`（段階 3 で `touch_scan.rs` に改名）
+- `ringled_task` が `Irqs` を使うので、`bind_interrupts!` の `Irqs` を `pub` にした
+- `usb_task` は `main.rs` に残した
+- `error.rs` には `ERROR_CODE` と一覧のコメントだけを移した。コードの定数化は段階 6 で行う
+
+**段階 3**（ハードウェアの改修前に実装した。実機では未確認）
+
+- `core1_i2c_task` を `touch_scan_task`（`tasks/touch_scan.rs`）に改名し、タッチのスキャンだけにした。段階 5 で解析と合わせて `touch_task` にする
+- `core1_oled_ui_task` → `ui_task`、`core1_led_task` → `status_led_task` に改名し、Core0 に移した
+- I2C0・I2C1 とも 400kHz で、同じ `I2cConfig` を使う（`Copy`）
+- OLED の電源安定待ちと転送のタイムアウトを追加した（§4.4）
+- エラーコードは段階 6 の振り直しまでの仮の割り当てにした
+
+| コード | 段階 3 時点の意味 |
+|---|---|
+| 11, 12, 21, 23, 53 | 廃止（ダブルバッファ・Core1 の LED/UI タスク） |
+| 22 | touch_scan_task（Core1）の起動に失敗 |
+| 36 | ui_task の起動に失敗 |
+| 37 | status_led_task の起動に失敗 |
+| 52 | OLED 転送エラー（タイムアウトを含む） |
 
 ## 7. 他の設計書への影響
 
