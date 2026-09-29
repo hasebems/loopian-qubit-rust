@@ -1,5 +1,5 @@
 use crate::constants::*;
-use crate::shared::WORK_MODE_DISPLAY;
+use crate::shared::SETTING_MODE;
 use core::f32::consts::PI;
 use libm::sinf;
 use portable_atomic::Ordering;
@@ -33,7 +33,7 @@ impl RingLed {
             ((sinf(color_phase + (2.0 * PI / 3.0)) + 1.0) * 0.5).clamp(0.0, 1.0);
         let background_tint_b =
             ((sinf(color_phase + (4.0 * PI / 3.0)) + 1.0) * 0.5).clamp(0.0, 1.0);
-        let work_mode_display = WORK_MODE_DISPLAY.load(Ordering::Relaxed);
+        let work_mode_display = SETTING_MODE.load(Ordering::Relaxed);
         let setting_blink_on = (self.counter / 25).is_multiple_of(2);
 
         for (i, led) in data.iter_mut().enumerate().take(NUM_LEDS) {

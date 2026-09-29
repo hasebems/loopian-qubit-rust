@@ -5,8 +5,8 @@ use portable_atomic::Ordering;
 
 use crate::constants::*;
 use crate::devices;
-use crate::error::ERROR_CODE;
-use crate::shared::{ELAPSED_TIME, PERIOD_OVERRUN, WORK_MODE};
+use crate::error;
+use crate::shared::{ANALYSIS_TIME, PERIOD_OVERRUN, SCAN_TIME, WORK_MODE};
 use crate::tasks::midi::queue_midi;
 use crate::touch;
 
@@ -33,7 +33,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     )
     .await;
     if !matches!(touch_init_result, Ok(true)) {
-        ERROR_CODE.store(14, Ordering::Relaxed);
+        error::set(error::TOUCH_INIT_TIMEOUT);
     }
 
     // コールバック内で使う動作モード（解析の直前に更新する）
@@ -58,7 +58,6 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     let mut ticker = Ticker::every(period);
     let mut frame = 0u32;
     let mut touch_values = [0u16; TOTAL_QT_KEYS];
-    let start = Instant::now();
 
     // Task Loop
     loop {
@@ -69,9 +68,11 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         read_touch
             .touch_sensor_scan(&pca, &mut at42, &mut i2c, &mut touch_values)
             .await;
+        SCAN_TIME.record(cycle_start.elapsed().as_micros() as u32);
 
         // 解析: QubitTouch は 10ms 毎に呼ばれる前提なので、ANALYSIS_DIVIDER フレームに 1 回行う
         if frame.is_multiple_of(ANALYSIS_DIVIDER) {
+            let analysis_start = Instant::now();
             let work_mode = WORK_MODE
                 .load(Ordering::Relaxed)
                 .try_into()
@@ -87,6 +88,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
                 // LEDの明るさをタッチの強さに応じて変化させる
                 //WHITE_LEVEL.store(intensity as u8, Ordering::Relaxed);
             });
+            ANALYSIS_TIME.record(analysis_start.elapsed().as_micros() as u32);
         }
         frame = frame.wrapping_add(1);
 
@@ -97,8 +99,5 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             PERIOD_OVERRUN.fetch_add(1, Ordering::Relaxed);
             ticker.reset();
         }
-
-        // touch_task起動からの経過時間(us)
-        ELAPSED_TIME.store(start.elapsed().as_micros(), Ordering::Relaxed);
     }
 }

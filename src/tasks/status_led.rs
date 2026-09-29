@@ -1,8 +1,7 @@
 use embassy_rp::gpio::Output;
 use embassy_time::Timer;
-use portable_atomic::Ordering;
 
-use crate::error::ERROR_CODE;
+use crate::error;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      Status LED Task (Core0): Heartbeat LEDの点滅とエラーコードの表示
@@ -10,7 +9,7 @@ use crate::error::ERROR_CODE;
 #[embassy_executor::task]
 pub async fn status_led_task(mut led: Output<'static>) {
     loop {
-        let code = ERROR_CODE.load(Ordering::Relaxed);
+        let code = error::get();
         if code != 0 {
             // エラーコードは2桁表示に制限して、十の位→一の位の順で点滅する
             let code_2digit = code.min(99);

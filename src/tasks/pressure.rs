@@ -2,8 +2,8 @@ use embassy_time::{Duration, Timer, with_timeout};
 use portable_atomic::Ordering;
 
 use crate::constants::*;
-use crate::error::ERROR_CODE;
-use crate::shared::{AD_VALUE0, AD_VALUE1, AD_VALUE2, WORK_MODE, WORK_MODE_DISPLAY};
+use crate::error;
+use crate::shared::{AD_VALUE0, AD_VALUE1, AD_VALUE2, SETTING_MODE, WORK_MODE};
 use crate::tasks::midi::queue_midi;
 use crate::touch;
 
@@ -53,17 +53,17 @@ pub async fn pressure_task(
                 }
                 Err(_) => {
                     // ADC内部エラー
-                    ERROR_CODE.store(13, Ordering::Relaxed);
+                    error::set(error::ADC_READ);
                 }
             },
             Err(_) => {
                 // タイムアウトエラー
-                ERROR_CODE.store(13, Ordering::Relaxed);
+                error::set(error::ADC_READ);
             }
         }
 
         // 圧力を計算
-        let wmd = WORK_MODE_DISPLAY.load(Ordering::Relaxed);
+        let wmd = SETTING_MODE.load(Ordering::Relaxed);
         touch::pressure::update_pressure(
             &samples,
             &mut baseline_history,

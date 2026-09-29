@@ -5,7 +5,7 @@ use portable_atomic::Ordering;
 
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
-use crate::shared::WORK_MODE_DISPLAY;
+use crate::shared::SETTING_MODE;
 use crate::shared::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
 pub struct ReadTouch {
@@ -135,7 +135,7 @@ impl ReadTouch {
         i2c: &mut I2c<'static, I2C1, i2c::Async>,
         out: &mut [u16; constants::TOTAL_QT_KEYS],
     ) {
-        let work_mode_display = WORK_MODE_DISPLAY.load(Ordering::Relaxed);
+        let work_mode_display = SETTING_MODE.load(Ordering::Relaxed);
         let mut data = [0u16; constants::TOTAL_QT_KEYS];
         for ch in 0..(constants::TOTAL_CH as u8) {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;

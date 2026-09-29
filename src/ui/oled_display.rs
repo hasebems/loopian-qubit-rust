@@ -12,29 +12,29 @@ use embedded_graphics::text::Text;
 use heapless::String;
 
 use crate::devices::ssd1306::OledBuffer;
+use crate::error;
 use crate::shared::{
-    AD_VALUE0,
-    AD_VALUE1,
-    AD_VALUE2,
-    AD_VALUE3,
-    //WORK_MODE_DISPLAY,
-    DEBUG_VALUE,
-    PERIOD_OVERRUN,
-    //ELAPSED_TIME,
-    POINT0,
-    POINT1,
-    POINT2,
-    POINT3,
-    POINT4,
-    POINT5,
-    PRESSURE,
-    TOUCH0,
-    TOUCH1,
-    TOUCH2,
-    TOUCH3,
-    //ERROR_CODE,
-    WORK_MODE,
+    AD_VALUE0, AD_VALUE1, AD_VALUE2, AD_VALUE3, ANALYSIS_TIME, DEBUG_VALUE, MIDI_TX_MAX_USED,
+    MIDI_TX_OVERFLOW, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4, POINT5, PRESSURE,
+    SCAN_TIME, TOUCH0, TOUCH1, TOUCH2, TOUCH3, UI_DRAW_TIME, WORK_MODE,
 };
+
+/// 設定画面のページ番号
+pub const SETTING_PAGE: u8 = 4;
+/// 通常時に左右スイッチで巡回するページ（5: 診断ページ）
+const NORMAL_PAGES: [u8; 5] = [0, 1, 2, 3, 5];
+
+/// 右スイッチで進む次のページ
+pub fn next_page(page: u8) -> u8 {
+    let idx = NORMAL_PAGES.iter().position(|&p| p == page).unwrap_or(0);
+    NORMAL_PAGES[(idx + 1) % NORMAL_PAGES.len()]
+}
+
+/// 左スイッチで戻る前のページ
+pub fn prev_page(page: u8) -> u8 {
+    let idx = NORMAL_PAGES.iter().position(|&p| p == page).unwrap_or(0);
+    NORMAL_PAGES[(idx + NORMAL_PAGES.len() - 1) % NORMAL_PAGES.len()]
+}
 
 pub struct GraphicsDisplay {
     page: u8,
@@ -88,6 +88,7 @@ impl GraphicsDisplay {
             2 => display2(buffer),
             3 => display3(buffer),
             4 => display4(buffer, counter),
+            5 => display_diag(buffer),
             10 => demo_lines(buffer),
             11 => demo_rects(buffer),
             12 => demo_filled_rects(buffer),
@@ -155,10 +156,6 @@ fn display1(buffer: &mut OledBuffer, counter: u32) {
     text1.clear();
     let _ = write!(text1, "Vibrato: {}", vib);
     let _ = Text::new(&text1, Point::new(6, 52), style_small).draw(buffer);
-    //let elapsed_time = ELAPSED_TIME.load(core::sync::atomic::Ordering::Relaxed);
-    //text1.clear();
-    //let _ = write!(text1, "Elapse: {}", elapsed_time);
-    //let _ = Text::new(&text1, Point::new(6, 52), style_small).draw(buffer);
 }
 
 fn display2(buffer: &mut OledBuffer) {
@@ -249,12 +246,51 @@ fn display3(buffer: &mut OledBuffer) {
         let _ = write!(text1, "Touch4: ---");
     }
     let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
+}
 
-    // 仮表示: タッチの周期超過回数（診断ページができるまで）
-    text1.clear();
-    let overrun = PERIOD_OVERRUN.load(core::sync::atomic::Ordering::Relaxed);
-    let _ = write!(text1, "Overrun: {}", overrun);
-    let _ = Text::new(&text1, Point::new(6, 60), style_small).draw(buffer);
+/// 診断ページ: 処理時間（us, 最小/平均/最大）と周期超過・MIDI 送信キューの状況
+/// 最小・最大と回数は、設定画面に入ったときにリセットされる
+fn display_diag(buffer: &mut OledBuffer) {
+    use core::sync::atomic::Ordering;
+    buffer.clear();
+
+    let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let mut text: String<32> = String::new();
+    let mut line = |text: &String<32>, y: i32| {
+        let _ = Text::new(text, Point::new(0, y), style_small).draw(buffer);
+    };
+
+    let _ = write!(text, "us  min/avg/max");
+    line(&text, 8);
+
+    let (min, avg, max) = SCAN_TIME.get();
+    text.clear();
+    let _ = write!(text, "Scn{:>5}/{:>5}/{:>5}", min, avg, max);
+    line(&text, 18);
+
+    let (min, avg, max) = ANALYSIS_TIME.get();
+    text.clear();
+    let _ = write!(text, "Anl{:>5}/{:>5}/{:>5}", min, avg, max);
+    line(&text, 28);
+
+    let (min, avg, max) = UI_DRAW_TIME.get();
+    text.clear();
+    let _ = write!(text, "Drw{:>5}/{:>5}/{:>5}", min, avg, max);
+    line(&text, 38);
+
+    text.clear();
+    let _ = write!(
+        text,
+        "Ovr {} MIDIq {}/{}",
+        PERIOD_OVERRUN.load(Ordering::Relaxed),
+        MIDI_TX_MAX_USED.load(Ordering::Relaxed),
+        MIDI_TX_OVERFLOW.load(Ordering::Relaxed)
+    );
+    line(&text, 50);
+
+    text.clear();
+    let _ = write!(text, "Err {}", error::get());
+    line(&text, 60);
 }
 
 fn display4(buffer: &mut OledBuffer, counter: u32) {

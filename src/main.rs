@@ -15,7 +15,6 @@ mod touch;
 mod ui;
 
 use cortex_m::asm;
-use portable_atomic::Ordering;
 use static_cell::StaticCell;
 
 use embassy_executor::Executor;
@@ -36,7 +35,6 @@ use embassy_usb::class::midi::MidiClass;
 use embassy_usb::{Builder, Config};
 
 use crate::constants::*;
-use crate::error::ERROR_CODE;
 
 bind_interrupts!(pub struct Irqs {
     ADC_IRQ_FIFO => AdcInterruptHandler;
@@ -60,7 +58,7 @@ macro_rules! make_static {
 // パニックハンドラ: エラーカウントを最大値にして永久ループ
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    ERROR_CODE.store(255, Ordering::Relaxed);
+    error::set(error::PANIC);
     loop {
         asm::nop();
     }
@@ -158,7 +156,7 @@ fn main() -> ! {
             let executor1 = EXECUTOR1.init(Executor::new());
             executor1.run(|spawner| match tasks::touch::touch_task(i2c1) {
                 Ok(token) => spawner.spawn(token),
-                Err(_) => ERROR_CODE.store(22, Ordering::Relaxed),
+                Err(_) => error::set(error::SPAWN_TOUCH),
             });
         },
     );
@@ -171,31 +169,31 @@ fn main() -> ! {
     executor0.run(|spawner| {
         match tasks::midi::midi_tx_task(sender) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(38, Ordering::Relaxed),
+            Err(_) => error::set(error::SPAWN_MIDI_TX),
         }
         match usb_task(usb) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(32, Ordering::Relaxed),
+            Err(_) => error::set(error::SPAWN_USB),
         }
         match tasks::midi::midi_rx_task(receiver) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(33, Ordering::Relaxed),
+            Err(_) => error::set(error::SPAWN_MIDI_RX),
         }
         match tasks::ringled::ringled_task(common, sm0, p.DMA_CH0, p.PIN_5, ws2812_program) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(34, Ordering::Relaxed),
+            Err(_) => error::set(error::SPAWN_RINGLED),
         }
         match tasks::pressure::pressure_task(adc, adc_a1, adc_a2, adc_a3, adc_dma) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(35, Ordering::Relaxed),
+            Err(_) => error::set(error::SPAWN_PRESSURE),
         }
         match tasks::ui::ui_task(i2c0, switch1, switch2) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(36, Ordering::Relaxed),
+            Err(_) => error::set(error::SPAWN_UI),
         }
         match tasks::status_led::status_led_task(led) {
             Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(37, Ordering::Relaxed),
+            Err(_) => error::set(error::SPAWN_STATUS_LED),
         }
     });
 }

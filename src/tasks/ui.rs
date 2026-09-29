@@ -1,12 +1,12 @@
 use embassy_rp::gpio::Input;
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::I2C0;
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use portable_atomic::Ordering;
 
 use crate::devices::ssd1306::{Oled, OledBuffer};
-use crate::error::ERROR_CODE;
-use crate::shared::{RINGLED_RX_BITS, WORK_MODE, WORK_MODE_DISPLAY};
+use crate::error;
+use crate::shared::{RINGLED_RX_BITS, SETTING_MODE, UI_DRAW_TIME, WORK_MODE, reset_diagnostics};
 use crate::ui;
 
 const OLED_POWER_ON_WAIT_MS: u64 = 100;
@@ -23,7 +23,7 @@ pub async fn ui_task(
     switch1: Input<'static>,
     switch2: Input<'static>,
 ) {
-    use ui::oled_display::GraphicsDisplay;
+    use ui::oled_display::{GraphicsDisplay, SETTING_PAGE, next_page, prev_page};
 
     let mut oled = Oled::new();
     let mut buffer = OledBuffer::new();
@@ -44,7 +44,7 @@ pub async fn ui_task(
     )
     .await;
     if !matches!(oled_init_result, Ok(Ok(()))) {
-        ERROR_CODE.store(51, Ordering::Relaxed);
+        error::set(error::OLED_INIT);
     }
 
     // 初期画面表示
@@ -58,29 +58,31 @@ pub async fn ui_task(
         // スイッチの状態を取得
         let switch_r_state = switch1.is_low();
         let switch_l_state = switch2.is_low();
+        let both_pressed = switch_r_state && switch_l_state;
+        let enter_setting = |ui_page: &mut u8| {
+            // 両方のスイッチが同時に押された場合は、設定画面に直接遷移
+            *ui_page = SETTING_PAGE;
+            // 設定変更時にエラーコードと診断値をリセットする
+            error::clear();
+            reset_diagnostics();
+            SETTING_MODE.store(true, Ordering::Relaxed);
+        };
         if (switch_r_state != switch1_prev) && switch_r_state {
-            if switch_l_state {
-                // 両方のスイッチが同時に押された場合は、設定画面に直接遷移
-                ui_page = 4;
-                // 設定変更時にエラーコードをリセットする
-                ERROR_CODE.store(0, Ordering::Relaxed);
-                WORK_MODE_DISPLAY.store(true, Ordering::Relaxed);
-            } else if ui_page == 3 || ui_page == 4 {
+            if both_pressed {
+                enter_setting(&mut ui_page);
+            } else if ui_page == SETTING_PAGE {
+                // 設定画面を抜ける
                 ui_page = 0;
-                WORK_MODE_DISPLAY.store(false, Ordering::Relaxed);
+                SETTING_MODE.store(false, Ordering::Relaxed);
             } else {
-                ui_page += 1;
+                ui_page = next_page(ui_page);
             }
             gui.change_page(ui_page); // ページ切替をGUIに通知
         }
         if (switch_l_state != switch2_prev) && switch_l_state {
-            if switch_r_state {
-                // 両方のスイッチが同時に押された場合は、設定画面に直接遷移
-                ui_page = 4;
-                // 設定変更時にエラーコードをリセットする
-                ERROR_CODE.store(0, Ordering::Relaxed);
-                WORK_MODE_DISPLAY.store(true, Ordering::Relaxed);
-            } else if ui_page == 4 {
+            if both_pressed {
+                enter_setting(&mut ui_page);
+            } else if ui_page == SETTING_PAGE {
                 WORK_MODE.store(
                     (WORK_MODE.load(Ordering::Relaxed) + 1) % 2,
                     Ordering::Relaxed,
@@ -89,10 +91,8 @@ pub async fn ui_task(
                 for word in RINGLED_RX_BITS.iter() {
                     word.store(0, Ordering::Relaxed);
                 }
-            } else if ui_page == 0 {
-                ui_page = 3;
             } else {
-                ui_page -= 1;
+                ui_page = prev_page(ui_page);
             }
             gui.change_page(ui_page); // ページ切替をGUIに通知
         }
@@ -100,7 +100,9 @@ pub async fn ui_task(
         switch2_prev = switch_l_state;
 
         // 描画
+        let draw_start = Instant::now();
         gui.tick(&mut buffer, counter);
+        UI_DRAW_TIME.record(draw_start.elapsed().as_micros() as u32);
         counter = counter.wrapping_add(1);
 
         // 描画済みバッファを転送
@@ -116,6 +118,6 @@ async fn flush(oled: &Oled, buffer: &OledBuffer, i2c: &mut I2c<'static, I2C0, i2
     )
     .await;
     if !matches!(result, Ok(Ok(()))) {
-        ERROR_CODE.store(52, Ordering::Relaxed);
+        error::set(error::OLED_FLUSH);
     }
 }

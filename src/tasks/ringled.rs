@@ -6,7 +6,7 @@ use portable_atomic::Ordering;
 
 use crate::Irqs;
 use crate::constants::*;
-use crate::error::ERROR_CODE;
+use crate::error;
 use crate::shared::{RINGLED_RX_BITS, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 use crate::ui;
 
@@ -54,7 +54,7 @@ pub async fn ringled_task(
         // バグ対策: NeoPixel書き込みが固着してもタスク全体が停止しないようタイムアウト保護
         let write_result = with_timeout(Duration::from_millis(8), ws2812.write(&data)).await;
         if write_result.is_err() {
-            ERROR_CODE.store(44, Ordering::Relaxed);
+            error::set(error::RINGLED_WRITE_TIMEOUT);
         }
         ticker.next().await;
     }

@@ -5,13 +5,18 @@ use embassy_usb::class::midi::{Receiver, Sender};
 use portable_atomic::Ordering;
 
 use crate::constants::*;
-use crate::error::ERROR_CODE;
-use crate::shared::{MIDI_TX, MidiPacket, RINGLED_RX_BITS, WORK_MODE};
+use crate::error;
+use crate::shared::{
+    MIDI_TX, MIDI_TX_MAX_USED, MIDI_TX_OVERFLOW, MidiPacket, RINGLED_RX_BITS, WORK_MODE,
+};
 
 /// MIDI パケットを送信キューに入れる（待たない）。キューが一杯なら捨ててエラーを記録する
 pub fn queue_midi(packet: MidiPacket) {
-    if MIDI_TX.try_send(packet).is_err() {
-        ERROR_CODE.store(41, Ordering::Relaxed);
+    if MIDI_TX.try_send(packet).is_ok() {
+        MIDI_TX_MAX_USED.fetch_max(MIDI_TX.len() as u32, Ordering::Relaxed);
+    } else {
+        MIDI_TX_OVERFLOW.fetch_add(1, Ordering::Relaxed);
+        error::set(error::MIDI_TX_QUEUE_FULL);
     }
 }
 
@@ -29,7 +34,7 @@ pub async fn midi_tx_task(mut sender: Sender<'static, Driver<'static, USB>>) {
         .await;
         if result.is_err() {
             // タイムアウト（USB未接続時など）
-            ERROR_CODE.store(42, Ordering::Relaxed);
+            error::set(error::MIDI_TX_TIMEOUT);
         }
     }
 }
@@ -85,7 +90,7 @@ pub async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>)
             }
             Err(_e) => {
                 // エラーカウント
-                ERROR_CODE.store(54, Ordering::Relaxed);
+                error::set(error::MIDI_RX);
             }
         }
     }
