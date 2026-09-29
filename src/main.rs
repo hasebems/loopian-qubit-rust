@@ -132,7 +132,9 @@ pub static TOUCH0: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
-pub static RINGLED_RX_BITS: AtomicU32 = AtomicU32::new(0); // 受信Note On/Off状態(1bit/LED)
+// 受信Note On/Off状態(1bit/LED)。LED n は [n / 32] の (n % 32) ビット目
+pub static RINGLED_RX_BITS: [AtomicU32; RINGLED_RX_WORDS] =
+    [const { AtomicU32::new(0) }; RINGLED_RX_WORDS];
 pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）
 pub static AD_VALUE0: AtomicU32 = AtomicU32::new(0); // ADCの値(A0)
 pub static AD_VALUE1: AtomicU32 = AtomicU32::new(0); // ADCの値(A1)
@@ -314,9 +316,10 @@ async fn ringled_task(
             to_touch_location(TOUCH2.load(Ordering::Relaxed)),
             to_touch_location(TOUCH3.load(Ordering::Relaxed)),
         ];
-        let rx_bits = RINGLED_RX_BITS.load(Ordering::Relaxed);
+        let rx_bits: [u32; RINGLED_RX_WORDS] =
+            core::array::from_fn(|i| RINGLED_RX_BITS[i].load(Ordering::Relaxed));
 
-        ring_led.render(&mut data, &touch_locations, rx_bits);
+        ring_led.render(&mut data, &touch_locations, &rx_bits);
         // バグ対策: NeoPixel書き込みが固着してもタスク全体が停止しないようタイムアウト保護
         let write_result = with_timeout(Duration::from_millis(8), ws2812.write(&data)).await;
         if write_result.is_err() {
@@ -454,11 +457,12 @@ async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>) {
 
     let set_rx_led = |note: u8, on: bool| {
         let led = (note as usize).min(NUM_LEDS - 1);
-        let bit = 1u32 << led;
+        let word = &RINGLED_RX_BITS[led / 32];
+        let bit = 1u32 << (led % 32);
         if on {
-            RINGLED_RX_BITS.fetch_or(bit, Ordering::Relaxed);
+            word.fetch_or(bit, Ordering::Relaxed);
         } else {
-            RINGLED_RX_BITS.fetch_and(!bit, Ordering::Relaxed);
+            word.fetch_and(!bit, Ordering::Relaxed);
         }
     };
 
@@ -733,7 +737,10 @@ async fn core1_oled_ui_task(switch1: Input<'static>, switch2: Input<'static>) {
                     (WORK_MODE.load(Ordering::Relaxed) + 1) % 2,
                     Ordering::Relaxed,
                 ); // 動作モードを切り替え
-                RINGLED_RX_BITS.store(0, Ordering::Relaxed); // 受信Note On表示を全キャンセル
+                // 受信Note On表示を全キャンセル
+                for word in RINGLED_RX_BITS.iter() {
+                    word.store(0, Ordering::Relaxed);
+                }
             } else if ui_page == 0 {
                 ui_page = 3;
             } else {

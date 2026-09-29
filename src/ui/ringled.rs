@@ -22,7 +22,7 @@ impl RingLed {
         &mut self,
         data: &mut [RGBW<u8>; NUM_LEDS],
         touchkey_state: &[Option<f32>; MAX_TOUCH_POINTS],
-        rxkey_bits: u32,
+        rxkey_bits: &[u32; RINGLED_RX_WORDS],
     ) {
         let num_leds_f = NUM_LEDS as f32;
         let time_sec = self.counter as f32 * 0.02; // ringled_task is updated every 20ms
@@ -68,7 +68,7 @@ impl RingLed {
                 }
 
                 // rx key: only this LED lights cyan
-                if ((rxkey_bits >> source_index) & 1) != 0 {
+                if ((rxkey_bits[source_index / 32] >> (source_index % 32)) & 1) != 0 {
                     g = g.saturating_add(120);
                     b = b.saturating_add(180);
                 }

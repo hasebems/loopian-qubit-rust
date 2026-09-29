@@ -33,6 +33,7 @@ pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
 // 96キー構成では「6 -> 0」「0 -> 90」となる
 pub const TOUCH_INDEX_SHIFT: usize = TOTAL_QT_KEYS - 6;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
+pub const RINGLED_RX_WORDS: usize = NUM_LEDS.div_ceil(32); // 受信ノート表示のビット列(1bit/LED)を格納する u32 の個数
 
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
 pub const MAX_ADC_CHANNELS: usize = 3; // ADCのチャンネル数
