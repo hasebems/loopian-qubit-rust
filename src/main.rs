@@ -28,7 +28,7 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, I2C1, PIO0, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, I2C0, I2C1, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::PioWs2812Program;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
@@ -36,12 +36,11 @@ use embassy_usb::class::midi::MidiClass;
 use embassy_usb::{Builder, Config};
 
 use crate::constants::*;
-use crate::devices::ssd1306::OledBuffer;
 use crate::error::ERROR_CODE;
-use crate::shared::BUFFER_FROM_DISPLAY;
 
 bind_interrupts!(pub struct Irqs {
     ADC_IRQ_FIFO => AdcInterruptHandler;
+    I2C0_IRQ => I2cInterruptHandler<I2C0>;
     I2C1_IRQ => I2cInterruptHandler<I2C1>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
@@ -131,9 +130,14 @@ fn main() -> ! {
     // Midi Class
     let class = MidiClass::new(&mut builder, 1, 1, 64);
 
+    // I2C: 2 系統に分ける
+    // - I2C0 (SDA=GP0/D6, SCL=GP1/D7): OLED。Core0 の ui_task が使う
+    // - I2C1 (SDA=GP6, SCL=GP7): タッチセンサ。割り込みを Core1 で処理させるため、Core1 の中で生成する
+    //   （embassy-rp は new_async を呼んだコアの NVIC で割り込みを有効にする）
     let mut i2c_config = I2cConfig::default();
     i2c_config.frequency = 400_000;
-    let i2c = I2c::new_async(p.I2C1, p.PIN_7, p.PIN_6, Irqs, i2c_config);
+    let i2c0 = I2c::new_async(p.I2C0, p.PIN_1, p.PIN_0, Irqs, i2c_config);
+    let (i2c1_peri, i2c1_scl, i2c1_sda) = (p.I2C1, p.PIN_7, p.PIN_6);
 
     // PIO / Neopixel
     let Pio {
@@ -144,34 +148,17 @@ fn main() -> ! {
         PioWs2812Program::new(&mut common)
     );
 
-    // 初期バッファを準備してチャンネルに投入（Core1起動前に実行）
-    // 2つのバッファを確実に投入
-    if BUFFER_FROM_DISPLAY.try_send(OledBuffer::new()).is_err() {
-        ERROR_CODE.store(11, Ordering::Relaxed);
-    }
-    if BUFFER_FROM_DISPLAY.try_send(OledBuffer::new()).is_err() {
-        ERROR_CODE.store(12, Ordering::Relaxed);
-    }
-
     // Core1起動
     spawn_core1(
         p.CORE1,
         unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
         move || {
+            // I2C1 はここ（Core1）で生成し、割り込みを Core1 で処理させる
+            let i2c1 = I2c::new_async(i2c1_peri, i2c1_scl, i2c1_sda, Irqs, i2c_config);
             let executor1 = EXECUTOR1.init(Executor::new());
-            executor1.run(|spawner| {
-                match tasks::status_led::core1_led_task(led) {
-                    Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_CODE.store(21, Ordering::Relaxed),
-                }
-                match tasks::core1_i2c::core1_i2c_task(i2c) {
-                    Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_CODE.store(22, Ordering::Relaxed),
-                }
-                match tasks::ui::core1_oled_ui_task(switch1, switch2) {
-                    Ok(token) => spawner.spawn(token),
-                    Err(_) => ERROR_CODE.store(23, Ordering::Relaxed),
-                }
+            executor1.run(|spawner| match tasks::touch_scan::touch_scan_task(i2c1) {
+                Ok(token) => spawner.spawn(token),
+                Err(_) => ERROR_CODE.store(22, Ordering::Relaxed),
             });
         },
     );
@@ -201,6 +188,14 @@ fn main() -> ! {
         match tasks::pressure::adc_task(adc, adc_a1, adc_a2, adc_a3, adc_dma) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(35, Ordering::Relaxed),
+        }
+        match tasks::ui::ui_task(i2c0, switch1, switch2) {
+            Ok(token) => spawner.spawn(token),
+            Err(_) => ERROR_CODE.store(36, Ordering::Relaxed),
+        }
+        match tasks::status_led::status_led_task(led) {
+            Ok(token) => spawner.spawn(token),
+            Err(_) => ERROR_CODE.store(37, Ordering::Relaxed),
         }
     });
 }

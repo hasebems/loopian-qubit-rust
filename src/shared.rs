@@ -10,18 +10,10 @@
 use core::sync::atomic::AtomicBool;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use portable_atomic::{AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64};
 
 use crate::constants::*;
-use crate::devices::ssd1306::OledBuffer;
-
-// OLEDバッファ転送用チャンネル（ダブルバッファリング）
-// core1_oled_ui_task → core1_i2c_task（描画済みバッファ）
-pub static BUFFER_TO_DISPLAY: Channel<CriticalSectionRawMutex, OledBuffer, 2> = Channel::new();
-// core1_i2c_task → core1_oled_ui_task（転送済みの空きバッファ）
-pub static BUFFER_FROM_DISPLAY: Channel<CriticalSectionRawMutex, OledBuffer, 2> = Channel::new();
 
 // 表示用変数: read_touch → OLED (page 2)
 pub static POINT0: AtomicU16 = AtomicU16::new(0);
@@ -36,25 +28,25 @@ pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH3: AtomicI32 = AtomicI32::new(10000);
 // 受信Note On/Off状態(1bit/LED)。LED n は [n / 32] の (n % 32) ビット目
-// midi_rx_task, core1_oled_ui_task(全消去) → ringled_task
+// midi_rx_task, ui_task(全消去) → ringled_task
 pub static RINGLED_RX_BITS: [AtomicU32; RINGLED_RX_WORDS] =
     [const { AtomicU32::new(0) }; RINGLED_RX_WORDS];
-pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）: core1_i2c_task
+pub static ELAPSED_TIME: AtomicU64 = AtomicU64::new(0); // タッチスキャンの経過時間（us）: touch_scan_task
 // ADCの値: adc_task → OLED (page 1)
 pub static AD_VALUE0: AtomicU32 = AtomicU32::new(0); // ADCの値(A0)
 pub static AD_VALUE1: AtomicU32 = AtomicU32::new(0); // ADCの値(A1)
 pub static AD_VALUE2: AtomicU32 = AtomicU32::new(0); // ADCの値(B0)
 pub static AD_VALUE3: AtomicU32 = AtomicU32::new(0); // ADCの値(B1)
 pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果: adc_task → CC11送信, OLED (page 1)
-// 動作モード（Piano/Violin）: core1_oled_ui_task → qubit_touch_task, midi_rx_task, OLED
+// 動作モード（Piano/Violin）: ui_task → qubit_touch_task, midi_rx_task, OLED
 pub static WORK_MODE: AtomicU8 = AtomicU8::new(0);
 // 動作モード変更表示状態（設定画面、基準値の補正中）
-// core1_oled_ui_task → read_touch, adc_task, ringled
+// ui_task → read_touch, adc_task, ringled
 pub static WORK_MODE_DISPLAY: AtomicBool = AtomicBool::new(false);
 pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用: qtouch(ビブラート) → OLED (page 1)
 pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false); // qtouch → 圧力計算
 
-// タッチセンサの生データ格納用（16bit/key）: core1_i2c_task → qubit_touch_task
+// タッチセンサの生データ格納用（16bit/key）: touch_scan_task (Core1) → qubit_touch_task (Core0)
 // ロック中に他の await をしないよう、コピーしてすぐ解放する
 pub static TOUCH_RAW_DATA: Mutex<
     CriticalSectionRawMutex,

@@ -5,10 +5,10 @@ use portable_atomic::Ordering;
 use crate::error::ERROR_CODE;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//      Core1 LED Task: Heartbeat LEDの点滅
+//      Status LED Task (Core0): Heartbeat LEDの点滅とエラーコードの表示
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
-pub async fn core1_led_task(mut led: Output<'static>) {
+pub async fn status_led_task(mut led: Output<'static>) {
     loop {
         let code = ERROR_CODE.load(Ordering::Relaxed);
         if code != 0 {
