@@ -332,6 +332,28 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 | 37 | status_led_task の起動に失敗 |
 | 52 | OLED 転送エラー（タイムアウトを含む） |
 
+**段階 4**
+
+- `MIDI_TX` の要素は USB MIDI の 4 バイトのパケット（`MidiPacket = [u8; 4]`）。送る側は `tasks::midi::queue_midi` で `try_send` する
+- `pressure.rs` の CC 送信は、USB を直接使う `async` 関数から、送るパケットを引数の関数に渡す同期関数（`pressure_cc11_if_needed`）に変えた。以前は送信に失敗すると `?` でその回の処理を打ち切っていたが、キューに入れる形では打ち切らない
+- `midi_tx_task` のエラー 42 は、改修前と同じくタイムアウトのときだけ記録する（`write_packet` のエラーは記録しない）
+- 段階 4 の時点では、解析（`qubit_touch_task`）は Core0 のままで、コールバックからキューに入れる形にした
+
+**段階 5**
+
+- `QubitTouch` は約 3.7KB、`ReadTouch` は約 0.6KB（コンパイル時に確認）。初期化のときに一時的にスタックへ置かれることがあるため、**`CORE1_STACK_SIZE` を 8KB → 16KB にした**（§4.9 の想定から変更）
+- `read_touch::touch_sensor_scan` は、結果を引数の配列に書き込む形にした（`TOUCH_RAW_DATA` を廃止）
+- `SCAN_PERIOD_MS`・`ANALYSIS_PERIOD_MS`・`ANALYSIS_DIVIDER` は `constants.rs` に置き、`ANALYSIS_PERIOD_MS` が `SCAN_PERIOD_MS` の倍数であることをコンパイル時に確認する
+- 動作モードは解析の直前に読み、コールバックへは `Cell` で渡す（コールバックは `Fn + Clone`）
+
+**段階 6**
+
+- 診断ページは OLED の **page 5** に置いた。左右スイッチで巡回するページを 0→1→2→3→5→0 にした（改修前は 0→1→2→3→0）。4 は設定画面のまま
+- 診断ページの内容: スキャン・解析・描画の時間（us、最小/平均/最大）、周期超過回数、`MIDI_TX` の最大使用数/あふれた回数、エラーコード。平均は 1/16 の指数移動平均
+- 最小・最大と回数は、設定画面に入ったとき（エラーコードのクリアと同時）にリセットする
+- 計測値は `shared.rs` の `TimeStat`（最小・平均・最大の組）にまとめた。`ELAPSED_TIME` は廃止した
+- エラーコードは `error.rs` の定数にし、`error::set` / `clear` / `get` で扱う。`ERROR_CODE` 自体は `error.rs` の外から見えないようにした。最終的な割り当ては §4.7 の案のとおり（`debug_stream_task` 用の 38 は未使用）
+
 ## 7. 他の設計書への影響
 
 - `doc/debug_env.md`
