@@ -1,20 +1,42 @@
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_rp::i2c::{self, I2c};
+use embassy_rp::peripherals::I2C1;
+use embassy_time::{Duration, Instant, Ticker, with_timeout};
 use portable_atomic::Ordering;
 
 use crate::constants::*;
-use crate::shared::{TOUCH_RAW_DATA, WORK_MODE};
+use crate::devices;
+use crate::error::ERROR_CODE;
+use crate::shared::{ELAPSED_TIME, PERIOD_OVERRUN, WORK_MODE};
 use crate::tasks::midi::queue_midi;
 use crate::touch;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//      QubitTouch Task: タッチデータを解析し、ノートイベントを MIDI 送信キューに入れる
+//      Touch Task (Core1): I2C1 を専有し、スキャン → 解析 → ノートイベントの生成を
+//      SCAN_PERIOD_MS 毎に行う。ノートイベントは MIDI 送信キューに入れる
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
-pub async fn qubit_touch_task() {
+pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     use core::cell::Cell;
     use touch::qtouch::QubitTouch;
 
-    // コールバック内で使う動作モード（ループの先頭で更新する）
+    const TOUCH_INIT_TIMEOUT_MS: u64 = 80;
+
+    // AT42QT1070 と PCA9544 の生成
+    let pca = devices::pca9544::Pca9544::new();
+    let mut at42 = devices::at42qt::At42Qt1070::new();
+
+    // --- init phase ---
+    let mut read_touch = touch::read_touch::ReadTouch::new(); // タッチイベントの状態を保持する構造体を生成
+    let touch_init_result = with_timeout(
+        Duration::from_millis(TOUCH_INIT_TIMEOUT_MS),
+        read_touch.init_touch_sensors(&pca, &mut at42, &mut i2c),
+    )
+    .await;
+    if !matches!(touch_init_result, Ok(true)) {
+        ERROR_CODE.store(14, Ordering::Relaxed);
+    }
+
+    // コールバック内で使う動作モード（解析の直前に更新する）
     let current_mode = Cell::new(WorkMode::Piano);
     let mut qt = QubitTouch::new(|status, note, velocity, _location| {
         // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信キューに入れる
@@ -32,41 +54,51 @@ pub async fn qubit_touch_task() {
         queue_midi([status >> 4, status, note, velocity]);
     });
 
-    let mut loop_times = 0u64;
-    let mut total_time = 0u64;
-    let mut _ticker = Ticker::every(embassy_time::Duration::from_millis(10));
+    let period = Duration::from_millis(SCAN_PERIOD_MS);
+    let mut ticker = Ticker::every(period);
+    let mut frame = 0u32;
+    let mut touch_values = [0u16; TOTAL_QT_KEYS];
+    let start = Instant::now();
 
+    // Task Loop
     loop {
-        // タッチスキャンは10msごとに実行
-        Timer::after(Duration::from_millis(10)).await;
-        // ticker.next().await; // タッチスキャンはtickerに合わせて実行
-        let start = Instant::now();
-        let work_mode = WORK_MODE
-            .load(Ordering::Relaxed)
-            .try_into()
-            .unwrap_or(WorkMode::Piano);
-        current_mode.set(work_mode);
+        ticker.next().await;
+        let cycle_start = Instant::now();
 
-        // タッチセンサの生データを取得してQubitTouchにセット
-        // ロック保持時間を最小化し、以降の await をロック外で実行する
-        let mut touch_values = [0u16; TOTAL_QT_KEYS];
-        {
-            let data = TOUCH_RAW_DATA.lock().await;
-            touch_values.copy_from_slice(&*data);
+        // タッチセンサのスキャン
+        read_touch
+            .touch_sensor_scan(&pca, &mut at42, &mut i2c, &mut touch_values)
+            .await;
+
+        // 解析: QubitTouch は 10ms 毎に呼ばれる前提なので、ANALYSIS_DIVIDER フレームに 1 回行う
+        if frame.is_multiple_of(ANALYSIS_DIVIDER) {
+            let work_mode = WORK_MODE
+                .load(Ordering::Relaxed)
+                .try_into()
+                .unwrap_or(WorkMode::Piano);
+            current_mode.set(work_mode);
+
+            for (ch, tv) in touch_values.iter().enumerate() {
+                qt.set_value(ch, *tv);
+            }
+            qt.seek_and_update_touch_point(work_mode);
+
+            qt.lighten_leds(|_location, _intensity| {
+                // LEDの明るさをタッチの強さに応じて変化させる
+                //WHITE_LEVEL.store(intensity as u8, Ordering::Relaxed);
+            });
         }
-        for (ch, tv) in touch_values.iter().enumerate() {
-            qt.set_value(ch, *tv);
+        frame = frame.wrapping_add(1);
+
+        // 周期を超えたときは、遅れた周期を取り戻さずに捨てる。
+        // Ticker は期限を過ぎていると待たずに連続して完了するため、そのままだと
+        // QubitTouch がほぼ 0ms 間隔で呼ばれ、時間の計算が狂う
+        if cycle_start.elapsed() > period {
+            PERIOD_OVERRUN.fetch_add(1, Ordering::Relaxed);
+            ticker.reset();
         }
-        qt.seek_and_update_touch_point(work_mode);
 
-        qt.lighten_leds(|_location, _intensity| {
-            // LEDの明るさをタッチの強さに応じて変化させる
-            //WHITE_LEVEL.store(intensity as u8, Ordering::Relaxed);
-        });
-
-        // 時間計測
-        loop_times = loop_times.wrapping_add(1);
-        total_time = total_time.wrapping_add(start.elapsed().as_micros());
-        //ELAPSED_TIME.store(total_time / loop_times, Ordering::Relaxed);
+        // touch_task起動からの経過時間(us)
+        ELAPSED_TIME.store(start.elapsed().as_micros(), Ordering::Relaxed);
     }
 }

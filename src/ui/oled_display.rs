@@ -19,6 +19,7 @@ use crate::shared::{
     AD_VALUE3,
     //WORK_MODE_DISPLAY,
     DEBUG_VALUE,
+    PERIOD_OVERRUN,
     //ELAPSED_TIME,
     POINT0,
     POINT1,
@@ -248,6 +249,12 @@ fn display3(buffer: &mut OledBuffer) {
         let _ = write!(text1, "Touch4: ---");
     }
     let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
+
+    // 仮表示: タッチの周期超過回数（診断ページができるまで）
+    text1.clear();
+    let overrun = PERIOD_OVERRUN.load(core::sync::atomic::Ordering::Relaxed);
+    let _ = write!(text1, "Overrun: {}", overrun);
+    let _ = Text::new(&text1, Point::new(6, 60), style_small).draw(buffer);
 }
 
 fn display4(buffer: &mut OledBuffer, counter: u32) {

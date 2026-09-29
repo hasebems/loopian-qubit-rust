@@ -156,7 +156,7 @@ fn main() -> ! {
             // I2C1 はここ（Core1）で生成し、割り込みを Core1 で処理させる
             let i2c1 = I2c::new_async(i2c1_peri, i2c1_scl, i2c1_sda, Irqs, i2c_config);
             let executor1 = EXECUTOR1.init(Executor::new());
-            executor1.run(|spawner| match tasks::touch_scan::touch_scan_task(i2c1) {
+            executor1.run(|spawner| match tasks::touch::touch_task(i2c1) {
                 Ok(token) => spawner.spawn(token),
                 Err(_) => ERROR_CODE.store(22, Ordering::Relaxed),
             });
@@ -169,10 +169,6 @@ fn main() -> ! {
     // Core0もExecutorを回す（必須）
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
-        match tasks::touch::qubit_touch_task() {
-            Ok(token) => spawner.spawn(token),
-            Err(_) => ERROR_CODE.store(31, Ordering::Relaxed),
-        }
         match tasks::midi::midi_tx_task(sender) {
             Ok(token) => spawner.spawn(token),
             Err(_) => ERROR_CODE.store(38, Ordering::Relaxed),

@@ -5,7 +5,6 @@ use portable_atomic::Ordering;
 
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
-use crate::shared::TOUCH_RAW_DATA;
 use crate::shared::WORK_MODE_DISPLAY;
 use crate::shared::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
@@ -128,11 +127,13 @@ impl ReadTouch {
         }
     }
 
+    /// 全キーをスキャンし、基準値を差し引いた値を out に書き込む
     pub async fn touch_sensor_scan(
         &mut self,
         pca: &pca9544::Pca9544,
         at42: &mut at42qt::At42Qt1070,
         i2c: &mut I2c<'static, I2C1, i2c::Async>,
+        out: &mut [u16; constants::TOTAL_QT_KEYS],
     ) {
         let work_mode_display = WORK_MODE_DISPLAY.load(Ordering::Relaxed);
         let mut data = [0u16; constants::TOTAL_QT_KEYS];
@@ -194,11 +195,7 @@ impl ReadTouch {
                 pca.disconnect(i2c, dev).await.ok();
             }
         }
-        {
-            // タッチセンサーの生データを Mutex で保護されたグローバル変数に保存
-            let mut raw_data = TOUCH_RAW_DATA.lock().await;
-            raw_data.copy_from_slice(&data);
-        }
+        out.copy_from_slice(&data);
 
         if self.reference_counter == 0 {
             self.set_reference(pca, at42, i2c).await;

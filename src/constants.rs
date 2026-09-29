@@ -4,7 +4,17 @@
 //  https://opensource.org/licenses/mit-license.php
 //
 
-pub const CORE1_STACK_SIZE: usize = 8192; // コア1のスタックサイズ
+// コア1のスタックサイズ。Core1 の touch_task は QubitTouch (約3.7KB) と ReadTouch (約0.6KB) を持ち、
+// 初期化時に一時的にスタックに置かれることがあるので、余裕を持たせる
+pub const CORE1_STACK_SIZE: usize = 16384;
+
+// タッチのスキャン周期と解析周期
+// QubitTouch の時間に関する定数は 10ms 毎に呼ばれる前提なので、解析は 10ms 毎に行う。
+// スキャン周期を短くする場合は、ANALYSIS_DIVIDER フレームに 1 回解析する（10 の約数に限る）
+pub const SCAN_PERIOD_MS: u64 = 10;
+pub const ANALYSIS_PERIOD_MS: u64 = 10;
+pub const ANALYSIS_DIVIDER: u32 = (ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS) as u32;
+const _: () = assert!(ANALYSIS_PERIOD_MS.is_multiple_of(SCAN_PERIOD_MS));
 
 pub const MIDI_NOTE_ON: u8 = 0x90;
 pub const MIDI_NOTE_OFF: u8 = 0x80;

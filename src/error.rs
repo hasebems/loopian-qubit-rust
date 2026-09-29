@@ -14,9 +14,9 @@ pub static ERROR_CODE: AtomicU8 = AtomicU8::new(0);
 // 13: ADC値取得エラー
 // 14: Touch Sensor初期化タイムアウト
 // 21: （廃止）Core1 LED Taskの起動に失敗 → 37 へ
-// 22: Touch Scan Task (Core1) の起動に失敗
+// 22: Touch Task (Core1) の起動に失敗
 // 23: （廃止）Core1 OLED UI Taskの起動に失敗 → 36 へ
-// 31: QubitTouch Taskの起動に失敗
+// 31: （廃止）QubitTouch Taskの起動に失敗 → 22 (Touch Task) へ
 // 32: USB Taskの起動に失敗
 // 33: MIDI RX Taskの起動に失敗
 // 34: RingLED Taskの起動に失敗
