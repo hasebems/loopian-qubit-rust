@@ -1,3 +1,7 @@
+> **その後の変更**（2026-10-01 追記）: 本書は RingLED をイベント駆動から共有状態の参照に変えたとき（2026-05）の作業記録。方針（送信は `TOUCH0-3` を直接読む、受信はビット共有、キューを使わない）は今も同じ。その後、次のように変わっている
+> - `main.rs` のタスクは `src/tasks/` に分けた。`qubit_touch_task` は Core1 の `touch_task`（`tasks/touch.rs`）、`ringled_task` は `tasks/ringled.rs`、`midi_rx_task` は `tasks/midi.rs`。共有状態は `src/shared.rs`（`doc/task_architecture.md`）
+> - このとき `RINGLED_RX_BITS` を `u32` 1 語（32 LED 分）にしたため、受信ノートの LED が 3 箇所光る不具合が入った。`[AtomicU32; RINGLED_RX_WORDS]`（96 LED 分）にして直した（`doc/task_architecture.md` §2.3）
+
 以下の変更をします
 
 # 概要

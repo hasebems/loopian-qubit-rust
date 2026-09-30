@@ -74,10 +74,12 @@ debug_stream = []   # USB CDC でタッチの生値を PC に送る
 
 ### 3.3 スキャン（Core1、`read_touch.rs` と `touch_task`）
 
-- スキャンループは `touch_task` の `Ticker` で周期実行している（`task_architecture.md` §4.1）。改修後の時点では周期は `constants.rs` の `SCAN_PERIOD_MS`（const、10ms）なので、デバッグ環境ではこれを `SCAN_PERIOD_US`（Atomic）にして、PC からのコマンドで変えられるようにする
-    - 周期を変えたときは `Ticker` を作り直し、解析の間引き（`ANALYSIS_DIVIDER = 10ms / 周期`）も実行時に計算し直す
+- スキャンループは `touch_task` の `Ticker` で周期実行している（`task_architecture.md` §4.1）。改修の時点の周期は `constants.rs` の `SCAN_PERIOD_MS`（const、10ms）だったが、デバッグ環境では PC からのコマンドで変えられるようにした（段階 2）
+    - 周期の既定値は `constants.rs` の `SCAN_PERIOD_US`（µs の const）。`debug_stream` のときは 2000、無いときは 10000
+    - 実行中の周期は `shared::scan_period_us()` で読み、`shared::set_scan_period_us()` で変える（値は `shared.rs` の非公開の Atomic `SCAN_PERIOD_SETTING_US` に持つ）。`debug_stream` が無いときは `scan_period_us()` は const を返すだけ
+    - 周期を変えたときは `Ticker` を作り直し、解析の間引き（`analysis_divider(周期)`）も計算し直す
     - **選べる周期は 2, 5, 10, 20ms の 4 つ**（2026-09-30 決定）。それ以外の値を指定されたら、周期は変えずにエラーを返す
-    - 20ms は 10ms の約数ではないので、解析の周期を 10ms にできない。**20ms のときは毎スキャン（20ms 毎）解析する**（2026-09-30 決定）。`ANALYSIS_DIVIDER` は `max(10ms / 周期, 1)` で計算する
+    - 20ms は 10ms の約数ではないので、解析の周期を 10ms にできない。**20ms のときは毎スキャン（20ms 毎）解析する**（2026-09-30 決定）。`analysis_divider()` は `max(10ms / 周期, 1)` を返す
         - `QubitTouch` の時間の定数は 10ms 毎の呼び出しを前提にしているので、20ms のときは時間の計算（離したと判断するまでの時間、ビブラート、ベロシティ）が 2 倍にずれる。承知の上で使う（ノートは出るが、振る舞いは通常と同じではない）
     - 既定は **2ms**。チップの更新（8ms 周期）より速く読むことで、チップが実際にいつ値を更新しているか、読み取り中に hi/lo がずれる頻度はどのくらいか、を観察できる。しばらくは 2ms で使い、最終的な周期は後で決める
     - 最終構成（96 キー）では 1 周に 8ms 前後かかるため、2ms では読めない。最終的なアルゴリズムは 8ms 周期のデータで評価する（PC 側で間引いて再現できる。§4.4）。当面は 96 キーでは使わないので（§1.2）、`test_mode` かどうかで既定を変えることはしない
@@ -87,7 +89,8 @@ debug_stream = []   # USB CDC でタッチの生値を PC に送る
     - `seq` は捨てたフレームも含めて数える。PC 側は `seq` の欠けで取りこぼしを知る
 - 1 回のスキャン毎に `DebugFrame` を作り、`DEBUG_FRAMES` に `try_send` する。キューがいっぱいなら捨て、捨てた数を `DEBUG_DROPPED`（Atomic）に数える
 - 通常の処理（`QubitTouch` での解析、ノートイベントの送信）は今までどおり行う。演奏しながら記録できるようにするため
-- スキャン周期を 2ms・5ms にしても、解析は 10ms 毎（`ANALYSIS_DIVIDER`）に行うので、`QubitTouch` の振る舞いは変わらない（`task_architecture.md` §4.1）。20ms のときだけは変わる（上記）
+- スキャン周期を 2ms・5ms にしても、解析は 10ms 毎（`analysis_divider()` フレームに 1 回）に行うので、`QubitTouch` の振る舞いは変わらない（`task_architecture.md` §4.1）。20ms のときだけは変わる（上記）
+    - `QubitTouch` に渡すのは、解析する回のスキャンで読んだ値だけ。ほかの回（2ms なら 5 回のうち 4 回）の値は PC に送るだけで、解析には使わない（平均などはとらない）
 
 ```rust
 pub struct DebugFrame {
@@ -196,6 +199,9 @@ egui はフレーム毎に全体を描き直す方式（immediate mode）で、�
 ### 4.3 記録と再生
 
 - **記録**: 受信したバイト列を、そのままファイル（`.qlog`）に保存する。ファイルの先頭にヘッダ（記録日時、ファームのバージョン、キー数、スキャン周期）を付ける
+    - ヘッダは固定長 64 バイト（2026-09-30、PC アプリの実装時に決定）。`"QLOG"`、形式の版（u16、1）、ヘッダ長（u16、64）、記録開始の日時（i64、Unix 時刻の ms）、ファームのバージョン（8 バイト）、ビルド日（16 バイト）、キー数（u8）、予約 3 バイト、スキャン周期（u32、µs）、予約 16 バイト。すべてリトルエンディアン。読むときはヘッダ長だけ読み飛ばすので、後でヘッダを延ばせる。詳細は `tools/qubit_monitor/src/qlog.rs` の先頭のコメント
+    - ヘッダの値は、記録を始めたときに受け取っている INFO から取る。記録を始めた直後に `info` を送り、記録の中にも INFO が入るようにする（周期を変えたときの INFO も記録に入る）
+    - 記録ファイルの置き場所は決めず、記録を始めるときに保存先を選ぶ（§8）
     - 受信したバイト列をそのまま保存するので、後でプロトコルの解釈を直しても読み直せる
 - **再生**: `.qlog` を開くと、実機からの受信と同じ経路でデータを流す。速さは等倍・早送り・コマ送りを選べる
     - 同じ記録に、パラメータを変えたアルゴリズムを何度でもかけて比べられる
@@ -223,11 +229,11 @@ loopian_qubit/
 - リポジトリ直下の `.cargo/config.toml` が `build.target = "thumbv8m.main-none-eabihf"` を指定しており、その下のディレクトリにも効いてしまう。そのため `tools/qubit_monitor/.cargo/config.toml` に `[build] target = "host-tuple"` を書いて上書きする（cargo 1.93 で動作を確認済み。`host-tuple` はビルドするマシン自身のターゲットを表す）
 - cargo の設定は実行したディレクトリから探されるので、PC アプリは `cd tools/qubit_monitor && cargo run` で実行する。リポジトリ直下から `--manifest-path` で指定すると、組み込み向けのターゲットが効いて失敗する
 - `tools/qubit_monitor/Cargo.toml` には空の `[workspace]` を書き、直下のファームとは独立したプロジェクトにする。`Cargo.lock` と `target/` は `tools/qubit_monitor/` の下に別にできる
-- rust-analyzer（VSCode）は `.vscode/settings.json` で `rust-analyzer.cargo.target` を thumbv8m に固定している。PC アプリ側も解析させるには `rust-analyzer.linkedProjects` などの設定が要る。実装時に確かめる
-- 直下での `cargo fmt` / `cargo clippy` は PC アプリに触れない。PC アプリと `touch_algo` のチェックを CI に入れるかは、実装時に決める
+- rust-analyzer（VSCode）は `.vscode/settings.json` で `rust-analyzer.cargo.target` を thumbv8m に固定している。PC アプリ側も解析させるには `rust-analyzer.linkedProjects` などの設定が要る。今は設定しておらず、PC アプリのコードは VSCode で正しく解析されない（§6.1）。必要になったら設定を考える
+- 直下での `cargo fmt` / `cargo clippy` は PC アプリに触れない。PC アプリと `touch_algo` のチェックは、今は CI に入れていない（PC アプリの確認は手元で `cargo clippy`・`cargo test` を行う）
 - `touch_algo` はファームのビルド（thumbv8m）と PC アプリのビルド（ホスト）の両方で通るようにする。`embassy_time::Instant` には依存せず、時刻は `u32` の µs で受け取る
 - ワークスペースにはしない（ターゲットが違うため）。それぞれが `touch_algo` を path 依存で使う
-- `flake.nix` に PC アプリのビルドに必要なものがあれば追加する
+- `flake.nix` は変えていない（macOS では追加のものは要らない）。Linux で PC アプリをビルドするときは、`pkg-config`・`libudev` と X11 / Wayland のライブラリを足す
 
 ## 5. 通信プロトコル
 
@@ -358,6 +364,36 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
     - `mark <番号>`: 番号は `u32`。EVENT（kind 0x30）をその場で送り、TEXT の応答は返さない
     - 引数が要るコマンドに引数が無い・数値でない、引数の要らないコマンドに引数がある、ときは `error: unknown command: <行>` を返す
 
+**PC アプリ（段階 1・2）**（2026-09-30）
+
+- **置き場所と構成**: `tools/qubit_monitor/`（§4.5 のとおり、空の `[workspace]` と `target = "host-tuple"`）。画面以外（`protocol`・`qlog`・`store`・`serial`・`playback`・`csv_export`）はライブラリ（`src/lib.rs`）に置き、画面は `src/main.rs`・`src/app.rs`。`touch_algo` は段階 3 で作る
+- **egui の版**: 最新の egui 0.36 は rustc 1.95 を要するため、ファームと同じ stable 1.93 でビルドできる eframe 0.35 / egui_plot 0.36 にした（`Cargo.toml` の `rust-version = "1.93"`）。ツールチェインを上げるときに版も上げてよい
+- **日本語の表示**: egui の既定のフォントには日本語が無いので、起動時に OS のフォント（macOS はヒラギノ角ゴシック）を読み込んで足す。見つからなければ日本語は表示されない
+- **受信**: シリアルポートは別スレッドで読み、UI にはバイト列を渡す。記録（`.qlog` への書き込み）もそのスレッドで行い、描画が遅れても受信したバイト列を欠けなく保存する
+- **接続直後の INFO**（実機で確認して対処）: macOS の serialport クレートは、ポートを開く処理の最後に受信バッファを捨てる（`tcflush`）。ファームは DTR が立つとすぐ INFO を送るので、その INFO が捨てられて届かなかった。PC アプリはポートを開いた直後に `info` を送って INFO を受け取り直す。ファームは変えない
+- **start の送り直し**: 開始中に INFO を受け取ったら `start` を送り直す。ファームが書き込みのタイムアウトで接続し直したとき（§6.1 段階 1）に、フレームの送信を再開させるため。`period` の応答の INFO でも送るが、ファームは `ok: start` を返すだけで害は無い
+- **表示**
+    - 時系列グラフの系列は、段階 1・2 では raw と「補正後」（hi/lo ずれ補正。ファームの `read_touch` と同じ規則 `raw > 前回 + 200 なら raw - 256` を PC 側でかけた値）。filtered・baseline・delta・output・onset と下段のグラフ、パラメータの欄は段階 3 で加える
+    - 点が多いときは、区間毎の最小・最大に間引いて描く（1 本あたり 4000 区間まで）。読み取りに失敗したサンプルは描かない
+    - 一時停止中はグラフをドラッグ・拡大でき、統計もその範囲で計算する
+    - 全キーの今の値はバー表示にした（表示範囲の最小値を引く選択あり）。96 キーの円形表示は段階 5 で考える
+    - 保持するフレームは最大 100 万（2ms 周期で約 33 分）で、超えたら古いものから捨てる
+- **統計**（表示している時間の範囲で計算する）: キー毎の平均・標準偏差・p-p・hi/lo ずれの回数、サンプル間隔（最小・平均・最大とヒストグラム）、seq の欠け、選んだキーの「生値が変わるまでの時間」（チップが値を更新する周期を見るため）、表示範囲のイベントの一覧、ファームからの TEXT
+- **再生**: `.qlog` を読み込み、受信と同じ `Parser` と `Store::ingest` に、記録の時刻に合わせて流す。速さは ×0.25〜×64、一時停止・コマ送り（次のフレームまで）・最初から。再生を始めると実機との接続は切る（データが混ざらないように）
+- **CSV**: `.qlog` を選んで書き出す（表示中のデータではなく、ファイル全体）。列は `time_us,seq,valid,key0..,event`。フレームの行は生値、イベントの行（Note・マーカー・INFO・TEXT）は `event` 列に説明を入れる。時刻の順に並べ、時刻を持たない INFO・TEXT は直前の行の時刻にする
+- **確認用のプログラム** `examples/probe.rs`（`cargo run --example probe`）: GUI を使わず、PC アプリと同じライブラリでファームとの通信を確かめる。INFO → start → FRAME → period（5・20ms）→ mark → 不正なコマンド → stop を順に試し、その間の記録を再生・CSV 書き出しして、受信したフレーム数と一致するかを見る
+- **ファームとの確認の結果**（段階 2 のファーム、6 キー直結、センサーに触れない状態）
+    - start / stop / info / period / mark と、不正なコマンドへのエラーは設計どおり。CRC エラー・長さ違い・読み飛ばし・seq の欠けは 0。記録→再生のフレーム数は受信と一致
+    - 周期 5ms・20ms では、サンプル間隔は 5.00 / 20.00ms（±0.03ms）
+    - **周期 2ms では、約 1/12 の間隔が 4.25ms 前後になる**（ほかは 1.75〜2.25ms、平均 2.19ms、約 456 フレーム/秒）。12 スキャンに 1 回のチップの基準値の読み直し（`set_reference()`、§1.2）でそのスキャンが 2ms を超え、周期超過として `ticker.reset()` されるため。`PERIOD_OVERRUN` もそのたびに増える。基準値の読み直しを削除する段階 3・4 で解消する見込み
+    - 触れていないときのノイズは、σ 0.4〜1.1、p-p 1〜5（6 キー）。hi/lo ずれは観測されなかった
+- **ファームへの影響の確認**: リポジトリ直下の `cargo build`・`cargo clippy --all-features -- --deny=warnings`・`cargo fmt --check` は、`tools/` を加えても変わらず通る（直下の `cargo fmt` は `tools/` に触れない）。`tools/qubit_monitor/target/` は直下の `.gitignore` の `target/` で無視される
+- **まだしていないこと**
+    - GUI の操作の確認（ボタン・ダイアログ・グラフの表示）は、実機をつないで行う
+    - Note のイベントは、センサーに触れないと出ないので、GUI での実験のときに確かめる
+    - CI には入れていない。VSCode の rust-analyzer は `.vscode/settings.json` でターゲットを thumbv8m に固定しているので、PC アプリのコードは正しく解析されない（§4.5）。必要になったら設定を考える
+    - `flake.nix` は変えていない。Linux でビルドするには、serialport のために `pkg-config` と `libudev`、eframe のために X11 / Wayland のライブラリが要る
+
 ## 7. 96 キーに戻すときのための配慮
 
 - プロトコルは `nkeys` を持ち、`valid` も可変長。ファームのキー数が変わっても、PC アプリは変更なしで動く
@@ -368,6 +404,6 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 
 ## 8. 未決事項
 
-- スキャンの既定周期を 2ms にしたときの Core1 の負荷。改修後の Core1 はスキャンだけを行い、6 キーなら 1 回の読み取りは 0.5ms 程度と見積もられるので、問題ないと考えている
+- スキャンの既定周期を 2ms にしたときの Core1 の負荷。実測では、通常のスキャンは 2ms に収まるが、12 スキャンに 1 回のチップの基準値の読み直しで 2ms を超え、そのたびに周期超過（間隔が約 4.25ms に延びる）になる（§6.1）。基準値の読み直しを削除する段階 3・4 で解消する見込み
 - 記録ファイルの置き場所と、リポジトリで管理するか（試験データとして一部を残すか）
 - Python の補助ツール（記録ファイルの解析）を用意するか

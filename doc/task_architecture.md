@@ -1,5 +1,10 @@
 # コア・タスク構成の改修 設計書
 
+> **その後の変更**（2026-10-01 追記）: 段階 1〜6 の改修は 2026-09-30 に終わった（§6.1）。その後、デバッグ環境（`doc/debug_env.md`）で次のように変わっている
+> - `constants.rs` の `SCAN_PERIOD_MS` は `SCAN_PERIOD_US`（µs、既定値）に、`ANALYSIS_DIVIDER` は `analysis_divider(周期)` に変わった。実行中の周期は `shared::scan_period_us()` で読む（`debug_stream` feature では PC から変えられる）
+> - エラー 25（予約）は `SPAWN_DEBUG_STREAM` として使っている（`debug_stream` feature のときだけ）
+
+
 ## 1. 目的と位置づけ
 
 ### 1.1 目的

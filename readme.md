@@ -2,7 +2,7 @@
 
 96 個の静電タッチパッドを円形に並べた MIDI コントローラ「Loopian::QUBIT」のファームウェア。Seeed XIAO RP2350 上で、組み込み Rust と Embassy で動作する。
 
-> **注意**: 本書は `doc/task_architecture.md` の新しいコア・タスク構成を前提に書いている。この構成への移行は `task_architecture` ブランチで進めている。
+> **注意**: 本書は `doc/task_architecture.md` の新しいコア・タスク構成で書いている。この構成への改修は `task_architecture` ブランチで終わっていて（2026-09-30）、デバッグ環境はそこから分けた `debug_env` ブランチで作っている。どちらもまだ `main` には入れていない。
 
 ## 概要
 
@@ -38,7 +38,7 @@ Core1: タッチ                               Core0: 入出力
 │ touch_task（10ms 周期）      │            │ midi_tx_task   ──► USB MIDI 送信      │
 │   スキャン (I2C1)            │  MIDI_TX   │ midi_rx_task   ◄── USB MIDI 受信      │
 │     ▼                        │ ─────────► │ usb_task                              │
-│   信号処理（基準値・ノイズ）  │            │ pressure_task  ADC → 圧力 → CC11      │
+│  （信号処理: 基準値・ノイズ） │            │ pressure_task  ADC → 圧力 → CC11      │
 │     ▼                        │  TOUCH0-3  │ ringled_task   NeoPixel の描画        │
 │   QubitTouch で位置を解析    │ ─────────► │ ui_task        スイッチ・OLED (I2C0)  │
 │     ▼                        │            │ status_led_task 内蔵 LED              │
@@ -47,6 +47,7 @@ Core1: タッチ                               Core0: 入出力
 ```
 
 - Core1 はスキャンした直後に同じコアで解析するので、周期のずれや、他の処理による遅れが起きない
+- 図の括弧内は予定。信号処理（基準値の自前管理・ノイズ対策）は `doc/touch_baseline.md` で、`debug_stream_task` は `debug_stream` feature のときだけ動く
 - コアの間の受け渡しは、MIDI のイベントのキュー（`MIDI_TX`）と、タッチ位置・動作モードなどの Atomic だけ
 - 各タスクは共有状態（`src/shared.rs`）を介してやり取りし、それぞれ独立した周期で動く
 
@@ -54,14 +55,18 @@ Core1: タッチ                               Core0: 入出力
 
 ```
 src/
-├── main.rs        初期化、両コアの起動、タスクの spawn
-├── shared.rs      タスク間の共有状態
-├── error.rs       エラーコード
-├── constants.rs   キー数・MIDI チャンネルなどの定数
-├── tasks/         タスク本体（ループ・周期・共有状態の読み書き）
-├── touch/         タッチのロジック（スキャン、信号処理、位置の解析、圧力）
-├── ui/            表示のロジック（OLED のページ、リング LED）
-└── devices/       I2C デバイスの最小ドライバ（AT42QT1070, PCA9544, SSD1306）
+├── main.rs            初期化、両コアの起動、タスクの spawn
+├── shared.rs          タスク間の共有状態
+├── error.rs           エラーコード
+├── constants.rs       キー数・MIDI チャンネル・スキャン周期などの定数
+├── debug_protocol.rs  デバッグ環境で PC に送るパケットの組み立て（debug_stream feature）
+├── tasks/             タスク本体（ループ・周期・共有状態の読み書き）
+├── touch/             タッチのロジック（スキャン、位置の解析、圧力）
+├── ui/                表示のロジック（OLED のページ、リング LED）
+└── devices/           I2C デバイスの最小ドライバ（AT42QT1070, PCA9544, SSD1306）
+
+tools/
+└── qubit_monitor/     PC アプリ（タッチ信号の表示・記録。ホスト向けの独立したプロジェクト）
 ```
 
 ## 使い方
@@ -76,22 +81,29 @@ cargo build --release
 cargo run --release                # picotool で書き込み・実行（BOOTSEL/USB 接続が必要）
 cargo build --features test_mode   # PCA9544 1 台 × 1ch 構成（6 キー）
 cargo build --features no_pca9544  # PCA9544 無しで AT42QT1070 1 個を直結（6 キー）
+cargo run --release --features no_pca9544,debug_stream   # デバッグ環境（6 キー直結、生値を PC に送る）
 cargo clippy --all-features -- --deny=warnings
 ```
 
-開発環境は `flake.nix` + direnv でも用意できる。
+feature フラグと PC アプリの起動方法の一覧は `doc/build.md`。開発環境は `flake.nix` + direnv でも用意できる。
 
-## デバッグ環境（計画中）
+## デバッグ環境
 
-タッチセンサの生値を USB CDC で PC に送り、PC のモニターアプリ（`tools/qubit_monitor`、Rust + egui）でリアルタイムに表示・記録する。基準値やノイズ除去のアルゴリズムは、ファームと PC アプリで同じコード（`crates/touch_algo`）を使い、PC 上で調整してからファームに移す。詳細は `doc/debug_env.md`。
+タッチセンサの生値を USB CDC で PC に送り、PC のモニターアプリ（`tools/qubit_monitor`、Rust + egui）でリアルタイムに表示・記録する。詳細は `doc/debug_env.md`。
+
+- ファームを `debug_stream` feature 付きで書き込むと、USB が MIDI + CDC（仮想シリアル）の複合デバイスになる。MIDI の演奏データはこれまでどおり流れる
+- PC アプリは `cd tools/qubit_monitor && cargo run --release` で起動する（必ずそのディレクトリで実行する）
+- できること: 生値の時系列グラフ、Note On/Off とマーカーの表示、スキャン周期の切替（2 / 5 / 10 / 20ms）、記録（`.qlog`）と再生、統計（ノイズ・サンプル間隔・値の更新間隔）、CSV 書き出し
+- 予定: 基準値やノイズ除去のアルゴリズムを、ファームと PC アプリで同じコード（`crates/touch_algo`）にし、PC 上で調整してからファームに移す
 
 ## ドキュメント
 
 | ファイル | 内容 |
 |---|---|
+| `doc/build.md` | feature フラグ、ビルド・書き込み、PC アプリの起動方法のメモ |
 | `doc/task_architecture.md` | コア・タスク構成の改修 |
 | `doc/hw_modify.md` | ハードウェアの改修（OLED の I2C0 への移動） |
-| `doc/debug_env.md` | デバッグ環境（USB CDC、PC モニターアプリ） |
+| `doc/debug_env.md` | デバッグ環境（USB CDC、PC モニターアプリ qubit_monitor） |
 | `doc/touch_baseline.md` | タッチセンサの基準値の自前管理とノイズ対策 |
 | `doc/midi_spec.md` | MIDI の仕様 |
 | `doc/i2c_problem260802.md` | I2C ロックアップの調査記録 |

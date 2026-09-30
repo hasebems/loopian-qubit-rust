@@ -17,9 +17,13 @@ cargo build --features no_pca9544  # PCA9544 無しで AT42QT1070 1個を直結�
 cargo build --features no_pca9544,debug_stream  # デバッグ環境: USB を MIDI + CDC にし、タッチの生値を PC に送る（doc/debug_env.md）
 cargo fmt                       # CI で --check される
 cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前に通すこと
+
+# PC アプリ（qubit_monitor、デバッグ環境用）。必ず tools/qubit_monitor の中で実行する（直下の .cargo/config.toml のターゲットが効くため）
+cd tools/qubit_monitor && cargo run --release       # GUI
+cd tools/qubit_monitor && cargo run --example probe # GUI 無しでファームとの通信を確かめる
 ```
 
-- ユニットテストは無い（no_std・実機依存）。確認は `cargo check` / clippy と実機動作で行う
+- ユニットテストは無い（no_std・実機依存）。確認は `cargo check` / clippy と実機動作で行う。PC アプリ（`tools/qubit_monitor`）には `cargo test` がある（プロトコルの解釈・記録ファイル・統計）
 - `build.rs` が `memory.x` を OUT_DIR にコピーし、`BUILD_DATE` と `BUILD_VERSION`（`Cargo.toml` の version）を環境変数として埋め込む。起動画面（OLED page 0）に表示される
 - リンク時に `output.map` を生成する（git 管理外）
 - 開発環境は `flake.nix` + direnv（`.envrc`）でも用意できる（stable Rust + picotool）
@@ -78,6 +82,8 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 - `src/touch/pressure.rs`: ADC の移動平均基準値（上昇 / 下降で追従率を変える）と CC11 変換テーブル。送る CC はパケットとして返し、送信はタスク側が行う
 - `src/ui/oled_display.rs`: OLED ページ描画（page 0–3 と 5（診断）を左右スイッチで巡回、4 は設定画面、10 以降はデモ）
 - `src/ui/ringled.rs`: NeoPixel の描画ロジック
+- `src/debug_protocol.rs`: `debug_stream` のパケットの組み立て。PC 側の解釈は `tools/qubit_monitor/src/protocol.rs` で、形式を変えるときは両方を直す
+- `tools/qubit_monitor/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
 
 ## 動作モードと MIDI
 
@@ -98,5 +104,5 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 - Core1 のスタックは `CORE1_STACK_SIZE` = 16KB（`QubitTouch` が約 3.7KB あるため）、Core0 は `memory.x` の `_stack_size` = 8KB。大きな配列をタスク内のローカル変数に置くときはスタック量に注意する
 - 処理時間や周期超過は OLED の診断ページ（page 5）で確認できる。計測値は `shared.rs` の `SCAN_TIME` / `ANALYSIS_TIME` / `UI_DRAW_TIME`（`TimeStat`）、`PERIOD_OVERRUN`、`MIDI_TX_MAX_USED` / `MIDI_TX_OVERFLOW`
 - 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`qtouch.rs`, `pressure.rs`, `read_touch.rs`）。調整の意図を日本語コメントで残す
-- `doc/` の Markdown は設計メモ・作業記録。`doc/build.md` の `adc_ch4` feature は現在の `Cargo.toml` には存在しない。`doc/double_buffering.md` の OLED ダブルバッファは廃止済み
+- `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
 - 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）

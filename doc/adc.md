@@ -1,3 +1,9 @@
+> **その後の変更**（2026-10-01 追記）: 本書は圧力の基準値を移動平均にしたときの作業記録。その後、次のように変わっている
+> - `adc_task` は `pressure_task`（`src/tasks/pressure.rs`）になった（`doc/task_architecture.md`）。移動平均の状態（リングバッファ・総和・index）をタスク側で持ち、`src/touch/pressure.rs` の `update_pressure` に渡す形は同じ
+> - 移動平均の窓は 1024 ではなく 512（`PRESSURE_BASELINE_WINDOW`）
+> - 基準値は単純な移動平均ではなく、サンプルが上がるときと下がるときで追従の速さを変える（`BASELINE_RISE_TRACK_PERCENT` / `BASELINE_FALL_TRACK_PERCENT`）
+> - CC11 は `pressure_task` から `MIDI_TX` のキューに入れて送る
+
 
 [修正1]
 adc_task と、そこから呼ばれる update_pressure の処理内容を修正します。
