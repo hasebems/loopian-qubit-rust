@@ -1,0 +1,4 @@
+# リポジトリ直下の .cargo/config.toml が build.target を組み込み向け (thumbv8m) にしているので、
+# このディレクトリではビルドするマシン自身のターゲットに戻す（doc/debug_env.md §4.5）
+[build]
+target = "host-tuple"

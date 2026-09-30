@@ -1,0 +1,18 @@
+[package]
+name = "qubit_monitor"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+# ファームと同じ stable (1.93) でビルドできる版を選ぶ（egui 0.36 以降は 1.95 が必要）
+rust-version = "1.93"
+description = "Loopian::QUBIT のタッチ信号を受信・表示・記録する PC アプリ（doc/debug_env.md）"
+
+# リポジトリ直下のファームとは独立したプロジェクトにする（ターゲットが違うため）
+[workspace]
+
+[dependencies]
+eframe = "0.35"
+egui_plot = "0.36"
+serialport = "4.10"
+rfd = "0.17"
+chrono = "0.4"
