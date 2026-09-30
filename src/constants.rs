@@ -11,7 +11,11 @@ pub const CORE1_STACK_SIZE: usize = 16384;
 // タッチのスキャン周期と解析周期
 // QubitTouch の時間に関する定数は 10ms 毎に呼ばれる前提なので、解析は 10ms 毎に行う。
 // スキャン周期を短くする場合は、ANALYSIS_DIVIDER フレームに 1 回解析する（10 の約数に限る）
+// debug_stream では、チップの更新（8ms 周期）より速く読んで観察するため 2ms にする（doc/debug_env.md §3.3）
+#[cfg(not(feature = "debug_stream"))]
 pub const SCAN_PERIOD_MS: u64 = 10;
+#[cfg(feature = "debug_stream")]
+pub const SCAN_PERIOD_MS: u64 = 2;
 pub const ANALYSIS_PERIOD_MS: u64 = 10;
 pub const ANALYSIS_DIVIDER: u32 = (ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS) as u32;
 const _: () = assert!(ANALYSIS_PERIOD_MS.is_multiple_of(SCAN_PERIOD_MS));

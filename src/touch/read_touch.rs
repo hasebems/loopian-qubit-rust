@@ -13,6 +13,11 @@ pub struct ReadTouch {
     reference: [u16; constants::TOTAL_QT_KEYS],
     reference_adjust: [u16; constants::TOTAL_QT_KEYS],
     reference_counter: usize,
+    // デバッグ用: 最後のスキャンの生値（hi/lo ずれ補正の前）と読み取り成功フラグ（1 bit / キー）
+    #[cfg(feature = "debug_stream")]
+    debug_raw: [u16; constants::TOTAL_QT_KEYS],
+    #[cfg(feature = "debug_stream")]
+    debug_valid: u128,
 }
 
 impl ReadTouch {
@@ -47,6 +52,10 @@ impl ReadTouch {
             reference: [0u16; constants::TOTAL_QT_KEYS],
             reference_adjust: [0u16; constants::TOTAL_QT_KEYS],
             reference_counter: 0,
+            #[cfg(feature = "debug_stream")]
+            debug_raw: [0u16; constants::TOTAL_QT_KEYS],
+            #[cfg(feature = "debug_stream")]
+            debug_valid: 0,
         }
     }
 
@@ -137,6 +146,10 @@ impl ReadTouch {
     ) {
         let work_mode_display = SETTING_MODE.load(Ordering::Relaxed);
         let mut data = [0u16; constants::TOTAL_QT_KEYS];
+        #[cfg(feature = "debug_stream")]
+        {
+            self.debug_valid = 0;
+        }
         for ch in 0..(constants::TOTAL_CH as u8) {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
             let ch_in_dev = Self::convert_channel(ch);
@@ -156,6 +169,11 @@ impl ReadTouch {
                 {
                     let shifted_sid = Self::shifted_index(sid);
                     let mut raw = *rawd;
+                    #[cfg(feature = "debug_stream")]
+                    {
+                        self.debug_raw[shifted_sid] = raw;
+                        self.debug_valid |= 1u128 << shifted_sid;
+                    }
                     let old = self.raw_value[shifted_sid];
                     if old != 0 && raw > old + 200 {
                         raw -= 256; // hiからloを読む間に数値が変化した場合の対策
@@ -208,5 +226,12 @@ impl ReadTouch {
         POINT3.store(self.raw_value[3], Ordering::Relaxed);
         POINT4.store(self.raw_value[4], Ordering::Relaxed);
         POINT5.store(self.raw_value[5], Ordering::Relaxed);
+    }
+
+    /// デバッグ用: 最後のスキャンの生値（hi/lo ずれ補正の前）と読み取り成功フラグ。
+    /// 読み取りに失敗したキーはフラグが 0 で、生値は前回のまま
+    #[cfg(feature = "debug_stream")]
+    pub fn debug_raw(&self) -> (&[u16; constants::TOTAL_QT_KEYS], u128) {
+        (&self.debug_raw, self.debug_valid)
     }
 }

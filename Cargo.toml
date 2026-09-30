@@ -9,6 +9,8 @@ license = "MIT"
 test_mode = []
 # テスト用: PCA9544 を使わず AT42QT1070 1個を I2C に直結する (キー数は test_mode と同じ 6)
 no_pca9544 = ["test_mode"]
+# デバッグ用: USB を MIDI + CDC-ACM の複合デバイスにし、タッチの生値を PC に送る (doc/debug_env.md)
+debug_stream = []
 
 [dependencies]
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", branch = "main" }

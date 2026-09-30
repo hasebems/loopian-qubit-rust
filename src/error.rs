@@ -22,7 +22,8 @@ pub const SPAWN_USB_MIDI: u8 = 21; // usb_task / midi_tx_task / midi_rx_task の
 pub const MIDI_TX_QUEUE_FULL: u8 = 22; // MIDI送信キュー (MIDI_TX) のあふれ
 pub const MIDI_TX_TIMEOUT: u8 = 23; // MIDI送信のタイムアウト（USB未接続など）
 pub const MIDI_RX: u8 = 24; // MIDIイベントの受信エラー
-// 25: （予約）debug_stream_task の起動に失敗（doc/debug_env.md）
+#[cfg(feature = "debug_stream")]
+pub const SPAWN_DEBUG_STREAM: u8 = 25; // debug_stream_task の起動に失敗（doc/debug_env.md）
 
 // 3x: 圧力 (ADC)
 pub const SPAWN_PRESSURE: u8 = 31; // pressure_task の起動に失敗

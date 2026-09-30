@@ -72,6 +72,10 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             .await;
         SCAN_TIME.record(cycle_start.elapsed().as_micros() as u32);
 
+        // デバッグ用: 生値を PC への送信キューに入れる（PC が start を送った後だけ）
+        #[cfg(feature = "debug_stream")]
+        queue_debug_frame(&read_touch, frame, cycle_start);
+
         // 解析: QubitTouch は 10ms 毎に呼ばれる前提なので、ANALYSIS_DIVIDER フレームに 1 回行う。
         // 起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わない
         if cycle_start >= analysis_start_at && frame.is_multiple_of(ANALYSIS_DIVIDER) {
@@ -102,5 +106,25 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             PERIOD_OVERRUN.fetch_add(1, Ordering::Relaxed);
             ticker.reset();
         }
+    }
+}
+
+/// 最後のスキャンの生値を DEBUG_FRAMES に入れる（待たない）。あふれたら捨てて数える
+#[cfg(feature = "debug_stream")]
+fn queue_debug_frame(read_touch: &touch::read_touch::ReadTouch, seq: u32, scan_start: Instant) {
+    use crate::shared::{DEBUG_DROPPED, DEBUG_FRAMES, DEBUG_STREAMING, DebugFrame};
+
+    if !DEBUG_STREAMING.load(Ordering::Relaxed) {
+        return;
+    }
+    let (raw, valid) = read_touch.debug_raw();
+    let debug_frame = DebugFrame {
+        seq,
+        time_us: scan_start.as_micros() as u32,
+        valid,
+        raw: *raw,
+    };
+    if DEBUG_FRAMES.try_send(debug_frame).is_err() {
+        DEBUG_DROPPED.fetch_add(1, Ordering::Relaxed);
     }
 }

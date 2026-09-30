@@ -119,3 +119,29 @@ pub fn reset_diagnostics() {
     MIDI_TX_MAX_USED.store(0, Ordering::Relaxed);
     MIDI_TX_OVERFLOW.store(0, Ordering::Relaxed);
 }
+
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//      デバッグ用: touch_task (Core1) → debug_stream_task (Core0) → USB CDC → PC
+//      doc/debug_env.md
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+/// 1 回のスキャンで読んだ生値（hi/lo ずれ補正の前）
+#[cfg(feature = "debug_stream")]
+pub struct DebugFrame {
+    pub seq: u32, // スキャン番号（送らなかったフレームも数える。PC は欠けで取りこぼしを知る）
+    pub time_us: u32, // スキャン開始時刻（起動からの µs。約 71 分で一周）
+    pub valid: u128, // 読み取り成功フラグ（1 bit / キー。96 キーまで）
+    pub raw: [u16; TOTAL_QT_KEYS],
+}
+#[cfg(feature = "debug_stream")]
+pub const DEBUG_FRAMES_QUEUE_SIZE: usize = 16;
+// スキャン毎の生値: touch_task (Core1) → debug_stream_task (Core0)
+#[cfg(feature = "debug_stream")]
+pub static DEBUG_FRAMES: Channel<CriticalSectionRawMutex, DebugFrame, DEBUG_FRAMES_QUEUE_SIZE> =
+    Channel::new();
+// PC がポートを開いて start を送った後か: debug_stream_task → touch_task
+// false の間、touch_task は DEBUG_FRAMES に入れない（キューが無駄にあふれないようにするため）
+#[cfg(feature = "debug_stream")]
+pub static DEBUG_STREAMING: AtomicBool = AtomicBool::new(false);
+// DEBUG_FRAMES があふれて捨てたフレームの累計: touch_task → debug_stream_task (INFO)
+#[cfg(feature = "debug_stream")]
+pub static DEBUG_DROPPED: AtomicU32 = AtomicU32::new(0);

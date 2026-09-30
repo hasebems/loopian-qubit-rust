@@ -7,6 +7,8 @@
 #![no_main]
 
 mod constants;
+#[cfg(feature = "debug_stream")]
+mod debug_protocol;
 mod devices;
 mod error;
 mod shared;
@@ -109,11 +111,24 @@ fn main() -> ! {
     config.serial_number = Some("000000");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
+    // debug_stream: MIDI と CDC-ACM の複合デバイスにする（IAD を使う）
+    #[cfg(feature = "debug_stream")]
+    {
+        config.composite_with_iads = true;
+        config.device_class = 0xEF;
+        config.device_sub_class = 0x02;
+        config.device_protocol = 0x01;
+    }
 
-    // Buffers
-    let config_descriptor = make_static!([u8; 256], [0; 256]);
-    let bos_descriptor = make_static!([u8; 256], [0; 256]);
-    let msos_descriptor = make_static!([u8; 256], [0; 256]);
+    // Buffers（CDC を加えるとディスクリプタが大きくなるので増やす）
+    const DESC_BUF_SIZE: usize = if cfg!(feature = "debug_stream") {
+        512
+    } else {
+        256
+    };
+    let config_descriptor = make_static!([u8; DESC_BUF_SIZE], [0; DESC_BUF_SIZE]);
+    let bos_descriptor = make_static!([u8; DESC_BUF_SIZE], [0; DESC_BUF_SIZE]);
+    let msos_descriptor = make_static!([u8; DESC_BUF_SIZE], [0; DESC_BUF_SIZE]);
     let control_buf = make_static!([u8; 64], [0; 64]);
 
     let mut builder = Builder::new(
@@ -127,6 +142,14 @@ fn main() -> ! {
 
     // Midi Class
     let class = MidiClass::new(&mut builder, 1, 1, 64);
+
+    // CDC-ACM（デバッグ用の仮想シリアル）
+    #[cfg(feature = "debug_stream")]
+    let cdc = {
+        use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+        let state = make_static!(State<'static>, State::new());
+        CdcAcmClass::new(&mut builder, state, tasks::debug_stream::CDC_PACKET_SIZE)
+    };
 
     // I2C: 2 系統に分ける
     // - I2C0 (SDA=GP0/D6, SCL=GP1/D7): OLED。Core0 の ui_task が使う
@@ -194,6 +217,11 @@ fn main() -> ! {
         match tasks::status_led::status_led_task(led) {
             Ok(token) => spawner.spawn(token),
             Err(_) => error::set(error::SPAWN_STATUS_LED),
+        }
+        #[cfg(feature = "debug_stream")]
+        match tasks::debug_stream::debug_stream_task(cdc) {
+            Ok(token) => spawner.spawn(token),
+            Err(_) => error::set(error::SPAWN_DEBUG_STREAM),
         }
     });
 }

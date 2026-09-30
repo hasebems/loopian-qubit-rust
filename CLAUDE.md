@@ -14,6 +14,7 @@ cargo build --release
 cargo run --release             # picotool load -u -v -x -t elf で書き込み・実行（BOOTSEL/USB 接続が必要）
 cargo build --features test_mode   # PCA9544 1台×1ch 構成（6 キー）で動かす試験用
 cargo build --features no_pca9544  # PCA9544 無しで AT42QT1070 1個を直結する試験用（test_mode を含む）
+cargo build --features no_pca9544,debug_stream  # デバッグ環境: USB を MIDI + CDC にし、タッチの生値を PC に送る（doc/debug_env.md）
 cargo fmt                       # CI で --check される
 cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前に通すこと
 ```
@@ -54,6 +55,7 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 - `ringled_task`: 20ms 毎に `TOUCH0-3` と `RINGLED_RX_BITS` を読んで NeoPixel を描画（書き込みのタイムアウトは 15ms）
 - `ui_task`: 100ms 毎にスイッチを判定してページ / 動作モードを切り替え、OLED は 200ms 毎（5fps）に描画して I2C0 で転送。描画は `await` の無い CPU 処理（約 3ms）で、その間 Core0 の他のタスクは待たされる
 - `status_led_task`: 内蔵 LED（ハートビート / エラーコード）
+- `debug_stream_task`（`debug_stream` feature のみ）: `DEBUG_FRAMES` のタッチの生値を USB CDC で PC に送り、PC からのコマンドを受ける。この feature ではスキャン周期が 2ms になる（`doc/debug_env.md`）
 
 ### タスク間の受け渡し
 

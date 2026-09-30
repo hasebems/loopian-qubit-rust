@@ -304,6 +304,28 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 - hi/lo ずれ（値が 256 前後飛ぶ）がどのくらいの頻度で起きるか
 - 触れたとき・離したときの立ち上がり・立ち下がりにかかる時間
 
+### 6.1 実装の記録
+
+各段階を実装したときに、設計から補ったこと・途中の状態を記録する。
+
+**段階 1（ファーム）**（2026-09-30）
+
+- ファイル
+    - `src/tasks/debug_stream.rs`: `debug_stream_task`（Core0）
+    - `src/debug_protocol.rs`: パケットの組み立て（`Packet`）と CRC-8/ATM
+    - `src/shared.rs`: `DebugFrame`・`DEBUG_FRAMES`・`DEBUG_STREAMING`・`DEBUG_DROPPED`
+    - いずれも `debug_stream` feature のときだけコンパイルする。feature が無いときの USB の構成・ディスクリプタのバッファ（256 バイト）・スキャン周期（10ms）は今までどおり
+- **スキャン周期**: 段階 1 では `period` コマンドが無いので、`SCAN_PERIOD_MS` を const のまま `debug_stream` のときだけ 2 にした。`SCAN_PERIOD_US`（Atomic）への置き換えと `Ticker` の作り直しは、`period` コマンドと合わせて段階 2 で行う
+- **`DEBUG_STREAMING`**（設計に追加）: `debug_stream_task` が `start` を受けたら true、`stop`・切断で false にする。`touch_task` は true の間だけ `DEBUG_FRAMES` に入れる。PC が読んでいない間にキューがあふれて `DEBUG_DROPPED` が増え続けないようにするため。`DEBUG_DROPPED` は本当の取りこぼしだけを数える
+- **生値**: `ReadTouch` に `debug_raw`（補正前の生値）と `debug_valid` を持たせ、`debug_raw()` で読む。`valid` はスキャンの始めに 0 にし、読めたキーのビットを立てる
+- **`seq`** は `touch_task` のスキャン番号（`frame`）をそのまま使う。**`time_us`** はスキャン開始の `Instant` の µs。embassy-time の時刻は起動（`embassy_rp::init`）からで、Core1 の起動からではない（§3.3 の構造体のコメントより正確には「起動から」）
+- **USB**: CDC のパケット長は 64。MIDI・CDC とも `builder.function()` で IAD が付く。インターフェースは MIDI 2 + CDC 2 = 4 個で、embassy-usb の既定の上限（4）に収まる。USB がリセットされると DTR は false に戻る
+- **コマンドの応答**（設計に追加）: `start` / `stop` には TEXT で `ok: start` / `ok: stop` を返す。知らないコマンドには `error: unknown command: <コマンド>`、32 バイトを超える行には `error: command too long` を返す。行の区切りは CR・LF のどちらでもよい（空行は無視する）
+- **TEXT** の payload は 64 バイトまでで、超えた分は切り捨てる
+- **切断の判定**: DTR が落ちた・`read_packet` がエラー（USB の切断）・`write_packet` が 100ms でタイムアウト、のいずれか。切断したら最初に戻って DTR を待つ。書き込みのタイムアウトで DTR が立ったままのときは、すぐに接続し直して INFO を送り、`start` を受ける前の状態から始める。PC アプリは INFO を受けたら `start` を送り直せばよい
+- **接続の始め**に、前の接続で `DEBUG_FRAMES` に残ったフレームを捨てる
+- エラーコード 25 を `error::SPAWN_DEBUG_STREAM` として定義した（`debug_stream` のときだけ）
+
 ## 7. 96 キーに戻すときのための配慮
 
 - プロトコルは `nkeys` を持ち、`valid` も可変長。ファームのキー数が変わっても、PC アプリは変更なしで動く
