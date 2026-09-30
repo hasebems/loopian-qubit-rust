@@ -87,7 +87,7 @@ Core0 (Executor)                              Core1 (Executor)
 | `usb_task` | 0 | 常駐 | USB デバイスの駆動 | 同名 |
 | `pressure_task` | 0 | 10ms | ADC の読み取り、圧力の計算。Violin モードの CC11 と、モードに入ったときの All Sound Off を決めて `MIDI_TX` に入れる | `adc_task` ＋ `qubit_touch_task` の CC11 部分 |
 | `ringled_task` | 0 | `Ticker` 20ms | NeoPixel の描画 | 同名 |
-| `ui_task` | 0 | 100ms | スイッチの判定、ページ／モードの切替、OLED の描画と I2C0 への転送 | `core1_oled_ui_task` ＋ `core1_i2c_task` の OLED 部分 |
+| `ui_task` | 0 | スイッチ 100ms、描画 200ms（5fps） | スイッチの判定、ページ／モードの切替、OLED の描画と I2C0 への転送 | `core1_oled_ui_task` ＋ `core1_i2c_task` の OLED 部分 |
 | `status_led_task` | 0 | 常駐 | 内蔵 LED（ハートビート／エラーコード） | `core1_led_task` |
 | `debug_stream_task` | 0 | （後で）`debug_env.md` | USB CDC へのデバッグデータ送信 | 新規 |
 
@@ -135,6 +135,7 @@ loop {
 
 - `SCAN_PERIOD_MS` の初期値は **10ms**。`QubitTouch` の中の時間の定数（`TOUCH_SAMPLE_PERIOD_SEC` = 0.01、`RELEASE_WAITING_TIME`、ベロシティ計算の 10ms tick など）は「10ms 毎に呼ばれる」ことを前提にしているため。これで改修前と同じ振る舞いになる
 - **解析する周期**: `SCAN_PERIOD_MS` を 10ms より短くする場合（デバッグ環境での 2ms など）でも、解析は 10ms 毎に行う。`ANALYSIS_DIVIDER = ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS` フレームに 1 回解析する（`ANALYSIS_PERIOD_MS` = 10）。そのため `SCAN_PERIOD_MS` は 10 の約数（1, 2, 5, 10）に限り、倍数であることをコンパイル時に確認する。3 つの定数は `constants.rs` に置く
+- **起動直後の `TOUCH_STARTUP_SETTLE_MS`（500ms）の間は、スキャンだけを行い解析しない**。`read_touch` はチップの基準値を最初のスキャンの後に初めて読むので、最初のフレームは基準値 0 で引かれて全キーが大きな値になる。スキャンの直後に必ず解析する構成では、これを確実に拾って誤ったノートを出してしまう（改修前は Core0 の解析が別周期で、読み飛ばすことが多かった）。チップ自身の校正（電源投入から 230ms 未満）と、基準値の読み直し（120ms 毎）が何度か行われるまで待つ
 - 毎フレームの解析（フレーム駆動）と、`QubitTouch` の時間基準化は、`touch_baseline.md`（速さ検出）の段階で行う
 - `ReadTouch` と `QubitTouch` は同じタスクの中の構造体で、値は関数呼び出しで渡す。今の `TOUCH_RAW_DATA`（Mutex）は不要になる
 - 読み取り中に `SETTING_MODE`（§4.5）を参照する。基準値の補正（現状の `reference_adjust`）は、今の段階では従来どおり
@@ -194,6 +195,7 @@ loop {
 - 起動画面の描画と転送も `ui_task` の最初に行う
 - **OLED の初期化の前に 100ms 待つ**（`OLED_POWER_ON_WAIT_MS`）。改修前は、タッチセンサの初期化が終わってから OLED を初期化していたので、自然に待ち時間があった。I2C を分けると起動直後に並行して走るため、電源投入直後の OLED が初期化コマンドを受け付けられるように待つ
 - **転送のタイムアウトは 50ms**（`OLED_FLUSH_TIMEOUT_MS`）。1 画面（1024 バイト）の転送は 400kHz で約 25ms かかる見積もりなので、余裕を持たせる。失敗・タイムアウトはエラー 43 に記録する
+- **描画は 5fps（200ms 毎）、スイッチの判定は 100ms 毎**（`SWITCH_POLL_MS`、`DRAW_DIVIDER`）。実機で描画に平均約 3ms かかることが分かった（診断ページの `Drw`）。描画は `await` を挟まないので、その間 Core0 の他のタスクが止まる。頻度を下げて影響を減らす。スイッチの判定まで 200ms にすると短い押下を取りこぼしやすいので、判定は 100ms 毎のままにする。スイッチ操作でページや表示が変わったときは、次の描画を待たずにすぐ描く。点滅などに使う `counter` は 100ms 毎に進めるので、表示の時間は変わらない
 
 ### 4.5 共有状態の整理（`src/shared.rs`）
 
@@ -371,6 +373,18 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 - エラーコードは `error.rs` の定数にし、`error::set` / `clear` / `get` で扱う。`ERROR_CODE` 自体は `error.rs` の外から見えないようにした
 - その後、改修前の番号との互換は不要として、十の位・一の位とも 1–5 の範囲に振り直した（§4.7）。panic は 255 から 55 に変えた
 
+**動作チェック後の修正**（2026-09-30）
+
+- 実機でエラー 45（RingLED 書き込みのタイムアウト）が出た。リング LED を付けていない状態でも、PIO・DMA の送信は同じように行われる
+- 原因: 段階 3 で OLED の描画（`ui_task`）が Core0 に移り、描画（平均約 3ms、`await` なし）の間 `ringled_task` が動けない。96 LED の送信（約 3.9ms）の完了の処理が遅れ、8ms のタイムアウトを超えた
+- 対策:
+    - RingLED の書き込みのタイムアウトを 8ms → 15ms にした（`RINGLED_WRITE_TIMEOUT_MS`）。周期 (20ms) に収まり、固着したときの保護という目的は変わらない
+    - OLED の描画・転送を 10fps → 5fps にした。スイッチの判定は 100ms 毎のまま（§4.4）
+- MIDI の送信が描画の分だけ遅れる件は残っている（§8）
+- 続いて、起動直後からエラー 23（MIDI 送信のタイムアウト）が出た。診断ページの `MIDIq` は最大 8 / あふれ 0 で、起動時に 8 個ほどのパケットがまとめて作られていた
+- 原因: 最初のスキャンのフレームは基準値 0 で引かれるため全キーが大きな値になり、段階 5 で解析をスキャンの直後に行うようにしたことで、これを `QubitTouch` が確実に拾ってノートを出していた。起動直後は PC が USB を認識している途中で、USB MIDI の送信は前のパケットをホストが受け取るまで次を書けないため、2 つ目以降がタイムアウトした
+- 対策: 起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）は解析をしない（§4.1）。起動時の誤ったノートも出なくなる
+
 ## 7. 他の設計書への影響
 
 - `doc/debug_env.md`
@@ -388,4 +402,5 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 - OLED の描画時間が Core0 の MIDI 送信に与える影響。段階 3 以降、MIDI の送信の遅れなど問題が見えたら §4.4 の対処を行う
 - `InterruptExecutor` を使うかどうか（§4.4）
 - **Core0 で panic したときの表示**: 段階 3 で `status_led_task` を Core0 に移したため、Core0 で panic すると LED の点滅も止まり、エラー 55 を表示できない（Core1 の panic は Core0 の LED で 55 と表示される）。改修前は LED のタスクが Core1 にあったので、Core0 の panic も表示できた。対策としては、panic ハンドラの中で LED を直接点滅させる（Executor に頼らないビジーループ）などが考えられる
+- **OLED の描画による Core0 のタスクの遅れ**: 描画に平均約 3ms かかり、その間 `midi_tx_task` と `ringled_task` が待たされる。5fps にしたので頻度は半分になったが、MIDI の送信が最大で描画時間の分だけ遅れることは変わらない。根本的には、`midi_tx_task` と `ringled_task` を `InterruptExecutor`（優先度付き）で動かし、描画の途中でも割り込めるようにする（§4.4 の 3）。描画処理そのものを速くする（`OledBuffer` の `DrawTarget` で塗りつぶしをまとめて処理する、など）余地もある
 - `pressure_task`（ADC）を Core1 に置く案。センシングをまとめる考え方もあるが、Core1 の周期を乱す要因を増やさないため、今回は Core0 に置く

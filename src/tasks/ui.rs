@@ -9,6 +9,11 @@ use crate::error;
 use crate::shared::{RINGLED_RX_BITS, SETTING_MODE, UI_DRAW_TIME, WORK_MODE, reset_diagnostics};
 use crate::ui;
 
+// スイッチの判定周期。短い押下を取りこぼさないよう、描画より短くする
+const SWITCH_POLL_MS: u64 = 100;
+// OLED の描画・転送は SWITCH_POLL_MS の DRAW_DIVIDER 回に 1 回（5fps）。
+// 描画は await を挟まない CPU 処理（約3ms）で、その間 Core0 の他のタスク（MIDI 送信・RingLED）が待たされるため、頻度を下げる
+const DRAW_DIVIDER: u32 = 2;
 const OLED_POWER_ON_WAIT_MS: u64 = 100;
 const OLED_INIT_TIMEOUT_MS: u64 = 50;
 // 1画面(1024バイト)の転送は 400kHz で約25ms かかる。固着したときに UI が止まらないよう余裕を持たせて打ち切る
@@ -52,8 +57,9 @@ pub async fn ui_task(
     flush(&oled, &buffer, &mut i2c).await;
 
     loop {
-        // 次のステップまで待機(10fps想定)
-        Timer::after_millis(100).await;
+        // 次のステップまで待機
+        Timer::after_millis(SWITCH_POLL_MS).await;
+        let mut page_changed = false;
 
         // スイッチの状態を取得
         let switch_r_state = switch1.is_low();
@@ -78,6 +84,7 @@ pub async fn ui_task(
                 ui_page = next_page(ui_page);
             }
             gui.change_page(ui_page); // ページ切替をGUIに通知
+            page_changed = true;
         }
         if (switch_l_state != switch2_prev) && switch_l_state {
             if both_pressed {
@@ -95,18 +102,22 @@ pub async fn ui_task(
                 ui_page = prev_page(ui_page);
             }
             gui.change_page(ui_page); // ページ切替をGUIに通知
+            page_changed = true;
         }
         switch1_prev = switch_r_state;
         switch2_prev = switch_l_state;
 
-        // 描画
-        let draw_start = Instant::now();
-        gui.tick(&mut buffer, counter);
-        UI_DRAW_TIME.record(draw_start.elapsed().as_micros() as u32);
-        counter = counter.wrapping_add(1);
+        // 描画と転送は DRAW_DIVIDER 回に 1 回。スイッチ操作でページや表示が変わったときは、反応を遅らせないようすぐに描く。
+        // counter は SWITCH_POLL_MS 毎に進めるので、点滅などの表示の時間は描画の頻度に関係しない
+        if page_changed || counter.is_multiple_of(DRAW_DIVIDER) {
+            let draw_start = Instant::now();
+            gui.tick(&mut buffer, counter);
+            UI_DRAW_TIME.record(draw_start.elapsed().as_micros() as u32);
 
-        // 描画済みバッファを転送
-        flush(&oled, &buffer, &mut i2c).await;
+            // 描画済みバッファを転送
+            flush(&oled, &buffer, &mut i2c).await;
+        }
+        counter = counter.wrapping_add(1);
     }
 }
 

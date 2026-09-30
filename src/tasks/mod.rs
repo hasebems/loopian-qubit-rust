@@ -12,7 +12,7 @@
 //! | usb_task            | Core0 | 常駐          | main.rs         |
 //! | ringled_task        | Core0 | 20ms          | ringled.rs      |
 //! | pressure_task       | Core0 | 10ms          | pressure.rs     |
-//! | ui_task             | Core0 | 100ms         | ui.rs           |
+//! | ui_task             | Core0 | 100ms (描画 200ms) | ui.rs      |
 //! | status_led_task     | Core0 | 常駐          | status_led.rs   |
 //! | touch_task          | Core1 | 10ms          | touch.rs        |
 //!

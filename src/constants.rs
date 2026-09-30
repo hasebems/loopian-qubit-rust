@@ -15,6 +15,11 @@ pub const SCAN_PERIOD_MS: u64 = 10;
 pub const ANALYSIS_PERIOD_MS: u64 = 10;
 pub const ANALYSIS_DIVIDER: u32 = (ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS) as u32;
 const _: () = assert!(ANALYSIS_PERIOD_MS.is_multiple_of(SCAN_PERIOD_MS));
+// 起動後、この時間はスキャンだけを行い、解析（ノートの生成）をしない。
+// read_touch はチップの基準値を最初のスキャンの後に初めて読むため、最初のフレームは基準値 0 で全キーが大きな値になる。
+// また AT42QT1070 自身も電源投入から 230ms 未満で基準値を校正する（データシート §6.5 TD）。
+// 基準値は 12 スキャン (120ms) 毎に読み直されるので、何度か更新されて落ち着くまで待つ
+pub const TOUCH_STARTUP_SETTLE_MS: u64 = 500;
 
 pub const MIDI_NOTE_ON: u8 = 0x90;
 pub const MIDI_NOTE_OFF: u8 = 0x80;

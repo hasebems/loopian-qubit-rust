@@ -58,6 +58,8 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     let mut ticker = Ticker::every(period);
     let mut frame = 0u32;
     let mut touch_values = [0u16; TOTAL_QT_KEYS];
+    // 起動直後は基準値が落ち着いていないので、この時刻までは解析しない（誤ったノートを出さないため）
+    let analysis_start_at = Instant::now() + Duration::from_millis(TOUCH_STARTUP_SETTLE_MS);
 
     // Task Loop
     loop {
@@ -70,8 +72,9 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             .await;
         SCAN_TIME.record(cycle_start.elapsed().as_micros() as u32);
 
-        // 解析: QubitTouch は 10ms 毎に呼ばれる前提なので、ANALYSIS_DIVIDER フレームに 1 回行う
-        if frame.is_multiple_of(ANALYSIS_DIVIDER) {
+        // 解析: QubitTouch は 10ms 毎に呼ばれる前提なので、ANALYSIS_DIVIDER フレームに 1 回行う。
+        // 起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わない
+        if cycle_start >= analysis_start_at && frame.is_multiple_of(ANALYSIS_DIVIDER) {
             let analysis_start = Instant::now();
             let work_mode = WORK_MODE
                 .load(Ordering::Relaxed)

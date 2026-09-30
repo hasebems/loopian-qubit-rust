@@ -10,6 +10,10 @@ use crate::error;
 use crate::shared::{RINGLED_RX_BITS, TOUCH0, TOUCH1, TOUCH2, TOUCH3};
 use crate::ui;
 
+// NeoPixel 書き込みのタイムアウト。96 LED の送信は約3.9ms だが、同じ Core0 の ui_task の描画（約3ms、await なし）
+// と重なると完了の処理が遅れるので、周期 (20ms) に収まる範囲で余裕を持たせる。固着したときの保護が目的
+const RINGLED_WRITE_TIMEOUT_MS: u64 = 15;
+
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      RingLED Task: 共有状態(TOUCH0-3, RXビット)からNeopixelを制御
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -52,7 +56,11 @@ pub async fn ringled_task(
 
         ring_led.render(&mut data, &touch_locations, &rx_bits);
         // バグ対策: NeoPixel書き込みが固着してもタスク全体が停止しないようタイムアウト保護
-        let write_result = with_timeout(Duration::from_millis(8), ws2812.write(&data)).await;
+        let write_result = with_timeout(
+            Duration::from_millis(RINGLED_WRITE_TIMEOUT_MS),
+            ws2812.write(&data),
+        )
+        .await;
         if write_result.is_err() {
             error::set(error::RINGLED_WRITE_TIMEOUT);
         }
