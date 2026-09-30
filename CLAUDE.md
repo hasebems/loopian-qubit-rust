@@ -44,7 +44,7 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 デュアルコアで、各コアが独立した Embassy `Executor` を持つ。Core1 はタッチの処理だけ、Core0 は入出力を受け持つ（設計は `doc/task_architecture.md`）。タスクの本体は `src/tasks/`、一覧は `src/tasks/mod.rs`。
 
 **Core1**
-- `touch_task`: I2C1 を専有。`Ticker` で `SCAN_PERIOD_MS`（10ms）毎に、スキャン（`read_touch`）→ `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。解析は `ANALYSIS_DIVIDER` フレームに 1 回（`QubitTouch` の時間の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）は基準値が落ち着いていないので解析しない
+- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。解析は `analysis_divider()` フレームに 1 回（`QubitTouch` の時間の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）は基準値が落ち着いていないので解析しない
 - I2C1 は Core1 の中で `I2c::new_async` する。embassy-rp は呼び出したコアの NVIC で割り込みを有効にするので、こうすると I2C1 の割り込みも Core1 で処理される
 
 **Core0**
@@ -55,7 +55,7 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 - `ringled_task`: 20ms 毎に `TOUCH0-3` と `RINGLED_RX_BITS` を読んで NeoPixel を描画（書き込みのタイムアウトは 15ms）
 - `ui_task`: 100ms 毎にスイッチを判定してページ / 動作モードを切り替え、OLED は 200ms 毎（5fps）に描画して I2C0 で転送。描画は `await` の無い CPU 処理（約 3ms）で、その間 Core0 の他のタスクは待たされる
 - `status_led_task`: 内蔵 LED（ハートビート / エラーコード）
-- `debug_stream_task`（`debug_stream` feature のみ）: `DEBUG_FRAMES` のタッチの生値を USB CDC で PC に送り、PC からのコマンドを受ける。この feature ではスキャン周期が 2ms になる（`doc/debug_env.md`）
+- `debug_stream_task`（`debug_stream` feature のみ）: `DEBUG_FRAMES` のタッチの生値を USB CDC で PC に送り、PC からのコマンドを受ける。この feature ではスキャン周期の既定が 2ms になり、PC の `period` コマンドで 2 / 5 / 10 / 20ms に変えられる。Note On/Off を EVENT として送る（`doc/debug_env.md`）
 
 ### タスク間の受け渡し
 

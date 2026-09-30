@@ -104,7 +104,7 @@ impl TimeStat {
 pub static SCAN_TIME: TimeStat = TimeStat::new(); // タッチのスキャン時間: touch_task
 pub static ANALYSIS_TIME: TimeStat = TimeStat::new(); // QubitTouch の解析時間: touch_task
 pub static UI_DRAW_TIME: TimeStat = TimeStat::new(); // OLED の描画時間（転送を除く）: ui_task
-// スキャン＋解析が周期 (SCAN_PERIOD_MS) を超えた回数: touch_task
+// スキャン＋解析が周期 (scan_period_us()) を超えた回数: touch_task
 pub static PERIOD_OVERRUN: AtomicU32 = AtomicU32::new(0);
 // MIDI_TX の最大使用数とあふれた回数: queue_midi (touch_task, pressure_task)
 pub static MIDI_TX_MAX_USED: AtomicU32 = AtomicU32::new(0);
@@ -142,6 +142,51 @@ pub static DEBUG_FRAMES: Channel<CriticalSectionRawMutex, DebugFrame, DEBUG_FRAM
 // false の間、touch_task は DEBUG_FRAMES に入れない（キューが無駄にあふれないようにするため）
 #[cfg(feature = "debug_stream")]
 pub static DEBUG_STREAMING: AtomicBool = AtomicBool::new(false);
-// DEBUG_FRAMES があふれて捨てたフレームの累計: touch_task → debug_stream_task (INFO)
+// DEBUG_FRAMES / DEBUG_EVENTS があふれて捨てた数の累計: touch_task → debug_stream_task (INFO)
 #[cfg(feature = "debug_stream")]
 pub static DEBUG_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// タッチ信号以外のできごと（Note On/Off など）。kind と data の意味は doc/debug_env.md §5.1
+#[cfg(feature = "debug_stream")]
+pub struct DebugEvent {
+    pub time_us: u32, // 起動からの µs（DebugFrame と同じ基準）
+    pub kind: u8,
+    pub data: [u8; 4],
+}
+#[cfg(feature = "debug_stream")]
+pub const DEBUG_EVENTS_QUEUE_SIZE: usize = 16;
+// イベント: touch_task (Core1, Note) → debug_stream_task (Core0)
+#[cfg(feature = "debug_stream")]
+pub static DEBUG_EVENTS: Channel<CriticalSectionRawMutex, DebugEvent, DEBUG_EVENTS_QUEUE_SIZE> =
+    Channel::new();
+// PC がポートを開いているか: debug_stream_task → touch_task
+// false の間はイベントをキューに入れない
+#[cfg(feature = "debug_stream")]
+pub static DEBUG_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+// スキャン周期（µs）。PC の period コマンドで変える: debug_stream_task → touch_task
+#[cfg(feature = "debug_stream")]
+static SCAN_PERIOD_SETTING_US: AtomicU32 = AtomicU32::new(SCAN_PERIOD_US);
+
+/// 今のスキャン周期（µs）。debug_stream が無いときは SCAN_PERIOD_US（const）のまま
+pub fn scan_period_us() -> u32 {
+    #[cfg(feature = "debug_stream")]
+    {
+        SCAN_PERIOD_SETTING_US.load(Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "debug_stream"))]
+    {
+        SCAN_PERIOD_US
+    }
+}
+
+/// スキャン周期を変える。SCAN_PERIODS_US に無い値なら変えずに false を返す
+#[cfg(feature = "debug_stream")]
+pub fn set_scan_period_us(period_us: u32) -> bool {
+    if SCAN_PERIODS_US.contains(&period_us) {
+        SCAN_PERIOD_SETTING_US.store(period_us, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}

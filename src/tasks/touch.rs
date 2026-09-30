@@ -6,13 +6,13 @@ use portable_atomic::Ordering;
 use crate::constants::*;
 use crate::devices;
 use crate::error;
-use crate::shared::{ANALYSIS_TIME, PERIOD_OVERRUN, SCAN_TIME, WORK_MODE};
+use crate::shared::{ANALYSIS_TIME, PERIOD_OVERRUN, SCAN_TIME, WORK_MODE, scan_period_us};
 use crate::tasks::midi::queue_midi;
 use crate::touch;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      Touch Task (Core1): I2C1 を専有し、スキャン → 解析 → ノートイベントの生成を
-//      SCAN_PERIOD_MS 毎に行う。ノートイベントは MIDI 送信キューに入れる
+//      scan_period_us() 毎に行う。ノートイベントは MIDI 送信キューに入れる
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
@@ -41,6 +41,9 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     let mut qt = QubitTouch::new(|status, note, velocity, _location| {
         // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信キューに入れる
         let status = status & 0xf0; // コマンド部分
+        // デバッグ用: PC に Note のイベントを送る
+        #[cfg(feature = "debug_stream")]
+        queue_note_event(status, note, velocity, _location);
         let midi_channel = if current_mode.get() == WorkMode::Piano {
             MIDI_CH_FLOW
         } else {
@@ -54,7 +57,10 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         queue_midi([status >> 4, status, note, velocity]);
     });
 
-    let period = Duration::from_millis(SCAN_PERIOD_MS);
+    // スキャン周期。debug_stream では PC のコマンドで変わるので、毎周期確かめる
+    let mut period_us = scan_period_us();
+    let mut period = Duration::from_micros(period_us as u64);
+    let mut divider = analysis_divider(period_us);
     let mut ticker = Ticker::every(period);
     let mut frame = 0u32;
     let mut touch_values = [0u16; TOTAL_QT_KEYS];
@@ -65,6 +71,13 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     loop {
         ticker.next().await;
         let cycle_start = Instant::now();
+        if scan_period_us() != period_us {
+            // 周期が変わったら Ticker を作り直し、解析の間引きも計算し直す
+            period_us = scan_period_us();
+            period = Duration::from_micros(period_us as u64);
+            divider = analysis_divider(period_us);
+            ticker = Ticker::every(period);
+        }
 
         // タッチセンサのスキャン
         read_touch
@@ -76,9 +89,9 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         #[cfg(feature = "debug_stream")]
         queue_debug_frame(&read_touch, frame, cycle_start);
 
-        // 解析: QubitTouch は 10ms 毎に呼ばれる前提なので、ANALYSIS_DIVIDER フレームに 1 回行う。
+        // 解析: QubitTouch は 10ms 毎に呼ばれる前提なので、divider フレームに 1 回行う（20ms 周期では毎回）。
         // 起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わない
-        if cycle_start >= analysis_start_at && frame.is_multiple_of(ANALYSIS_DIVIDER) {
+        if cycle_start >= analysis_start_at && frame.is_multiple_of(divider) {
             let analysis_start = Instant::now();
             let work_mode = WORK_MODE
                 .load(Ordering::Relaxed)
@@ -127,4 +140,23 @@ fn queue_debug_frame(read_touch: &touch::read_touch::ReadTouch, seq: u32, scan_s
     if DEBUG_FRAMES.try_send(debug_frame).is_err() {
         DEBUG_DROPPED.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Note On/Off/Moved を DEBUG_EVENTS に入れる（PC がポートを開いている間だけ。待たない）
+/// status は RINGLED_CMD_TX_ON / OFF / MOVED、location はキー位置
+#[cfg(feature = "debug_stream")]
+fn queue_note_event(status: u8, note: u8, velocity: u8, location: f32) {
+    use crate::tasks::debug_stream::{
+        EVENT_NOTE_MOVED, EVENT_NOTE_OFF, EVENT_NOTE_ON, queue_event,
+    };
+
+    let kind = match status {
+        RINGLED_CMD_TX_ON => EVENT_NOTE_ON,
+        RINGLED_CMD_TX_OFF => EVENT_NOTE_OFF,
+        RINGLED_CMD_TX_MOVED => EVENT_NOTE_MOVED,
+        _ => return,
+    };
+    let location = (location * 100.0) as u16; // TOUCH0-3 と同じ ×100 の単位
+    let [lo, hi] = location.to_le_bytes();
+    queue_event(kind, [note, velocity, lo, hi]);
 }

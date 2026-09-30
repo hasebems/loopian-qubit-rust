@@ -107,12 +107,15 @@ pub struct DebugFrame {
 | イベント | 発生元 | 内容 |
 |---|---|---|
 | Note On / Off | `touch_task`（Core1）の MIDI コールバック | ノート番号、ベロシティ、位置 |
-| スイッチ | `ui_task`（Core0） | 左右スイッチの押下・解放 |
-| 動作モード・設定画面 | `ui_task`（Core0） | Piano / Violin の切替、`SETTING_MODE` の変化 |
-| エラー | エラーコード（`error::get()`）の変化 | エラーコード |
 | マーカー | PC からのコマンド | 実験者が付ける目印（「ここからゆっくり触る」など） |
 
+- **イベントは Note On / Off とマーカーだけにする**（2026-09-30 決定）。スイッチ、動作モード・設定画面、エラーなどは今は入れず、必要になったときに加える
+
 `DEBUG_EVENTS: Channel<CriticalSectionRawMutex, DebugEvent, 16>` に `try_send` する。時刻は各タスクで `Instant::now()` から取る（両コアで同じタイマーを使っているので、フレームの時刻と比べられる）。
+
+- EVENT は PC がポートを開いている間だけキューに入れて送る。`stop` の後も送り続ける
+- キューがあふれた分は、FRAME と同じ `DEBUG_DROPPED` に数える
+- マーカーは `debug_stream_task` がコマンドを受けたときに、キューを通さずにその場で送る
 
 ### 3.5 送信タスク（Core0、`debug_stream_task`）
 
@@ -245,12 +248,24 @@ loopian_qubit/
 |---|---|---|
 | 0x01 | FRAME | `seq: u32`, `time_us: u32`, `nkeys: u8`, `valid: [u8; ceil(nkeys/8)]`, `raw: [u16; nkeys]` |
 | 0x02 | PROC | （段階 4 以降）`seq: u32`, `nkeys: u8`, キー毎の `filtered: u16`, `baseline: u16`, `output: u16`, `onset_ms: u32` |
-| 0x10 | EVENT | `time_us: u32`, `kind: u8`, `data: [u8; 4]`（kind 毎に意味を決める） |
+| 0x10 | EVENT | `time_us: u32`, `kind: u8`, `data: [u8; 4]`（kind 毎の意味は下の表） |
 | 0x20 | INFO | `version: [u8; 8]`, `build_date: [u8; 16]`, `nkeys: u8`, `scan_period_us: u32`, `dropped: u32` |
 | 0x7F | TEXT | UTF-8 の文字列（ファームからの任意のメッセージ） |
 
 - `nkeys` を毎フレーム持たせるので、6 キーでも 96 キーでも同じ形式で扱える
 - INFO は接続直後と `info` コマンドへの応答で送る。`dropped` はファーム側のキュー溢れの累計
+- `period` コマンドが成功したときも、応答として INFO（新しい周期を含む）を送る
+
+EVENT の `kind` と `data`（2026-09-30 決定。使わないバイトは 0）:
+
+| kind | イベント | data |
+|---|---|---|
+| 0x01 | Note On | `[0]` note, `[1]` velocity, `[2..4]` 位置 `u16`（キー位置 ×100。`TOUCH0-3` と同じ単位） |
+| 0x02 | Note Off | 同上 |
+| 0x03 | Note Moved（MIDI では Note Off として送るもの） | 同上 |
+| 0x30 | マーカー | `u32` の番号（`mark` コマンドの引数） |
+
+- FRAME と EVENT は別のキューから送るので、ストリームの中では時刻の順に並ぶとは限らない。PC 側は `time_us` で並べて扱う
 - INFO の `version` には `BUILD_VERSION`（例 `v0.3.0`）、`build_date` には `BUILD_DATE`（`yy-mm-dd`）を入れ、余りは 0 で埋める（`build.rs` が埋め込む値）
 
 ### 5.2 PC → ファーム（テキスト）
@@ -293,7 +308,7 @@ USB フルスピードの CDC で実用上 500KB/s 以上は出せるので、�
 | 4 | ファームも `touch_algo` を使うようにする。PROC 送信、`set` コマンド | ファームの結果が PC 側と一致することを確かめ、実機で演奏して確認する |
 | 5 | 96 キー構成（PCA9544 あり）で段階 2〜4 を繰り返す | 16 倍の構成で、周期・帯域・アルゴリズムが問題ないことを確かめる |
 
-段階 1 は、**ファームを先に作ってコミットし、その後で PC アプリに進む**（2026-09-30 決定）。シリアルターミナルは使わないので、ファームの実機での確認は PC アプリができてから行う。ファームだけの時点では、ビルドと clippy が通ることまでを確かめる。
+段階 1 は、**ファームを先に作ってコミットし、その後で PC アプリに進む**（2026-09-30 決定）。段階 2 もファームを先に作り、PC アプリは段階 1・2 の分をまとめて作る（同日決定）。シリアルターミナルは使わないので、ファームの実機での確認は PC アプリができてから行う。ファームだけの時点では、ビルドと clippy が通ることまでを確かめる。
 
 PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`touch_algo` のチェックを CI に入れるか（§4.5）は、PC アプリを実装するときに決めて、この設計書に書き足す。
 
@@ -325,6 +340,23 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 - **切断の判定**: DTR が落ちた・`read_packet` がエラー（USB の切断）・`write_packet` が 100ms でタイムアウト、のいずれか。切断したら最初に戻って DTR を待つ。書き込みのタイムアウトで DTR が立ったままのときは、すぐに接続し直して INFO を送り、`start` を受ける前の状態から始める。PC アプリは INFO を受けたら `start` を送り直せばよい
 - **接続の始め**に、前の接続で `DEBUG_FRAMES` に残ったフレームを捨てる
 - エラーコード 25 を `error::SPAWN_DEBUG_STREAM` として定義した（`debug_stream` のときだけ）
+
+**段階 2（ファーム）**（2026-09-30）
+
+- **スキャン周期**
+    - `constants.rs` の `SCAN_PERIOD_MS`（ms）を `SCAN_PERIOD_US`（µs、既定値の const）にした。`debug_stream` では 2000、無いときは 10000
+    - 実行中の周期は `shared.rs` の `SCAN_PERIOD_SETTING_US`（Atomic、非公開）に持ち、`scan_period_us()` で読み、`set_scan_period_us()` で変える。§3.3 で `SCAN_PERIOD_US`（Atomic）と書いた名前は、既定値の const に使った。`debug_stream` が無いときは `scan_period_us()` は const を返すだけ
+    - 選べる周期は `SCAN_PERIODS_US`。`ANALYSIS_DIVIDER`（const）は `analysis_divider(周期)`（const fn）にした。10ms を周期で割り、0 になる（20ms）ときは 1
+    - `touch_task` は `ticker.next()` の直後に周期を確かめ、変わっていたら `Ticker` を作り直す。その周期のスキャンはそのまま行い、次の周期から新しい間隔になる。`seq`（`frame`）は続けて数える
+- **EVENT**
+    - `DebugEvent`・`DEBUG_EVENTS`（容量 16）を `shared.rs` に置いた
+    - `tasks::debug_stream::queue_event()` で入れる。PC がポートを開いている間だけ入れるため、`DEBUG_CONNECTED`（Atomic）を追加した。`debug_stream_task` が DTR を確かめた後に true、切断で false にする。接続の始めに、前の接続で残ったイベントを捨てる
+    - Note のイベントは `touch_task` の MIDI コールバックで、チャンネルを付ける前の status（`RINGLED_CMD_TX_ON` / `OFF` / `MOVED`）から kind を決める。位置は `(location × 100) as u16`
+    - `debug_stream_task` は `select4` で FRAME・EVENT・コマンドの受信・DTR の変化を待つ
+- **コマンド**
+    - `period <µs>`: 成功したら INFO を返す。選べない値のときは TEXT で `error: period must be 2000, 5000, 10000 or 20000` を返す（数値でないときは下の `unknown command`）
+    - `mark <番号>`: 番号は `u32`。EVENT（kind 0x30）をその場で送り、TEXT の応答は返さない
+    - 引数が要るコマンドに引数が無い・数値でない、引数の要らないコマンドに引数がある、ときは `error: unknown command: <行>` を返す
 
 ## 7. 96 キーに戻すときのための配慮
 

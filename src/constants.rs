@@ -10,15 +10,24 @@ pub const CORE1_STACK_SIZE: usize = 16384;
 
 // タッチのスキャン周期と解析周期
 // QubitTouch の時間に関する定数は 10ms 毎に呼ばれる前提なので、解析は 10ms 毎に行う。
-// スキャン周期を短くする場合は、ANALYSIS_DIVIDER フレームに 1 回解析する（10 の約数に限る）
-// debug_stream では、チップの更新（8ms 周期）より速く読んで観察するため 2ms にする（doc/debug_env.md §3.3）
+// スキャン周期を短くする場合は、analysis_divider() フレームに 1 回解析する
+// debug_stream では、チップの更新（8ms 周期）より速く読んで観察するため既定を 2ms にし、
+// PC からのコマンドで SCAN_PERIODS_US のどれかに変えられる（doc/debug_env.md §3.3）
 #[cfg(not(feature = "debug_stream"))]
-pub const SCAN_PERIOD_MS: u64 = 10;
+pub const SCAN_PERIOD_US: u32 = 10_000; // スキャン周期の既定値
 #[cfg(feature = "debug_stream")]
-pub const SCAN_PERIOD_MS: u64 = 2;
-pub const ANALYSIS_PERIOD_MS: u64 = 10;
-pub const ANALYSIS_DIVIDER: u32 = (ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS) as u32;
-const _: () = assert!(ANALYSIS_PERIOD_MS.is_multiple_of(SCAN_PERIOD_MS));
+pub const SCAN_PERIOD_US: u32 = 2_000;
+#[cfg(feature = "debug_stream")]
+pub const SCAN_PERIODS_US: [u32; 4] = [2_000, 5_000, 10_000, 20_000]; // PC から選べる周期
+pub const ANALYSIS_PERIOD_US: u32 = 10_000;
+const _: () = assert!(ANALYSIS_PERIOD_US.is_multiple_of(SCAN_PERIOD_US));
+
+/// 解析の間引き（何フレームに 1 回解析するか）。
+/// 周期が 10ms より長い（20ms）ときは毎フレーム解析する。このとき QubitTouch の時間の計算はずれる
+pub const fn analysis_divider(scan_period_us: u32) -> u32 {
+    let divider = ANALYSIS_PERIOD_US / scan_period_us;
+    if divider == 0 { 1 } else { divider }
+}
 // 起動後、この時間はスキャンだけを行い、解析（ノートの生成）をしない。
 // read_touch はチップの基準値を最初のスキャンの後に初めて読むため、最初のフレームは基準値 0 で全キーが大きな値になる。
 // また AT42QT1070 自身も電源投入から 230ms 未満で基準値を校正する（データシート §6.5 TD）。

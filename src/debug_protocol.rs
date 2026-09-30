@@ -8,9 +8,10 @@
 //! 形式は doc/debug_env.md §5.1。すべてリトルエンディアン。
 //! `0xA5 0x5A type len(u16) payload crc8`。crc8 は type・len・payload にかける（CRC-8/ATM）
 use crate::constants::TOTAL_QT_KEYS;
-use crate::shared::DebugFrame;
+use crate::shared::{DebugEvent, DebugFrame};
 
 pub const TYPE_FRAME: u8 = 0x01;
+pub const TYPE_EVENT: u8 = 0x10;
 pub const TYPE_INFO: u8 = 0x20;
 pub const TYPE_TEXT: u8 = 0x7f;
 
@@ -75,6 +76,15 @@ impl Packet {
         for raw in frame.raw.iter() {
             self.push(&raw.to_le_bytes());
         }
+        self.finish()
+    }
+
+    /// EVENT: time_us, kind, data [u8; 4]
+    pub fn event(&mut self, event: &DebugEvent) -> &[u8] {
+        *self = Self::start(TYPE_EVENT);
+        self.push(&event.time_us.to_le_bytes());
+        self.push(&[event.kind]);
+        self.push(&event.data);
         self.finish()
     }
 
