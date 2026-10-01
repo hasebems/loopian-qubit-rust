@@ -1,7 +1,7 @@
 use embassy_rp::gpio::Input;
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::I2C0;
-use embassy_time::{Duration, Instant, Timer, with_timeout};
+use embassy_time::{Duration, Timer, with_timeout};
 use portable_atomic::Ordering;
 
 use crate::devices::ssd1306::{Oled, OledBuffer};
@@ -28,7 +28,7 @@ pub async fn ui_task(
     switch1: Input<'static>,
     switch2: Input<'static>,
 ) {
-    use ui::oled_display::{GraphicsDisplay, SETTING_PAGE, next_page, prev_page};
+    use ui::oled_display::{DrawPacer, GraphicsDisplay, SETTING_PAGE, next_page, prev_page};
 
     let mut oled = Oled::new();
     let mut buffer = OledBuffer::new();
@@ -53,7 +53,8 @@ pub async fn ui_task(
     }
 
     // 初期画面表示
-    gui.draw_bringup_screen(&mut buffer);
+    gui.draw_bringup_screen(&mut buffer, &mut DrawPacer::new())
+        .await;
     flush(&oled, &buffer, &mut i2c).await;
 
     loop {
@@ -110,9 +111,11 @@ pub async fn ui_task(
         // 描画と転送は DRAW_DIVIDER 回に 1 回。スイッチ操作でページや表示が変わったときは、反応を遅らせないようすぐに描く。
         // counter は SWITCH_POLL_MS 毎に進めるので、点滅などの表示の時間は描画の頻度に関係しない
         if page_changed || counter.is_multiple_of(DRAW_DIVIDER) {
-            let draw_start = Instant::now();
-            gui.tick(&mut buffer, counter);
-            UI_DRAW_TIME.record(draw_start.elapsed().as_micros() as u32);
+            // 描画はテキスト 1 行・図形 1 つ毎に他のタスクに順番を譲る。
+            // UI_DRAW_TIME には、譲らずに走った最長の区間（1 回に Core0 を止めた時間）を記録する
+            let mut pacer = DrawPacer::new();
+            gui.tick(&mut buffer, counter, &mut pacer).await;
+            UI_DRAW_TIME.record(pacer.finish());
 
             // 描画済みバッファを転送
             flush(&oled, &buffer, &mut i2c).await;

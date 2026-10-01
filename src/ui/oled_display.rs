@@ -1,10 +1,12 @@
 use crate::constants::*;
 use core::fmt::Write;
+use embassy_time::Instant;
 use embedded_graphics::image::{Image, ImageRaw};
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_10X20};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::Styled;
 use embedded_graphics::primitives::{
     Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, Triangle,
 };
@@ -36,6 +38,57 @@ pub fn prev_page(page: u8) -> u8 {
     NORMAL_PAGES[(idx + NORMAL_PAGES.len() - 1) % NORMAL_PAGES.len()]
 }
 
+/// 描画の途中で他のタスクに順番を譲り、譲らずに走った区間のうち最長の時間を測る
+/// （doc/task_architecture.md §4.4.1）。
+/// 描画は await の無い CPU 処理で、その間 Core0 の他のタスク（MIDI 送信・RingLED）が止まるため、
+/// テキスト 1 行・図形 1 つ毎に譲って、1 回に止める時間を短くする
+pub struct DrawPacer {
+    segment_start: Instant,
+    longest_us: u32,
+}
+
+impl DrawPacer {
+    pub fn new() -> Self {
+        Self {
+            segment_start: Instant::now(),
+            longest_us: 0,
+        }
+    }
+
+    /// ここまでの区間の時間を測り、他のタスクに順番を譲る
+    pub async fn yield_now(&mut self) {
+        self.end_segment();
+        embassy_futures::yield_now().await;
+        self.segment_start = Instant::now();
+    }
+
+    fn end_segment(&mut self) {
+        let us = self.segment_start.elapsed().as_micros() as u32;
+        self.longest_us = self.longest_us.max(us);
+    }
+
+    /// 描画の終わりに呼ぶ。最後の区間も含めた、最長の区間の時間（us）を返す
+    pub fn finish(mut self) -> u32 {
+        self.end_segment();
+        self.longest_us
+    }
+}
+
+/// 1 つ描いてから、他のタスクに順番を譲る
+async fn draw<D>(buffer: &mut OledBuffer, pacer: &mut DrawPacer, item: &D)
+where
+    D: Drawable<Color = BinaryColor>,
+{
+    let _ = item.draw(buffer);
+    pacer.yield_now().await;
+}
+
+/// 画面の外枠（128x64）
+fn outline_frame() -> Styled<Rectangle, PrimitiveStyle<BinaryColor>> {
+    Rectangle::new(Point::new(0, 0), Size::new(128, 64))
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+}
+
 pub struct GraphicsDisplay {
     page: u8,
     step: u8,
@@ -55,40 +108,59 @@ impl GraphicsDisplay {
         self.page = page; // 14 demo pages
     }
 
-    pub fn draw_bringup_screen(&self, buffer: &mut OledBuffer) {
+    pub async fn draw_bringup_screen(&self, buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
         buffer.clear();
-        let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
-            .into_styled(outline)
-            .draw(buffer);
+        draw(buffer, pacer, &outline_frame()).await;
 
         let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
         let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-        let _ = Text::new("Loopian::", Point::new(5, 20), style_small).draw(buffer);
-        let _ = Text::new("QUBIT", Point::new(64, 20), style_big).draw(buffer);
-        let _ = Text::new(
-            concat!("build: ", env!("BUILD_DATE")),
-            Point::new(30, 44),
-            style_small,
+        draw(
+            buffer,
+            pacer,
+            &Text::new("Loopian::", Point::new(5, 20), style_small),
         )
-        .draw(buffer);
-        let _ = Text::new(
-            concat!("       ", env!("BUILD_VERSION")),
-            Point::new(30, 56),
-            style_small,
+        .await;
+        draw(
+            buffer,
+            pacer,
+            &Text::new("QUBIT", Point::new(64, 20), style_big),
         )
-        .draw(buffer);
+        .await;
+        let build_date = concat!("build: ", env!("BUILD_DATE"));
+        draw(
+            buffer,
+            pacer,
+            &Text::new(build_date, Point::new(30, 44), style_small),
+        )
+        .await;
+        let version = concat!("       ", env!("BUILD_VERSION"));
+        draw(
+            buffer,
+            pacer,
+            &Text::new(version, Point::new(30, 56), style_small),
+        )
+        .await;
     }
 
-    /// Executes a single demo step and returns the suggested delay (ms) before the next step.
-    pub fn tick(&mut self, buffer: &mut OledBuffer, counter: u32) {
+    /// 今のページを描く。テキスト 1 行・図形 1 つ毎に他のタスクに順番を譲る
+    pub async fn tick(&mut self, buffer: &mut OledBuffer, counter: u32, pacer: &mut DrawPacer) {
         match self.page {
-            0 => self.draw_bringup_screen(buffer),
-            1 => display1(buffer, counter),
-            2 => display2(buffer),
-            3 => display3(buffer),
-            4 => display4(buffer, counter),
-            5 => display_diag(buffer),
+            0 => self.draw_bringup_screen(buffer, pacer).await,
+            1 => display1(buffer, counter, pacer).await,
+            2 => display2(buffer, pacer).await,
+            3 => display3(buffer, pacer).await,
+            4 => display4(buffer, counter, pacer).await,
+            5 => display_diag(buffer, pacer).await,
+            _ => {
+                // デモのページは開発用なので同期のまま描き、描く前に 1 回だけ譲る
+                pacer.yield_now().await;
+                self.tick_demo(buffer);
+            }
+        }
+    }
+
+    fn tick_demo(&mut self, buffer: &mut OledBuffer) {
+        match self.page {
             10 => demo_lines(buffer),
             11 => demo_rects(buffer),
             12 => demo_filled_rects(buffer),
@@ -119,164 +191,158 @@ impl GraphicsDisplay {
     }
 }
 
-fn display1(buffer: &mut OledBuffer, counter: u32) {
+async fn display1(buffer: &mut OledBuffer, counter: u32, pacer: &mut DrawPacer) {
     buffer.clear();
-
-    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
-        .into_styled(outline)
-        .draw(buffer);
+    draw(buffer, pacer, &outline_frame()).await;
 
     //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
 
     let mut text1: String<32> = String::new();
     let _ = write!(text1, "Cntr: {}", counter);
-    let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text1, Point::new(6, 12), style_small),
+    )
+    .await;
 
-    let ad_value1 = AD_VALUE0.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, 0, ad_value1);
-    let ad_value2 = AD_VALUE1.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, 1, ad_value2);
-    let ad_value3 = AD_VALUE2.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, 2, ad_value3);
-    let ad_value4 = AD_VALUE3.load(core::sync::atomic::Ordering::Relaxed);
-    draw_bar(buffer, 3, ad_value4);
+    for (number, ad_value) in [&AD_VALUE0, &AD_VALUE1, &AD_VALUE2, &AD_VALUE3]
+        .iter()
+        .enumerate()
+    {
+        let value = ad_value.load(core::sync::atomic::Ordering::Relaxed);
+        draw_bar(buffer, number as i32, value);
+        pacer.yield_now().await;
+    }
 
     text1.clear();
     let _ = write!(text1, "Prs:");
-    let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text1, Point::new(6, 24), style_small),
+    )
+    .await;
 
     let pressure = PRESSURE.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
     let _ = write!(text1, "Calc.Prs: {:>6}", pressure);
-    let _ = Text::new(&text1, Point::new(6, 40), style_small).draw(buffer);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text1, Point::new(6, 40), style_small),
+    )
+    .await;
 
     let vib = DEBUG_VALUE.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
     let _ = write!(text1, "Vibrato: {}", vib);
-    let _ = Text::new(&text1, Point::new(6, 52), style_small).draw(buffer);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text1, Point::new(6, 52), style_small),
+    )
+    .await;
 }
 
-fn display2(buffer: &mut OledBuffer) {
+async fn display2(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
     buffer.clear();
-
-    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
-        .into_styled(outline)
-        .draw(buffer);
+    draw(buffer, pacer, &outline_frame()).await;
 
     //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
 
+    let points = [&POINT0, &POINT1, &POINT2, &POINT3, &POINT4, &POINT5];
     let mut text1: String<32> = String::new();
-    let p0 = POINT0.load(core::sync::atomic::Ordering::Relaxed);
-    let _ = write!(text1, "Point0: {}", p0);
-    let _ = Text::new(&text1, Point::new(6, 10), style_small).draw(buffer);
-
-    let p1 = POINT1.load(core::sync::atomic::Ordering::Relaxed);
-    text1.clear();
-    let _ = write!(text1, "Point1: {}", p1);
-    let _ = Text::new(&text1, Point::new(6, 20), style_small).draw(buffer);
-
-    let p2 = POINT2.load(core::sync::atomic::Ordering::Relaxed);
-    text1.clear();
-    let _ = write!(text1, "Point2: {}", p2);
-    let _ = Text::new(&text1, Point::new(6, 30), style_small).draw(buffer);
-
-    let p3 = POINT3.load(core::sync::atomic::Ordering::Relaxed);
-    text1.clear();
-    let _ = write!(text1, "Point3: {}", p3);
-    let _ = Text::new(&text1, Point::new(6, 40), style_small).draw(buffer);
-
-    let p4 = POINT4.load(core::sync::atomic::Ordering::Relaxed);
-    text1.clear();
-    let _ = write!(text1, "Point4: {}", p4);
-    let _ = Text::new(&text1, Point::new(6, 50), style_small).draw(buffer);
-
-    let p5 = POINT5.load(core::sync::atomic::Ordering::Relaxed);
-    text1.clear();
-    let _ = write!(text1, "Point5: {}", p5);
-    let _ = Text::new(&text1, Point::new(6, 60), style_small).draw(buffer);
+    for (i, point) in points.iter().enumerate() {
+        let value = point.load(core::sync::atomic::Ordering::Relaxed);
+        text1.clear();
+        let _ = write!(text1, "Point{}: {}", i, value);
+        let y = 10 + 10 * i as i32;
+        draw(
+            buffer,
+            pacer,
+            &Text::new(&text1, Point::new(6, y), style_small),
+        )
+        .await;
+    }
 }
 
-fn display3(buffer: &mut OledBuffer) {
+async fn display3(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
     buffer.clear();
-
-    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
-        .into_styled(outline)
-        .draw(buffer);
+    draw(buffer, pacer, &outline_frame()).await;
 
     //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
 
+    let touches = [&TOUCH0, &TOUCH1, &TOUCH2, &TOUCH3];
     let mut text1: String<32> = String::new();
-    let p0 = TOUCH0.load(core::sync::atomic::Ordering::Relaxed);
-    if (0..10000).contains(&p0) {
-        let _ = write!(text1, "Touch1: {}", p0);
-    } else {
-        let _ = write!(text1, "Touch1: ---");
+    for (i, touch) in touches.iter().enumerate() {
+        let value = touch.load(core::sync::atomic::Ordering::Relaxed);
+        text1.clear();
+        if (0..10000).contains(&value) {
+            let _ = write!(text1, "Touch{}: {}", i + 1, value);
+        } else {
+            let _ = write!(text1, "Touch{}: ---", i + 1);
+        }
+        let y = 12 + 12 * i as i32;
+        draw(
+            buffer,
+            pacer,
+            &Text::new(&text1, Point::new(6, y), style_small),
+        )
+        .await;
     }
-    let _ = Text::new(&text1, Point::new(6, 12), style_small).draw(buffer);
-
-    text1.clear();
-    let p1 = TOUCH1.load(core::sync::atomic::Ordering::Relaxed);
-    if (0..10000).contains(&p1) {
-        let _ = write!(text1, "Touch2: {}", p1);
-    } else {
-        let _ = write!(text1, "Touch2: ---");
-    }
-    let _ = Text::new(&text1, Point::new(6, 24), style_small).draw(buffer);
-
-    text1.clear();
-    let p2 = TOUCH2.load(core::sync::atomic::Ordering::Relaxed);
-    if (0..10000).contains(&p2) {
-        let _ = write!(text1, "Touch3: {}", p2);
-    } else {
-        let _ = write!(text1, "Touch3: ---");
-    }
-    let _ = Text::new(&text1, Point::new(6, 36), style_small).draw(buffer);
-
-    text1.clear();
-    let p3 = TOUCH3.load(core::sync::atomic::Ordering::Relaxed);
-    if (0..10000).contains(&p3) {
-        let _ = write!(text1, "Touch4: {}", p3);
-    } else {
-        let _ = write!(text1, "Touch4: ---");
-    }
-    let _ = Text::new(&text1, Point::new(6, 48), style_small).draw(buffer);
 }
 
 /// 診断ページ: 処理時間（us, 最小/平均/最大）と周期超過・MIDI 送信キューの状況
-/// 最小・最大と回数は、設定画面に入ったときにリセットされる
-fn display_diag(buffer: &mut OledBuffer) {
+/// 最小・最大と回数は、設定画面に入ったときにリセットされる。
+/// Drw は描画 1 回のうち、譲らずに走った最長の区間（1 回に Core0 を止めた時間）
+async fn display_diag(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
     use core::sync::atomic::Ordering;
     buffer.clear();
 
     let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let mut text: String<32> = String::new();
-    let mut line = |text: &String<32>, y: i32| {
-        let _ = Text::new(text, Point::new(0, y), style_small).draw(buffer);
-    };
 
     let _ = write!(text, "us  min/avg/max");
-    line(&text, 8);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 8), style_small),
+    )
+    .await;
 
     let (min, avg, max) = SCAN_TIME.get();
     text.clear();
     let _ = write!(text, "Scn{:>5}/{:>5}/{:>5}", min, avg, max);
-    line(&text, 18);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 18), style_small),
+    )
+    .await;
 
     let (min, avg, max) = ANALYSIS_TIME.get();
     text.clear();
     let _ = write!(text, "Anl{:>5}/{:>5}/{:>5}", min, avg, max);
-    line(&text, 28);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 28), style_small),
+    )
+    .await;
 
     let (min, avg, max) = UI_DRAW_TIME.get();
     text.clear();
     let _ = write!(text, "Drw{:>5}/{:>5}/{:>5}", min, avg, max);
-    line(&text, 38);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 38), style_small),
+    )
+    .await;
 
     text.clear();
     let _ = write!(
@@ -286,50 +352,66 @@ fn display_diag(buffer: &mut OledBuffer) {
         MIDI_TX_MAX_USED.load(Ordering::Relaxed),
         MIDI_TX_OVERFLOW.load(Ordering::Relaxed)
     );
-    line(&text, 50);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 50), style_small),
+    )
+    .await;
 
     text.clear();
     let _ = write!(text, "Err {}", error::get());
-    line(&text, 60);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 60), style_small),
+    )
+    .await;
 }
 
-fn display4(buffer: &mut OledBuffer, counter: u32) {
+async fn display4(buffer: &mut OledBuffer, counter: u32, pacer: &mut DrawPacer) {
     buffer.clear();
-
-    let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 64))
-        .into_styled(outline)
-        .draw(buffer);
+    draw(buffer, pacer, &outline_frame()).await;
 
     //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
 
     let mut text: String<32> = String::new();
     let _ = write!(text, "Piano");
-    let _ = Text::new(&text, Point::new(12, 18), style_small).draw(buffer);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(12, 18), style_small),
+    )
+    .await;
 
     text.clear();
     let _ = write!(text, "Violin");
-    let _ = Text::new(&text, Point::new(12, 36), style_small).draw(buffer);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(12, 36), style_small),
+    )
+    .await;
 
     text.clear();
     let _ = write!(text, "up/down   quit");
-    let _ = Text::new(&text, Point::new(20, 56), style_small).draw(buffer);
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(20, 56), style_small),
+    )
+    .await;
 
     let work_mode = WORK_MODE
         .load(core::sync::atomic::Ordering::Relaxed)
         .try_into()
         .unwrap_or(WorkMode::Piano);
     if counter % 10 < 5 {
-        if work_mode == WorkMode::Piano {
-            let _ = Rectangle::new(Point::new(8, 10), Size::new(100, 14))
-                .into_styled(outline)
-                .draw(buffer);
-        } else {
-            let _ = Rectangle::new(Point::new(8, 27), Size::new(100, 14))
-                .into_styled(outline)
-                .draw(buffer);
-        }
+        let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+        let y = if work_mode == WorkMode::Piano { 10 } else { 27 };
+        let cursor = Rectangle::new(Point::new(8, y), Size::new(100, 14)).into_styled(outline);
+        draw(buffer, pacer, &cursor).await;
     }
 }
 

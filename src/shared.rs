@@ -103,7 +103,7 @@ impl TimeStat {
 
 pub static SCAN_TIME: TimeStat = TimeStat::new(); // タッチのスキャン時間: touch_task
 pub static ANALYSIS_TIME: TimeStat = TimeStat::new(); // QubitTouch の解析時間: touch_task
-pub static UI_DRAW_TIME: TimeStat = TimeStat::new(); // OLED の描画時間（転送を除く）: ui_task
+pub static UI_DRAW_TIME: TimeStat = TimeStat::new(); // OLED の描画で 1 回に Core0 を止めた最長の時間（転送を除く）: ui_task
 // スキャン＋解析が周期 (scan_period_us()) を超えた回数: touch_task
 pub static PERIOD_OVERRUN: AtomicU32 = AtomicU32::new(0);
 // MIDI_TX の最大使用数とあふれた回数: queue_midi (touch_task, pressure_task)

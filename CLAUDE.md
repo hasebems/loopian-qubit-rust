@@ -57,7 +57,7 @@ cd tools/qubit_monitor && cargo run --example probe # GUI 無しでファーム�
 - `midi_rx_task`: 受信した Note On/Off を `RINGLED_RX_BITS` に反映（Violin モードでは無視）
 - `pressure_task`: 10ms 毎に ADC 3ch をサンプリングし、`PRESSURE` を算出。Violin モードの CC11 (Expression) と、モードに入ったときの All Sound Off を `MIDI_TX` へ
 - `ringled_task`: 20ms 毎に `TOUCH0-3` と `RINGLED_RX_BITS` を読んで NeoPixel を描画（書き込みのタイムアウトは 15ms）
-- `ui_task`: 100ms 毎にスイッチを判定してページ / 動作モードを切り替え、OLED は 200ms 毎（5fps）に描画して I2C0 で転送。描画は `await` の無い CPU 処理（約 3ms）で、その間 Core0 の他のタスクは待たされる
+- `ui_task`: 100ms 毎にスイッチを判定してページ / 動作モードを切り替え、OLED は 200ms 毎（5fps）に描画して I2C0 で転送。描画（1 画面 約 3ms）はテキスト 1 行・図形 1 つ毎に `yield_now` で他のタスクに順番を譲る（`DrawPacer`、`doc/task_architecture.md` §4.4.1）。診断ページの `Drw` は 1 回に Core0 を止めた最長の時間
 - `status_led_task`: 内蔵 LED（ハートビート / エラーコード）
 - `debug_stream_task`（`debug_stream` feature のみ）: `DEBUG_FRAMES` のタッチの生値を USB CDC で PC に送り、PC からのコマンドを受ける。この feature ではスキャン周期の既定が 2ms になり、PC の `period` コマンドで 2 / 5 / 10 / 20ms に変えられる。Note On/Off を EVENT として送る（`doc/debug_env.md`）
 
