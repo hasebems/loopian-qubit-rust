@@ -6,6 +6,7 @@ impl At42Qt1070 {
     const _STATUS: u8 = 2;
     const LP_MODE: u8 = 54;
     const MAX_DUR: u8 = 55;
+    const AVE_AKS_KEY6: u8 = 45;
 
     pub const fn new() -> Self {
         Self {}
@@ -19,6 +20,10 @@ impl At42Qt1070 {
         let i2cdata = [Self::LP_MODE, 0];
         i2c.write(Self::ADDR, &i2cdata).await?;
         let i2cdata = [Self::MAX_DUR, 0];
+        i2c.write(Self::ADDR, &i2cdata).await?;
+        // 使っていない key6 を無効にする（AVE = 0。データシート §2.3 の推奨）。測定するキーが減り、
+        // 全キーの測定時間が 8ms を超えて更新周期が延びるのを抑える
+        let i2cdata = [Self::AVE_AKS_KEY6, 0];
         i2c.write(Self::ADDR, &i2cdata).await
     }
 
