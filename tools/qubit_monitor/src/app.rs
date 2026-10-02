@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{
-    Bar, BarChart, HLine, Legend, Line, LineStyle, MarkerShape, Plot, PlotPoints, Points, VLine,
+    Bar, BarChart, HLine, Legend, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotPoints,
+    Points, VLine,
 };
 use touch_algo::{Params, State};
 
@@ -30,6 +31,10 @@ const PERIODS_US: [u32; 4] = [2_000, 5_000, 10_000, 20_000];
 /// 1 本の折れ線に描く点の上限の目安。超えたら区間毎の最小・最大に間引く
 const MAX_PLOT_POINTS: usize = 4000;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(33);
+/// 縦軸を固定するグラフ（下段・バー）で選べる範囲の上端。［+］で狭め、［−］で広げる
+const Y_SCALES: [f64; 8] = [10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0];
+/// 下段のグラフの下端は、上端のこの割合だけ負にする（delta の負の値も見えるように）
+const LOWER_NEGATIVE_RATIO: f64 = 0.2;
 
 const KEY_COLORS: [Color32; 8] = [
     Color32::from_rgb(0x4e, 0x79, 0xa7),
@@ -79,7 +84,9 @@ pub struct MonitorApp {
     show_baseline: bool,
     show_delta: bool,
     show_output: bool,
-    bars_output: bool, // バー表示に output を出す
+    bars_output: bool,  // バー表示に output を出す
+    lower_scale: usize, // 下段のグラフの縦軸（Y_SCALES の添字）
+    bars_scale: usize,  // バー表示の縦軸（Y_SCALES の添字）
 }
 
 impl MonitorApp {
@@ -114,6 +121,8 @@ impl MonitorApp {
             show_delta: true,
             show_output: true,
             bars_output: false,
+            lower_scale: 3, // 100
+            bars_scale: 4,  // 200
         }
     }
 
@@ -749,43 +758,52 @@ impl MonitorApp {
         if lower {
             let params = self.algo.params;
             let onset_default = params.noise_floor_default as f64 + params.onset_margin as f64;
-            Plot::new("algo")
-                .legend(Legend::default())
-                .link_axis("time_axis", [true, false])
-                .link_cursor("time_axis", [true, false])
-                .x_axis_label("時刻 [秒]")
-                .allow_drag(paused)
-                .allow_zoom(paused)
-                .allow_scroll(paused)
-                .show(ui, |plot_ui| {
-                    if !paused {
-                        plot_ui.set_plot_bounds_x(t0 as f64 / 1e6..=t1 as f64 / 1e6);
-                        plot_ui.set_auto_bounds([false, true]);
-                    }
-                    let gray = Color32::GRAY;
-                    plot_ui.hline(
-                        HLine::new("QUIET_THRESHOLD", params.quiet_threshold as f64).color(gray),
-                    );
-                    plot_ui.hline(
-                        HLine::new("ACTIVE_THRESHOLD", params.active_threshold as f64)
-                            .color(gray)
-                            .style(LineStyle::dashed_loose()),
-                    );
-                    plot_ui.hline(
-                        HLine::new("onset しきい値（noise_floor 既定値）", onset_default)
-                            .color(gray)
-                            .style(LineStyle::dotted_dense()),
-                    );
-                    for line in lower_lines {
-                        plot_ui.line(line);
-                    }
-                    for points in onset_points {
-                        plot_ui.points(points);
-                    }
-                    for vline in vlines {
-                        plot_ui.vline(vline);
-                    }
-                });
+            let height = ui.available_height();
+            ui.horizontal(|ui| {
+                y_scale_buttons(ui, &mut self.lower_scale);
+                let y_max = Y_SCALES[self.lower_scale];
+                // 縦軸は固定（ボタンで選ぶ）。一時停止中のドラッグ・拡大は横（時間）方向だけ
+                Plot::new("algo")
+                    .legend(Legend::default())
+                    .height(height)
+                    .link_axis("time_axis", [true, false])
+                    .link_cursor("time_axis", [true, false])
+                    .x_axis_label("時刻 [秒]")
+                    .allow_drag([paused, false])
+                    .allow_zoom([paused, false])
+                    .allow_scroll([paused, false])
+                    .show(ui, |plot_ui| {
+                        if !paused {
+                            plot_ui.set_plot_bounds_x(t0 as f64 / 1e6..=t1 as f64 / 1e6);
+                        }
+                        plot_ui.set_plot_bounds_y(-y_max * LOWER_NEGATIVE_RATIO..=y_max);
+                        plot_ui.set_auto_bounds([false, false]);
+                        let gray = Color32::GRAY;
+                        plot_ui.hline(
+                            HLine::new("QUIET_THRESHOLD", params.quiet_threshold as f64)
+                                .color(gray),
+                        );
+                        plot_ui.hline(
+                            HLine::new("ACTIVE_THRESHOLD", params.active_threshold as f64)
+                                .color(gray)
+                                .style(LineStyle::dashed_loose()),
+                        );
+                        plot_ui.hline(
+                            HLine::new("onset しきい値（noise_floor 既定値）", onset_default)
+                                .color(gray)
+                                .style(LineStyle::dotted_dense()),
+                        );
+                        for line in lower_lines {
+                            plot_ui.line(line);
+                        }
+                        for points in onset_points {
+                            plot_ui.points(points);
+                        }
+                        for vline in vlines {
+                            plot_ui.vline(vline);
+                        }
+                    });
+            });
         }
     }
 
@@ -1075,7 +1093,7 @@ impl MonitorApp {
                 }
                 None => Vec::new(),
             };
-            bar_plot(ui, "output", bars);
+            bar_plot(ui, "output", bars, &mut self.bars_scale);
             return;
         }
         let series = if self.show_corrected && !self.show_raw {
@@ -1097,7 +1115,7 @@ impl MonitorApp {
                     .name(format!("key{k}"))
             })
             .collect();
-        bar_plot(ui, "今の値", bars);
+        bar_plot(ui, "今の値", bars, &mut self.bars_scale);
     }
 }
 
@@ -1180,17 +1198,53 @@ fn param<N: egui::emath::Numeric>(
     ui.end_row();
 }
 
-fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>) {
-    Plot::new("bars")
-        .height(140.0)
-        .allow_drag(false)
-        .allow_zoom(false)
-        .allow_scroll(false)
-        .include_y(0.0)
-        .x_axis_label("キー")
-        .show(ui, |plot_ui| {
-            plot_ui.bar_chart(BarChart::new(name, bars).width(0.8))
-        });
+/// バー表示。縦軸は 0〜選んだ範囲に固定する
+fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>, scale: &mut usize) {
+    let nkeys = bars.len() as f64;
+    ui.horizontal(|ui| {
+        y_scale_buttons(ui, scale);
+        let y_max = Y_SCALES[*scale];
+        Plot::new("bars")
+            .height(140.0)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .x_axis_label("キー")
+            .show(ui, |plot_ui| {
+                plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                    [-0.5, 0.0],
+                    [nkeys.max(1.0) - 0.5, y_max],
+                ));
+                plot_ui.set_auto_bounds([false, false]);
+                plot_ui.bar_chart(BarChart::new(name, bars).width(0.8))
+            });
+    });
+}
+
+/// 縦軸の範囲を選ぶボタン（グラフの左に縦に並べる）。［+］で拡大（範囲を狭める）、［−］で広域（範囲を広げる）
+fn y_scale_buttons(ui: &mut egui::Ui, scale: &mut usize) {
+    ui.vertical(|ui| {
+        ui.set_width(40.0);
+        let zoom_in = ui
+            .add_enabled(
+                *scale > 0,
+                egui::Button::new("+").min_size(egui::vec2(32.0, 24.0)),
+            )
+            .on_hover_text("拡大（縦軸の範囲を狭める）");
+        if zoom_in.clicked() {
+            *scale -= 1;
+        }
+        ui.label(format!("{}", Y_SCALES[*scale]));
+        let zoom_out = ui
+            .add_enabled(
+                *scale + 1 < Y_SCALES.len(),
+                egui::Button::new("−").min_size(egui::vec2(32.0, 24.0)),
+            )
+            .on_hover_text("広域（縦軸の範囲を広げる）");
+        if zoom_out.clicked() {
+            *scale += 1;
+        }
+    });
 }
 
 fn histogram_plot(ui: &mut egui::Ui, id: &str, hist: &[(u64, u32)], bin_us: u64) {
