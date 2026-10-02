@@ -12,8 +12,6 @@
 /// 調整パラメータ（doc/touch_baseline.md §3.11）。既定値は設計書の仮の値
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Params {
-    /// hi/lo ずれとみなす増加量（前回値よりこれ以上大きければ 256 を引く）
-    pub hi_lo_jump: u16,
     /// 平滑化の移動平均のサンプル数（1..=MAX_SMOOTH_SAMPLES）
     pub smooth_samples: u8,
     /// 基準値の更新周期
@@ -56,7 +54,6 @@ pub struct Params {
 
 impl Params {
     pub const DEFAULT: Self = Self {
-        hi_lo_jump: 200,
         smooth_samples: 2,
         baseline_update_interval_ms: 20,
         acquire_ms: 300,
@@ -103,7 +100,6 @@ pub enum State {
 #[derive(Clone, Copy, Debug)]
 pub struct KeyState {
     // --- ノイズ除去（§3.3）
-    last_corrected: u16, // hi/lo ずれ補正をかけた前回の値（0: まだ無い）
     median: [u16; 3],
     median_len: u8,
     smooth: [u16; MAX_SMOOTH_SAMPLES],
@@ -135,7 +131,6 @@ pub struct KeyState {
 
 impl KeyState {
     pub const INITIAL: Self = Self {
-        last_corrected: 0,
         median: [0; 3],
         median_len: 0,
         smooth: [0; MAX_SMOOTH_SAMPLES],
@@ -214,16 +209,10 @@ impl KeyState {
         self.baseline_q = (self.baseline_q as i64 + step).clamp(0, (u16::MAX as i64) << 8) as u32;
     }
 
-    /// ノイズ除去（§3.3）。読めたサンプルだけ履歴に入れる
-    fn filter(&mut self, raw: u16, params: &Params) {
-        // 1. hi/lo ずれ補正（ファームの read_touch と同じ条件）
-        let mut value = raw;
-        if self.last_corrected != 0 && raw > self.last_corrected.saturating_add(params.hi_lo_jump) {
-            value = raw.saturating_sub(256);
-        }
-        self.last_corrected = value;
-
-        // 2. スパイク除去: 直近 3 サンプルのメディアン（そろうまでは最新の値）
+    /// ノイズ除去（§3.3）。読めたサンプルだけ履歴に入れる。
+    /// hi/lo ずれはファームの read_touch が読み直して正しい値にしてあるので、ここでは扱わない
+    fn filter(&mut self, value: u16, params: &Params) {
+        // 1. スパイク除去: 直近 3 サンプルのメディアン（そろうまでは最新の値）
         self.median = [self.median[1], self.median[2], value];
         self.median_len = (self.median_len + 1).min(3);
         let median = if self.median_len < 3 {
@@ -233,7 +222,7 @@ impl KeyState {
             a.max(b).min(a.min(b).max(c))
         };
 
-        // 3. 平滑化: 直近 smooth_samples サンプルの移動平均
+        // 2. 平滑化: 直近 smooth_samples サンプルの移動平均
         let n = (params.smooth_samples as usize).clamp(1, MAX_SMOOTH_SAMPLES);
         if self.smooth_len as usize > n {
             // サンプル数を減らしたとき
@@ -291,7 +280,7 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
 
     /// 1 スキャン分を処理する
     /// - `now_us`: スキャンの時刻（µs）
-    /// - `raw`: キー毎の生値（hi/lo ずれ補正の前）
+    /// - `raw`: キー毎の生値（hi/lo ずれはファームが読み直し済み）
     /// - `valid`: 読み取り成功フラグ（1 bit / キー）。失敗したキーは前回の filtered を使う
     /// - `calibrating`: 設定画面にいるか（false → true で校正に入り、true → false で戻る）
     pub fn process(&mut self, now_us: u32, raw: &[u16], valid: u128, calibrating: bool) {
@@ -576,21 +565,11 @@ mod tests {
         let mut sim = Sim::new();
         sim.run([900; N], 400, false);
         let mut raw = [900; N];
-        raw[1] = 990; // 単発のスパイク（hi/lo ずれの条件には当たらない）
+        raw[1] = 990; // 単発のスパイク
         sim.signal.process(sim.now, &raw, ALL, false);
         sim.now += STEP_US;
         sim.run([900; N], 8, false);
         assert_eq!(sim.key(1).filtered(), 900);
-    }
-
-    #[test]
-    fn hi_lo_jump_is_corrected() {
-        let mut sim = Sim::new();
-        sim.run([900; N], 400, false);
-        let mut raw = [900; N];
-        raw[0] = 900 + 256; // hi/lo ずれ
-        sim.run(raw, 40, false);
-        assert_eq!(sim.key(0).filtered(), 900);
     }
 
     #[test]

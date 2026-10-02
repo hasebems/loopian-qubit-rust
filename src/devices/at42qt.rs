@@ -23,7 +23,6 @@ impl At42Qt1070 {
     }
 
     /// 1キーの状態を読み取る
-    #[allow(dead_code)]
     pub async fn read_1key<I2C>(
         &mut self,
         i2c: &mut I2C,

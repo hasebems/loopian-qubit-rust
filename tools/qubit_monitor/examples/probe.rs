@@ -61,7 +61,7 @@ impl Probe {
             return;
         }
         let (t0, t1) = (self.store.time_us[from_frame], self.store.time_us[n - 1]);
-        let stats = self.store.stats(t0, t1, false);
+        let stats = self.store.stats(t0, t1);
         let iv = stats.interval_us;
         println!(
             "[{label}] フレーム {frames}  欠け {}  間隔 最小 {:.2} / 平均 {:.3} / 最大 {:.2} ms",
@@ -80,11 +80,10 @@ impl Probe {
             let changes =
                 qubit_monitor::store::Summary::of(&self.store.change_intervals(t0, t1, k));
             println!(
-                "    key{k}: 平均 {:.1} σ {:.2} p-p {} ずれ {}  値の更新間隔 平均 {:.2} ms ({} 回)",
+                "    key{k}: 平均 {:.1} σ {:.2} p-p {}  値の更新間隔 平均 {:.2} ms ({} 回)",
                 ks.mean,
                 ks.std,
                 ks.peak_to_peak,
-                ks.hi_lo_jumps,
                 changes.mean / 1000.0,
                 changes.count
             );
@@ -207,13 +206,12 @@ fn main() {
     }
 
     println!(
-        "== 合計: フレーム {}  欠け {}  CRC エラー {}  長さ違い {}  読み飛ばし {} バイト  ずれ補正 {}",
+        "== 合計: フレーム {}  欠け {}  CRC エラー {}  長さ違い {}  読み飛ばし {} バイト",
         p.store.frames_total,
         p.store.lost_frames,
         p.parser.crc_errors,
         p.parser.malformed,
-        p.parser.skipped_bytes,
-        p.store.hi_lo_corrections
+        p.parser.skipped_bytes
     );
     println!("   FRAME 以外に受け取ったパケット: {}", p.log.len());
 }

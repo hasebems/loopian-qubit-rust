@@ -10,27 +10,21 @@ pub const MAX_FRAMES: usize = 1_000_000;
 const MAX_EVENTS: usize = 100_000;
 const MAX_TEXTS: usize = 50;
 
-/// hi/lo ずれとみなす増加量。ファームの read_touch と同じ条件（raw > 前回 + 200 なら raw -= 256）
-pub const HI_LO_JUMP: u16 = 200;
-
 #[derive(Default)]
 pub struct Store {
     pub nkeys: usize,
     pub time_us: VecDeque<u64>, // 起動からの µs（一周を伸ばした値）
     pub seq: VecDeque<u32>,
     pub valid: VecDeque<u128>,
-    pub raw: Vec<VecDeque<u16>>,       // キー毎の生値
-    pub corrected: Vec<VecDeque<u16>>, // キー毎の、hi/lo ずれ補正をかけた値（ファームと同じ規則）
+    pub raw: Vec<VecDeque<u16>>, // キー毎の生値
     pub events: VecDeque<(u64, Event)>,
     pub info: Option<Info>,
     pub texts: VecDeque<String>, // ファームからの TEXT（新しいものが後ろ）
 
     // 累計の数（接続・読み込みのたびにリセット）
     pub frames_total: u64,
-    pub lost_frames: u64,       // seq の欠け（取りこぼし）
-    pub hi_lo_corrections: u64, // hi/lo ずれ補正をかけた回数（全キー）
+    pub lost_frames: u64, // seq の欠け（取りこぼし）
     last_seq: Option<u32>,
-    last_corrected: Vec<Option<u16>>,
     time: TimeExtender,
 }
 
@@ -68,26 +62,13 @@ impl Store {
                     self.valid.pop_front();
                     for k in 0..self.nkeys {
                         self.raw[k].pop_front();
-                        self.corrected[k].pop_front();
                     }
                 }
                 self.time_us.push_back(t);
                 self.seq.push_back(frame.seq);
                 self.valid.push_back(frame.valid);
                 for (k, &raw) in frame.raw.iter().enumerate() {
-                    let mut value = raw;
-                    if let Some(prev) = self.last_corrected[k]
-                        && prev != 0
-                        && raw > prev.saturating_add(HI_LO_JUMP)
-                    {
-                        value = raw.wrapping_sub(256);
-                        self.hi_lo_corrections += 1;
-                    }
-                    if frame.is_valid(k) {
-                        self.last_corrected[k] = Some(value);
-                    }
                     self.raw[k].push_back(raw);
-                    self.corrected[k].push_back(value);
                 }
             }
             Packet::Event(event) => {
@@ -114,8 +95,6 @@ impl Store {
         self.seq.clear();
         self.valid.clear();
         self.raw = vec![VecDeque::new(); nkeys];
-        self.corrected = vec![VecDeque::new(); nkeys];
-        self.last_corrected = vec![None; nkeys];
         self.last_seq = None;
     }
 
@@ -131,25 +110,18 @@ impl Store {
     }
 
     /// 時刻 [t0, t1] の統計
-    pub fn stats(&self, t0: u64, t1: u64, use_corrected: bool) -> Stats {
+    pub fn stats(&self, t0: u64, t1: u64) -> Stats {
         let range = self.range(t0, t1);
-        let series = if use_corrected {
-            &self.corrected
-        } else {
-            &self.raw
-        };
         let mut stats = Stats {
             frames: range.len(),
             ..Default::default()
         };
 
         // キー毎のノイズ（標準偏差・p-p）と、値が変わる間隔
-        for (k, values) in series.iter().enumerate() {
+        for (k, values) in self.raw.iter().enumerate() {
             let mut n = 0u64;
             let (mut sum, mut sum2) = (0f64, 0f64);
             let (mut min, mut max) = (u16::MAX, 0u16);
-            let mut hi_lo = 0u32;
-            let mut prev: Option<u16> = None;
             for i in range.clone() {
                 if !self.is_valid(i, k) {
                     continue;
@@ -160,14 +132,6 @@ impl Store {
                 sum2 += (v as f64) * (v as f64);
                 min = min.min(v);
                 max = max.max(v);
-                let r = self.raw[k][i];
-                if let Some(p) = prev
-                    && p != 0
-                    && r > p.saturating_add(HI_LO_JUMP)
-                {
-                    hi_lo += 1;
-                }
-                prev = Some(self.corrected[k][i]);
             }
             let mean = if n > 0 { sum / n as f64 } else { 0.0 };
             let var = if n > 1 {
@@ -180,7 +144,6 @@ impl Store {
                 mean,
                 std: var.max(0.0).sqrt(),
                 peak_to_peak: if n > 0 { max - min } else { 0 },
-                hi_lo_jumps: hi_lo,
             });
         }
 
@@ -254,7 +217,6 @@ pub struct KeyStats {
     pub mean: f64,
     pub std: f64,
     pub peak_to_peak: u16,
-    pub hi_lo_jumps: u32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -294,19 +256,16 @@ mod tests {
     }
 
     #[test]
-    fn counts_lost_frames_and_hi_lo() {
+    fn counts_lost_frames() {
         let mut store = Store::new();
         store.ingest(frame(0, 0, vec![500, 500]));
-        store.ingest(frame(1, 2000, vec![500, 760])); // key1: +260 → hi/lo ずれ
+        store.ingest(frame(1, 2000, vec![500, 502]));
         store.ingest(frame(4, 8000, vec![500, 505])); // seq 2, 3 が欠け
         assert_eq!(store.lost_frames, 2);
-        assert_eq!(store.hi_lo_corrections, 1);
-        assert_eq!(store.corrected[1][1], 504);
 
-        let stats = store.stats(0, 10_000, false);
+        let stats = store.stats(0, 10_000);
         assert_eq!(stats.frames, 3);
         assert_eq!(stats.lost_frames, 2);
-        assert_eq!(stats.keys[1].hi_lo_jumps, 1);
         assert_eq!(stats.interval_us.count, 1); // seq が連続しているのは 0→1 だけ
         assert_eq!(stats.interval_us.min, 2000);
     }

@@ -13,9 +13,7 @@ pub struct ReadTouch {
     reference: [u16; constants::TOTAL_QT_KEYS],
     reference_adjust: [u16; constants::TOTAL_QT_KEYS],
     reference_counter: usize,
-    // デバッグ用: 最後のスキャンの生値（hi/lo ずれ補正の前）と読み取り成功フラグ（1 bit / キー）
-    #[cfg(feature = "debug_stream")]
-    debug_raw: [u16; constants::TOTAL_QT_KEYS],
+    // デバッグ用: 最後のスキャンの読み取り成功フラグ（1 bit / キー）
     #[cfg(feature = "debug_stream")]
     debug_valid: u128,
 }
@@ -24,6 +22,12 @@ impl ReadTouch {
     const CH_CONVERSION: [u8; 4] = [3, 2, 1, 0];
     const AT42_READ_TIMEOUT_MS: u64 = 2;
     const INIT_I2C_TIMEOUT_MS: u64 = 3;
+    // 前回の値とこれ以上違えば、そのキーだけ読み直す。
+    // AT42QT1070 は 16bit の値の 2 バイトをまとめて固定しないので、上位を読んでから下位を読むまでの間に
+    // チップが値を更新し、256 の境目をまたぐと、約 ±256 ずれた値が読める（hi/lo ずれ。データシート 4.3.2 の Note）。
+    // 次の更新は 8ms 後なので、すぐに読み直せば正しい値が得られる。本当に大きく変化したときは
+    // 同じ値が読めるだけで害は無い。ずれは 256 前後なので、それより少し小さくする
+    const HI_LO_REREAD_DIFF: u16 = 220;
 
     fn channel_in_device(ch: u8) -> u8 {
         let num_channels = constants::PCA9544_NUM_CHANNELS;
@@ -52,8 +56,6 @@ impl ReadTouch {
             reference: [0u16; constants::TOTAL_QT_KEYS],
             reference_adjust: [0u16; constants::TOTAL_QT_KEYS],
             reference_counter: 0,
-            #[cfg(feature = "debug_stream")]
-            debug_raw: [0u16; constants::TOTAL_QT_KEYS],
             #[cfg(feature = "debug_stream")]
             debug_valid: 0,
         }
@@ -164,19 +166,29 @@ impl ReadTouch {
             .await;
 
             if let Ok(Ok(())) = read_result {
-                for (sid, rawd) in
-                    (start_ch..).zip(raw_data.iter().take(constants::AT42QT_KEYS_PER_DEVICE))
+                for (key, rawd) in raw_data
+                    .iter()
+                    .take(constants::AT42QT_KEYS_PER_DEVICE)
+                    .enumerate()
                 {
-                    let shifted_sid = Self::shifted_index(sid);
+                    let shifted_sid = Self::shifted_index(start_ch + key);
                     let mut raw = *rawd;
+                    let old = self.raw_value[shifted_sid];
+                    if old != 0 && raw.abs_diff(old) >= Self::HI_LO_REREAD_DIFF {
+                        // hi/lo ずれの疑い。このキーだけ読み直す。失敗したら前回の値を使う
+                        raw = match with_timeout(
+                            Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
+                            at42.read_1key(i2c, key as u8, false),
+                        )
+                        .await
+                        {
+                            Ok(Ok(value)) => value,
+                            _ => old,
+                        };
+                    }
                     #[cfg(feature = "debug_stream")]
                     {
-                        self.debug_raw[shifted_sid] = raw;
                         self.debug_valid |= 1u128 << shifted_sid;
-                    }
-                    let old = self.raw_value[shifted_sid];
-                    if old != 0 && raw > old + 200 {
-                        raw -= 256; // hiからloを読む間に数値が変化した場合の対策
                     }
                     self.raw_value[shifted_sid] = raw;
                     if work_mode_display {
@@ -228,10 +240,10 @@ impl ReadTouch {
         POINT5.store(self.raw_value[5], Ordering::Relaxed);
     }
 
-    /// デバッグ用: 最後のスキャンの生値（hi/lo ずれ補正の前）と読み取り成功フラグ。
+    /// デバッグ用: 最後のスキャンの生値（hi/lo ずれを読み直した後）と読み取り成功フラグ。
     /// 読み取りに失敗したキーはフラグが 0 で、生値は前回のまま
     #[cfg(feature = "debug_stream")]
     pub fn debug_raw(&self) -> (&[u16; constants::TOTAL_QT_KEYS], u128) {
-        (&self.debug_raw, self.debug_valid)
+        (&self.raw_value, self.debug_valid)
     }
 }

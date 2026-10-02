@@ -12,16 +12,14 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{
     Bar, BarChart, HLine, Legend, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotPoints,
-    Points, VLine,
+    Points,
 };
 use touch_algo::{Params, State};
 
 use qubit_monitor::algo::{self, AlgoRunner};
 use qubit_monitor::csv_export;
 use qubit_monitor::playback::{self, Player};
-use qubit_monitor::protocol::{
-    EVENT_MARKER, EVENT_NOTE_MOVED, EVENT_NOTE_OFF, EVENT_NOTE_ON, Packet, Parser,
-};
+use qubit_monitor::protocol::{Packet, Parser};
 use qubit_monitor::qlog;
 use qubit_monitor::serial::{self, Command, Link, Notice, PortEntry};
 use qubit_monitor::store::{self, Store};
@@ -69,13 +67,10 @@ pub struct MonitorApp {
     // 表示
     show_keys: Vec<bool>,
     show_raw: bool,
-    show_corrected: bool,
-    show_events: bool,
     span_s: f64,
     paused: bool,
     view_us: Option<(u64, u64)>, // 前回描いたグラフの時間の範囲（一時停止中の統計・描画に使う）
     stats_key: usize,            // 値の更新間隔を調べるキー
-    bars_minus_min: bool,        // バー表示で、表示範囲の最小値を引く
 
     // アルゴリズム（touch_algo、doc/debug_env.md §4.6）
     algo: AlgoRunner,
@@ -84,7 +79,6 @@ pub struct MonitorApp {
     show_baseline: bool,
     show_delta: bool,
     show_output: bool,
-    bars_output: bool,  // バー表示に output を出す
     lower_scale: usize, // 下段のグラフの縦軸（Y_SCALES の添字）
     bars_scale: usize,  // バー表示の縦軸（Y_SCALES の添字）
 }
@@ -107,20 +101,16 @@ impl MonitorApp {
             message: String::new(),
             show_keys: Vec::new(),
             show_raw: true,
-            show_corrected: false,
-            show_events: true,
             span_s: 5.0,
             paused: false,
             view_us: None,
             stats_key: 0,
-            bars_minus_min: true,
             algo: AlgoRunner::new(),
             algo_enabled: true,
             show_filtered: true,
             show_baseline: true,
             show_delta: true,
             show_output: true,
-            bars_output: false,
             lower_scale: 3, // 100
             bars_scale: 4,  // 200
         }
@@ -421,8 +411,6 @@ impl MonitorApp {
             let crc = crc + self.player.as_ref().map_or(0, |p| p.crc_errors);
             ui.label(format!("CRC エラー: {crc}"));
             ui.separator();
-            ui.label(format!("ずれ補正: {}", s.hi_lo_corrections));
-            ui.separator();
             if let Some(info) = &s.info {
                 ui.label(format!("キュー溢れ(ファーム): {}", info.dropped));
                 ui.separator();
@@ -552,8 +540,6 @@ impl MonitorApp {
         ui.separator();
         ui.label("系列");
         ui.checkbox(&mut self.show_raw, "raw（生値）");
-        ui.checkbox(&mut self.show_corrected, "補正後（hi/lo ずれ）");
-        ui.checkbox(&mut self.show_events, "イベント");
         ui.add_enabled_ui(self.algo_enabled, |ui| {
             ui.checkbox(&mut self.show_filtered, "filtered（ノイズ除去後）");
             ui.checkbox(&mut self.show_baseline, "baseline（基準値）");
@@ -575,11 +561,6 @@ impl MonitorApp {
         if self.paused {
             ui.label("一時停止中も受信と記録は続けます。グラフはドラッグ・拡大できます");
         }
-        ui.separator();
-        ui.checkbox(&mut self.bars_minus_min, "バー表示で表示範囲の最小値を引く");
-        ui.add_enabled_ui(self.algo_enabled, |ui| {
-            ui.checkbox(&mut self.bars_output, "バー表示に output を出す");
-        });
     }
 
     /// 今描く時間の範囲（µs）
@@ -608,7 +589,7 @@ impl MonitorApp {
         let algo_on = self.algo_enabled && self.algo.filtered.len() == self.store.nkeys;
         let algo_range = self.algo.range(t0, t1);
 
-        // 上段: raw・補正後・filtered・baseline
+        // 上段: raw・filtered・baseline
         let range = self.store.range(t0, t1);
         let mut lines = Vec::new();
         for k in (0..self.store.nkeys).filter(|&k| shown(k)) {
@@ -619,20 +600,6 @@ impl MonitorApp {
                 let points = decimate(&store.time_us, |i| raw[i] as f64, valid, range.clone());
                 lines.push(
                     Line::new(format!("key{k}"), PlotPoints::new(points)).color(key_color(k)),
-                );
-            }
-            if self.show_corrected {
-                let corrected = &store.corrected[k];
-                let points = decimate(
-                    &store.time_us,
-                    |i| corrected[i] as f64,
-                    valid,
-                    range.clone(),
-                );
-                lines.push(
-                    Line::new(format!("key{k} 補正後"), PlotPoints::new(points))
-                        .color(key_color(k))
-                        .style(LineStyle::dashed_loose()),
                 );
             }
             if algo_on && self.show_filtered {
@@ -665,8 +632,6 @@ impl MonitorApp {
                 );
             }
         }
-        let vlines = self.event_lines(t0, t1);
-
         // 下段: delta・output と、しきい値・onset
         let lower = algo_on && (self.show_delta || self.show_output);
         let mut lower_lines = Vec::new();
@@ -747,9 +712,6 @@ impl MonitorApp {
                 for line in lines {
                     plot_ui.line(line);
                 }
-                for vline in vlines.clone() {
-                    plot_ui.vline(vline);
-                }
             });
         let bounds = response.transform.bounds();
         let (x0, x1) = (bounds.min()[0].max(0.0), bounds.max()[0].max(0.0));
@@ -799,35 +761,9 @@ impl MonitorApp {
                         for points in onset_points {
                             plot_ui.points(points);
                         }
-                        for vline in vlines {
-                            plot_ui.vline(vline);
-                        }
                     });
             });
         }
-    }
-
-    /// 表示範囲のイベントの縦線
-    fn event_lines(&self, t0: u64, t1: u64) -> Vec<VLine> {
-        if !self.show_events {
-            return Vec::new();
-        }
-        self.store
-            .events
-            .iter()
-            .filter(|(t, _)| (t0..=t1).contains(t))
-            .map(|(t, event)| {
-                let (name, color) = match event.kind {
-                    EVENT_NOTE_ON => ("Note On", Color32::from_rgb(0x2c, 0xa0, 0x2c)),
-                    EVENT_NOTE_OFF => ("Note Off", Color32::from_rgb(0xd6, 0x27, 0x28)),
-                    EVENT_NOTE_MOVED => ("Note Moved", Color32::from_rgb(0xff, 0x7f, 0x0e)),
-                    EVENT_MARKER => ("マーカー", Color32::from_rgb(0x1f, 0x77, 0xb4)),
-                    _ => ("その他", Color32::GRAY),
-                };
-                let width = if event.kind == EVENT_MARKER { 2.5 } else { 1.0 };
-                VLine::new(name, *t as f64 / 1e6).color(color).width(width)
-            })
-            .collect()
     }
 
     // ------------------------------------------------------------------
@@ -946,7 +882,6 @@ impl MonitorApp {
                             0..=200,
                         );
                         param(ui, "NOISE_FLOOR_MAX", &mut p.noise_floor_max, 0..=500);
-                        param(ui, "HI_LO_JUMP", &mut p.hi_lo_jump, 0..=1000);
                     });
                     if ui.button("既定値に戻す").clicked() {
                         p = Params::DEFAULT;
@@ -970,9 +905,7 @@ impl MonitorApp {
         let Some((t0, t1)) = self.window_us() else {
             return;
         };
-        let stats = self
-            .store
-            .stats(t0, t1, self.show_corrected && !self.show_raw);
+        let stats = self.store.stats(t0, t1);
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.label(format!(
                 "範囲 {:.2} 秒  {} フレーム  欠け {}",
@@ -982,7 +915,7 @@ impl MonitorApp {
             ));
             ui.label("ノイズを見るときは、触れていない区間を表示してください");
             egui::Grid::new("key_stats").striped(true).show(ui, |ui| {
-                for h in ["キー", "平均", "σ", "p-p", "ずれ"] {
+                for h in ["キー", "平均", "σ", "p-p"] {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
@@ -991,7 +924,6 @@ impl MonitorApp {
                     ui.label(format!("{:.1}", ks.mean));
                     ui.label(format!("{:.2}", ks.std));
                     ui.label(format!("{}", ks.peak_to_peak));
-                    ui.label(format!("{}", ks.hi_lo_jumps));
                     ui.end_row();
                 }
             });
@@ -1066,56 +998,27 @@ impl MonitorApp {
     }
 
     // ------------------------------------------------------------------
-    //  下: 全キーの今の値
+    //  下: 全キーの今の output
     // ------------------------------------------------------------------
     fn bars(&mut self, ui: &mut egui::Ui) {
-        let store = &self.store;
-        let Some(last) = store.time_us.len().checked_sub(1) else {
-            return;
+        let nkeys = self.store.nkeys;
+        let algo_on = self.algo_enabled && self.algo.output.len() == nkeys;
+        // output（アルゴリズムの結果）の、表示範囲の最後の値（一時停止中は範囲の終わり）
+        let bars: Vec<Bar> = match self.window_us() {
+            Some((t0, t1)) if algo_on => {
+                let r = self.algo.range(t0, t1);
+                (0..nkeys)
+                    .map(|k| {
+                        let v = r.end.checked_sub(1).map_or(0, |i| self.algo.output[k][i]);
+                        Bar::new(k as f64, v as f64)
+                            .fill(key_color(k))
+                            .name(format!("key{k}"))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
         };
-        let range = self
-            .window_us()
-            .map(|(t0, t1)| store.range(t0, t1))
-            .unwrap_or(last..last + 1);
-        if self.algo_enabled && self.bars_output && self.algo.output.len() == store.nkeys {
-            // output（アルゴリズムの結果）の、表示範囲の最後の値
-            let bars: Vec<Bar> = match self.window_us() {
-                Some((t0, t1)) => {
-                    let r = self.algo.range(t0, t1);
-                    (0..store.nkeys)
-                        .map(|k| {
-                            let v = r.end.checked_sub(1).map_or(0, |i| self.algo.output[k][i]);
-                            Bar::new(k as f64, v as f64)
-                                .fill(key_color(k))
-                                .name(format!("key{k}"))
-                        })
-                        .collect()
-                }
-                None => Vec::new(),
-            };
-            bar_plot(ui, "output", bars, &mut self.bars_scale);
-            return;
-        }
-        let series = if self.show_corrected && !self.show_raw {
-            &store.corrected
-        } else {
-            &store.raw
-        };
-        let bars: Vec<Bar> = (0..store.nkeys)
-            .map(|k| {
-                // 表示範囲の最後の値（一時停止中は範囲の終わり）
-                let i = range.end.saturating_sub(1).min(last);
-                let mut v = series[k][i] as f64;
-                if self.bars_minus_min {
-                    let min = range.clone().map(|i| series[k][i]).min().unwrap_or(0);
-                    v -= min as f64;
-                }
-                Bar::new(k as f64, v)
-                    .fill(key_color(k))
-                    .name(format!("key{k}"))
-            })
-            .collect();
-        bar_plot(ui, "今の値", bars, &mut self.bars_scale);
+        bar_plot(ui, "output", bars, &mut self.bars_scale);
     }
 }
 
