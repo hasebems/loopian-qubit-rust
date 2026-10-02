@@ -2,16 +2,20 @@
 //!
 //! 上: 接続・記録・開始/停止・マーカー・周期、再生の操作、受信の状態
 //! 左: 表示するキー・系列・時間幅
-//! 中央: 時系列グラフ（イベントを縦線で重ねる）
-//! 右: 統計（表示している時間の範囲で計算する）
+//! 中央: 時系列グラフ（イベントを縦線で重ねる）。上段は raw と filtered・baseline、下段は delta・output
+//! 右: アルゴリズム（touch_algo）の設定と、統計（表示している時間の範囲で計算する）
 //! 下: 全キーの今の値のバー表示
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
-use egui_plot::{Bar, BarChart, Legend, Line, LineStyle, Plot, PlotPoints, VLine};
+use egui_plot::{
+    Bar, BarChart, HLine, Legend, Line, LineStyle, MarkerShape, Plot, PlotPoints, Points, VLine,
+};
+use touch_algo::{Params, State};
 
+use qubit_monitor::algo::{self, AlgoRunner};
 use qubit_monitor::csv_export;
 use qubit_monitor::playback::{self, Player};
 use qubit_monitor::protocol::{
@@ -67,6 +71,15 @@ pub struct MonitorApp {
     view_us: Option<(u64, u64)>, // 前回描いたグラフの時間の範囲（一時停止中の統計・描画に使う）
     stats_key: usize,            // 値の更新間隔を調べるキー
     bars_minus_min: bool,        // バー表示で、表示範囲の最小値を引く
+
+    // アルゴリズム（touch_algo、doc/debug_env.md §4.6）
+    algo: AlgoRunner,
+    algo_enabled: bool,
+    show_filtered: bool,
+    show_baseline: bool,
+    show_delta: bool,
+    show_output: bool,
+    bars_output: bool, // バー表示に output を出す
 }
 
 impl MonitorApp {
@@ -94,6 +107,13 @@ impl MonitorApp {
             view_us: None,
             stats_key: 0,
             bars_minus_min: true,
+            algo: AlgoRunner::new(),
+            algo_enabled: true,
+            show_filtered: true,
+            show_baseline: true,
+            show_delta: true,
+            show_output: true,
+            bars_output: false,
         }
     }
 
@@ -103,6 +123,7 @@ impl MonitorApp {
         self.store = Store::new();
         self.view_us = None;
         self.paused = false;
+        self.algo.clear();
     }
 
     fn connect(&mut self, ctx: &egui::Context) {
@@ -479,6 +500,8 @@ impl MonitorApp {
             self.parser = Parser::new();
             self.store = Store::new();
             self.view_us = None;
+            // 校正のスイッチの記録は残し、同じ時刻で切り替える
+            self.algo.invalidate();
         }
     }
 
@@ -522,6 +545,13 @@ impl MonitorApp {
         ui.checkbox(&mut self.show_raw, "raw（生値）");
         ui.checkbox(&mut self.show_corrected, "補正後（hi/lo ずれ）");
         ui.checkbox(&mut self.show_events, "イベント");
+        ui.add_enabled_ui(self.algo_enabled, |ui| {
+            ui.checkbox(&mut self.show_filtered, "filtered（ノイズ除去後）");
+            ui.checkbox(&mut self.show_baseline, "baseline（基準値）");
+            ui.label("下段");
+            ui.checkbox(&mut self.show_delta, "delta（filtered − baseline）");
+            ui.checkbox(&mut self.show_output, "output（delta − noise_floor）");
+        });
         ui.separator();
         ui.label("表示する時間幅 [秒]");
         ui.add(egui::Slider::new(&mut self.span_s, 1.0..=30.0).logarithmic(true));
@@ -538,6 +568,9 @@ impl MonitorApp {
         }
         ui.separator();
         ui.checkbox(&mut self.bars_minus_min, "バー表示で表示範囲の最小値を引く");
+        ui.add_enabled_ui(self.algo_enabled, |ui| {
+            ui.checkbox(&mut self.bars_output, "バー表示に output を出す");
+        });
     }
 
     /// 今描く時間の範囲（µs）
@@ -562,50 +595,137 @@ impl MonitorApp {
             });
             return;
         };
+        let shown = |k: usize| self.show_keys.get(k).copied().unwrap_or(false);
+        let algo_on = self.algo_enabled && self.algo.filtered.len() == self.store.nkeys;
+        let algo_range = self.algo.range(t0, t1);
+
+        // 上段: raw・補正後・filtered・baseline
         let range = self.store.range(t0, t1);
         let mut lines = Vec::new();
-        for k in 0..self.store.nkeys {
-            if !self.show_keys.get(k).copied().unwrap_or(false) {
-                continue;
-            }
+        for k in (0..self.store.nkeys).filter(|&k| shown(k)) {
+            let store = &self.store;
+            let valid = |i: usize| store.is_valid(i, k);
             if self.show_raw {
-                let points = decimate(&self.store, &self.store.raw[k], k, range.clone());
+                let raw = &store.raw[k];
+                let points = decimate(&store.time_us, |i| raw[i] as f64, valid, range.clone());
                 lines.push(
                     Line::new(format!("key{k}"), PlotPoints::new(points)).color(key_color(k)),
                 );
             }
             if self.show_corrected {
-                let points = decimate(&self.store, &self.store.corrected[k], k, range.clone());
+                let corrected = &store.corrected[k];
+                let points = decimate(
+                    &store.time_us,
+                    |i| corrected[i] as f64,
+                    valid,
+                    range.clone(),
+                );
                 lines.push(
                     Line::new(format!("key{k} 補正後"), PlotPoints::new(points))
                         .color(key_color(k))
                         .style(LineStyle::dashed_loose()),
                 );
             }
+            if algo_on && self.show_filtered {
+                let filtered = &self.algo.filtered[k];
+                let points = decimate(
+                    &self.algo.time_us,
+                    |i| filtered[i] as f64,
+                    |_| true,
+                    algo_range.clone(),
+                );
+                lines.push(
+                    Line::new(format!("key{k} filtered"), PlotPoints::new(points))
+                        .color(key_color(k))
+                        .width(2.0),
+                );
+            }
+            if algo_on && self.show_baseline {
+                let baseline = &self.algo.baseline[k];
+                let points = decimate(
+                    &self.algo.time_us,
+                    |i| baseline[i] as f64,
+                    |_| true,
+                    algo_range.clone(),
+                );
+                lines.push(
+                    Line::new(format!("key{k} baseline"), PlotPoints::new(points))
+                        .color(key_color(k))
+                        .style(LineStyle::dotted_dense())
+                        .width(2.0),
+                );
+            }
         }
-        let mut vlines = Vec::new();
-        if self.show_events {
-            for (t, event) in self
-                .store
-                .events
-                .iter()
-                .filter(|(t, _)| (t0..=t1).contains(t))
-            {
-                let (name, color) = match event.kind {
-                    EVENT_NOTE_ON => ("Note On", Color32::from_rgb(0x2c, 0xa0, 0x2c)),
-                    EVENT_NOTE_OFF => ("Note Off", Color32::from_rgb(0xd6, 0x27, 0x28)),
-                    EVENT_NOTE_MOVED => ("Note Moved", Color32::from_rgb(0xff, 0x7f, 0x0e)),
-                    EVENT_MARKER => ("マーカー", Color32::from_rgb(0x1f, 0x77, 0xb4)),
-                    _ => ("その他", Color32::GRAY),
-                };
-                let width = if event.kind == EVENT_MARKER { 2.5 } else { 1.0 };
-                vlines.push(VLine::new(name, *t as f64 / 1e6).color(color).width(width));
+        let vlines = self.event_lines(t0, t1);
+
+        // 下段: delta・output と、しきい値・onset
+        let lower = algo_on && (self.show_delta || self.show_output);
+        let mut lower_lines = Vec::new();
+        let mut onset_points = Vec::new();
+        if lower {
+            for k in (0..self.store.nkeys).filter(|&k| shown(k)) {
+                if self.show_delta {
+                    let delta = &self.algo.delta[k];
+                    let points = decimate(
+                        &self.algo.time_us,
+                        |i| delta[i] as f64,
+                        |_| true,
+                        algo_range.clone(),
+                    );
+                    lower_lines.push(
+                        Line::new(format!("key{k} delta"), PlotPoints::new(points))
+                            .color(key_color(k)),
+                    );
+                }
+                if self.show_output {
+                    let output = &self.algo.output[k];
+                    let points = decimate(
+                        &self.algo.time_us,
+                        |i| output[i] as f64,
+                        |_| true,
+                        algo_range.clone(),
+                    );
+                    lower_lines.push(
+                        Line::new(format!("key{k} output"), PlotPoints::new(points))
+                            .color(key_color(k))
+                            .style(LineStyle::dashed_loose()),
+                    );
+                }
+                // onset を記録した時刻に、そのときの delta の位置で印を付ける
+                let marks: Vec<[f64; 2]> = self
+                    .algo
+                    .onsets
+                    .iter()
+                    .filter(|(t, key)| *key == k && (t0..=t1).contains(t))
+                    .filter_map(|(t, _)| {
+                        let i = self.algo.time_us.partition_point(|&x| x < *t);
+                        (i < self.algo.time_us.len())
+                            .then(|| [*t as f64 / 1e6, self.algo.delta[k][i] as f64])
+                    })
+                    .collect();
+                if !marks.is_empty() {
+                    onset_points.push(
+                        Points::new(format!("key{k} onset"), PlotPoints::new(marks))
+                            .color(key_color(k))
+                            .shape(MarkerShape::Diamond)
+                            .filled(true)
+                            .radius(5.0),
+                    );
+                }
             }
         }
 
         let paused = self.paused;
+        let upper_height = if lower {
+            ui.available_height() * 0.55
+        } else {
+            ui.available_height()
+        };
         let response = Plot::new("timeseries")
             .legend(Legend::default())
+            .height(upper_height)
+            .link_axis("time_axis", [true, false])
+            .link_cursor("time_axis", [true, false])
             .x_axis_label("時刻 [秒]（ファームの起動から）")
             .allow_drag(paused)
             .allow_zoom(paused)
@@ -618,19 +738,216 @@ impl MonitorApp {
                 for line in lines {
                     plot_ui.line(line);
                 }
-                for vline in vlines {
+                for vline in vlines.clone() {
                     plot_ui.vline(vline);
                 }
             });
         let bounds = response.transform.bounds();
         let (x0, x1) = (bounds.min()[0].max(0.0), bounds.max()[0].max(0.0));
         self.view_us = Some(((x0 * 1e6) as u64, (x1 * 1e6) as u64));
+
+        if lower {
+            let params = self.algo.params;
+            let onset_default = params.noise_floor_default as f64 + params.onset_margin as f64;
+            Plot::new("algo")
+                .legend(Legend::default())
+                .link_axis("time_axis", [true, false])
+                .link_cursor("time_axis", [true, false])
+                .x_axis_label("時刻 [秒]")
+                .allow_drag(paused)
+                .allow_zoom(paused)
+                .allow_scroll(paused)
+                .show(ui, |plot_ui| {
+                    if !paused {
+                        plot_ui.set_plot_bounds_x(t0 as f64 / 1e6..=t1 as f64 / 1e6);
+                        plot_ui.set_auto_bounds([false, true]);
+                    }
+                    let gray = Color32::GRAY;
+                    plot_ui.hline(
+                        HLine::new("QUIET_THRESHOLD", params.quiet_threshold as f64).color(gray),
+                    );
+                    plot_ui.hline(
+                        HLine::new("ACTIVE_THRESHOLD", params.active_threshold as f64)
+                            .color(gray)
+                            .style(LineStyle::dashed_loose()),
+                    );
+                    plot_ui.hline(
+                        HLine::new("onset しきい値（noise_floor 既定値）", onset_default)
+                            .color(gray)
+                            .style(LineStyle::dotted_dense()),
+                    );
+                    for line in lower_lines {
+                        plot_ui.line(line);
+                    }
+                    for points in onset_points {
+                        plot_ui.points(points);
+                    }
+                    for vline in vlines {
+                        plot_ui.vline(vline);
+                    }
+                });
+        }
+    }
+
+    /// 表示範囲のイベントの縦線
+    fn event_lines(&self, t0: u64, t1: u64) -> Vec<VLine> {
+        if !self.show_events {
+            return Vec::new();
+        }
+        self.store
+            .events
+            .iter()
+            .filter(|(t, _)| (t0..=t1).contains(t))
+            .map(|(t, event)| {
+                let (name, color) = match event.kind {
+                    EVENT_NOTE_ON => ("Note On", Color32::from_rgb(0x2c, 0xa0, 0x2c)),
+                    EVENT_NOTE_OFF => ("Note Off", Color32::from_rgb(0xd6, 0x27, 0x28)),
+                    EVENT_NOTE_MOVED => ("Note Moved", Color32::from_rgb(0xff, 0x7f, 0x0e)),
+                    EVENT_MARKER => ("マーカー", Color32::from_rgb(0x1f, 0x77, 0xb4)),
+                    _ => ("その他", Color32::GRAY),
+                };
+                let width = if event.kind == EVENT_MARKER { 2.5 } else { 1.0 };
+                VLine::new(name, *t as f64 / 1e6).color(color).width(width)
+            })
+            .collect()
+    }
+
+    // ------------------------------------------------------------------
+    //  右: アルゴリズム（touch_algo）の設定
+    // ------------------------------------------------------------------
+    fn algo_panel(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new(RichText::new("アルゴリズム（touch_algo）").heading())
+            .default_open(true)
+            .show(ui, |ui| {
+                if ui
+                    .checkbox(&mut self.algo_enabled, "アルゴリズムを通す")
+                    .changed()
+                {
+                    self.algo.invalidate();
+                }
+                if !self.algo_enabled {
+                    return;
+                }
+                ui.horizontal(|ui| {
+                    ui.label("間引き:");
+                    let label = |us: u32| {
+                        if us == 0 {
+                            "間引かない".to_string()
+                        } else {
+                            format!("{}ms", us / 1000)
+                        }
+                    };
+                    egui::ComboBox::from_id_salt("decimation")
+                        .width(90.0)
+                        .selected_text(label(self.algo.decimation_us))
+                        .show_ui(ui, |ui| {
+                            for us in algo::DECIMATIONS_US {
+                                if ui
+                                    .selectable_label(self.algo.decimation_us == us, label(us))
+                                    .clicked()
+                                    && self.algo.decimation_us != us
+                                {
+                                    self.algo.decimation_us = us;
+                                    self.algo.invalidate();
+                                }
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    let mut on = self.algo.calibrating;
+                    if ui.toggle_value(&mut on, "設定画面（校正）").changed() {
+                        self.algo.set_calibrating(on, &self.store);
+                    }
+                    let state = match self.algo.state() {
+                        Some(State::Acquiring) => "初期取得中",
+                        Some(State::Running) => "通常",
+                        Some(State::Calibrating) => "校正中",
+                        None => "-",
+                    };
+                    ui.label(format!("状態: {state}"));
+                });
+                ui.label("校正は PC のアルゴリズムだけのもの（実機の設定画面とは連動しない）");
+
+                // キー毎の最後の値
+                if let Some(last) = self.algo.time_us.len().checked_sub(1) {
+                    egui::Grid::new("algo_keys").striped(true).show(ui, |ui| {
+                        for h in ["キー", "baseline", "delta", "output", "noise"] {
+                            ui.label(RichText::new(h).strong());
+                        }
+                        ui.end_row();
+                        for k in 0..self.algo.baseline.len() {
+                            ui.label(RichText::new(format!("{k}")).color(key_color(k)));
+                            ui.label(format!("{}", self.algo.baseline[k][last]));
+                            ui.label(format!("{}", self.algo.delta[k][last]));
+                            ui.label(format!("{}", self.algo.output[k][last]));
+                            ui.label(format!("{}", self.algo.noise_floor[k]));
+                            ui.end_row();
+                        }
+                    });
+                }
+
+                ui.collapsing("パラメータ（doc/touch_baseline.md §3.11）", |ui| {
+                    let mut p = self.algo.params;
+                    egui::Grid::new("params").show(ui, |ui| {
+                        param(
+                            ui,
+                            "SMOOTH_SAMPLES",
+                            &mut p.smooth_samples,
+                            1..=touch_algo::MAX_SMOOTH_SAMPLES as u8,
+                        );
+                        param(
+                            ui,
+                            "BASELINE_UPDATE_INTERVAL_MS",
+                            &mut p.baseline_update_interval_ms,
+                            1..=1000,
+                        );
+                        param(ui, "ACQUIRE_MS", &mut p.acquire_ms, 0..=5000);
+                        param(ui, "NEIGHBOR_RANGE", &mut p.neighbor_range, 0..=8);
+                        param(ui, "QUIET_THRESHOLD", &mut p.quiet_threshold, 0..=200);
+                        param(ui, "ACTIVE_THRESHOLD", &mut p.active_threshold, 0..=500);
+                        param(ui, "ONSET_MARGIN", &mut p.onset_margin, 0..=100);
+                        param(ui, "QUIET_HOLD_MS", &mut p.quiet_hold_ms, 0..=10_000);
+                        param(ui, "RISE_SHIFT", &mut p.rise_shift, 0..=16);
+                        param(ui, "RISE_MAX_STEP_Q", &mut p.rise_max_step_q, 0..=4096);
+                        param(ui, "FALL_SHIFT", &mut p.fall_shift, 0..=16);
+                        param(
+                            ui,
+                            "NEG_RECAL_THRESHOLD",
+                            &mut p.neg_recal_threshold,
+                            0..=200,
+                        );
+                        param(ui, "NEG_RECAL_MS", &mut p.neg_recal_ms, 0..=5000);
+                        param(ui, "STUCK_TIME_MS", &mut p.stuck_time_ms, 0..=300_000);
+                        param(ui, "STUCK_VARIATION", &mut p.stuck_variation, 0..=200);
+                        param(ui, "CALIB_SHIFT", &mut p.calib_shift, 0..=16);
+                        param(ui, "CALIB_SETTLE_MS", &mut p.calib_settle_ms, 0..=10_000);
+                        param(
+                            ui,
+                            "NOISE_FLOOR_DEFAULT",
+                            &mut p.noise_floor_default,
+                            0..=200,
+                        );
+                        param(ui, "NOISE_FLOOR_MAX", &mut p.noise_floor_max, 0..=500);
+                        param(ui, "HI_LO_JUMP", &mut p.hi_lo_jump, 0..=1000);
+                    });
+                    if ui.button("既定値に戻す").clicked() {
+                        p = Params::DEFAULT;
+                    }
+                    if p != self.algo.params {
+                        // 変えたら、読み込んでいるデータの先頭から通し直す
+                        self.algo.params = p;
+                        self.algo.invalidate();
+                    }
+                });
+            });
     }
 
     // ------------------------------------------------------------------
     //  右: 統計（表示している時間の範囲）
     // ------------------------------------------------------------------
     fn stats_panel(&mut self, ui: &mut egui::Ui) {
+        self.algo_panel(ui);
+        ui.separator();
         ui.heading("統計");
         let Some((t0, t1)) = self.window_us() else {
             return;
@@ -742,6 +1059,25 @@ impl MonitorApp {
             .window_us()
             .map(|(t0, t1)| store.range(t0, t1))
             .unwrap_or(last..last + 1);
+        if self.algo_enabled && self.bars_output && self.algo.output.len() == store.nkeys {
+            // output（アルゴリズムの結果）の、表示範囲の最後の値
+            let bars: Vec<Bar> = match self.window_us() {
+                Some((t0, t1)) => {
+                    let r = self.algo.range(t0, t1);
+                    (0..store.nkeys)
+                        .map(|k| {
+                            let v = r.end.checked_sub(1).map_or(0, |i| self.algo.output[k][i]);
+                            Bar::new(k as f64, v as f64)
+                                .fill(key_color(k))
+                                .name(format!("key{k}"))
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            bar_plot(ui, "output", bars);
+            return;
+        }
         let series = if self.show_corrected && !self.show_raw {
             &store.corrected
         } else {
@@ -761,16 +1097,7 @@ impl MonitorApp {
                     .name(format!("key{k}"))
             })
             .collect();
-        Plot::new("bars")
-            .height(140.0)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .include_y(0.0)
-            .x_axis_label("キー")
-            .show(ui, |plot_ui| {
-                plot_ui.bar_chart(BarChart::new("今の値", bars).width(0.8))
-            });
+        bar_plot(ui, "今の値", bars);
     }
 }
 
@@ -779,6 +1106,9 @@ impl eframe::App for MonitorApp {
         self.poll();
         if let Some(player) = &mut self.player {
             player.update(&mut self.store);
+        }
+        if self.algo_enabled {
+            self.algo.update(&self.store);
         }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
@@ -798,34 +1128,34 @@ impl eframe::App for MonitorApp {
     }
 }
 
-/// 表示する点を作る。読み取りに失敗したサンプルは除く。多すぎるときは区間毎の最小・最大に間引く
+/// 表示する点を作る。valid でないサンプルは除く。多すぎるときは区間毎の最小・最大に間引く
 fn decimate(
-    store: &Store,
-    series: &VecDeque<u16>,
-    key: usize,
+    times: &VecDeque<u64>,
+    value: impl Fn(usize) -> f64,
+    valid: impl Fn(usize) -> bool,
     range: std::ops::Range<usize>,
 ) -> Vec<[f64; 2]> {
-    let point = |i: usize| [store.time_us[i] as f64 / 1e6, series[i] as f64];
-    let valid = |i: &usize| store.is_valid(*i, key);
+    let point = |i: usize| [times[i] as f64 / 1e6, value(i)];
     if range.len() <= MAX_PLOT_POINTS * 2 {
-        return range.filter(valid).map(point).collect();
+        return range.filter(|&i| valid(i)).map(point).collect();
     }
     let bucket = range.len().div_ceil(MAX_PLOT_POINTS);
     let mut out = Vec::with_capacity(MAX_PLOT_POINTS * 2);
     let mut start = range.start;
     while start < range.end {
         let end = (start + bucket).min(range.end);
-        let mut min: Option<usize> = None;
-        let mut max: Option<usize> = None;
-        for i in (start..end).filter(valid) {
-            if min.is_none_or(|m| series[i] < series[m]) {
-                min = Some(i);
+        let mut min: Option<(usize, f64)> = None;
+        let mut max: Option<(usize, f64)> = None;
+        for i in (start..end).filter(|&i| valid(i)) {
+            let v = value(i);
+            if min.is_none_or(|(_, m)| v < m) {
+                min = Some((i, v));
             }
-            if max.is_none_or(|m| series[i] > series[m]) {
-                max = Some(i);
+            if max.is_none_or(|(_, m)| v > m) {
+                max = Some((i, v));
             }
         }
-        if let (Some(a), Some(b)) = (min, max) {
+        if let (Some((a, _)), Some((b, _))) = (min, max) {
             // 時刻の順に並べる
             let (a, b) = if a <= b { (a, b) } else { (b, a) };
             out.push(point(a));
@@ -836,6 +1166,31 @@ fn decimate(
         start = end;
     }
     out
+}
+
+/// パラメータの欄の 1 行
+fn param<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    name: &str,
+    value: &mut N,
+    range: std::ops::RangeInclusive<N>,
+) {
+    ui.label(name);
+    ui.add(egui::DragValue::new(value).range(range));
+    ui.end_row();
+}
+
+fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>) {
+    Plot::new("bars")
+        .height(140.0)
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .include_y(0.0)
+        .x_axis_label("キー")
+        .show(ui, |plot_ui| {
+            plot_ui.bar_chart(BarChart::new(name, bars).width(0.8))
+        });
 }
 
 fn histogram_plot(ui: &mut egui::Ui, id: &str, hist: &[(u64, u32)], bin_us: u64) {

@@ -235,6 +235,30 @@ loopian_qubit/
 - ワークスペースにはしない（ターゲットが違うため）。それぞれが `touch_algo` を path 依存で使う
 - `flake.nix` は変えていない（macOS では追加のものは要らない）。Linux で PC アプリをビルドするときは、`pkg-config`・`libudev` と X11 / Wayland のライブラリを足す
 
+### 4.6 段階 3 の実装方針（2026-10-01 決定・最初の版を実装。記録は §6.1）
+
+`doc/touch_baseline.md` §3 の信号処理（ノイズ除去・基準値・onset）を `touch_algo` として作り、PC アプリで記録・受信したデータに通して表示する。
+
+- **置き場所**: 最初から `crates/touch_algo`（no_std）として作り、PC アプリが path 依存で使う。ファームから使うのは段階 4。最初からこの形にして、ファームへ移すときに書き直さないようにする
+    - 時刻は `embassy_time::Instant` ではなく、フレームの `time_us`（u32 の µs）を受け取る。時間の差は `wrapping_sub` で求め、一周（約 71 分）をまたいでも正しく計算する
+    - `touch_baseline.md` §3.4 の `Instant` / `Option<Instant>` は、u32 の µs（または ms）に置き換える
+    - ホスト（`cargo test`）と thumbv8m（no_std）の両方でビルドが通ることを確かめる
+- **最初の版の範囲**
+    - ノイズ除去（§3.3: hi/lo ずれ補正、3 点メディアン、`SMOOTH_SAMPLES` の移動平均）
+    - 初期取得（§3.5）、追従規則 R1〜R5（§3.6）、固着からの回復（§3.7）
+    - noise_floor（既定値 `NOISE_FLOOR_DEFAULT`）、output = max(0, delta − noise_floor)、onset（§3.8）
+    - 設定画面での校正（§3.7 Calibrating）。きっかけは下記の PC アプリのスイッチ
+    - A/B 比較は次の版に回す
+- **校正のきっかけ**: PC アプリに「設定画面（校正）」のスイッチを置き、オンにした瞬間に Calibrating に入り、オフで Running に戻る。ファームの実際の `SETTING_MODE` とは連動しない（PC のアルゴリズムは実機とは別に動くため）。スイッチの操作は記録（`.qlog`）には残らないので、再生のときは見ながら手で操作する
+- **間引き**: アルゴリズムに通す前に、フレームを 2ms（間引かない）/ 8ms / 10ms から選んで間引く。前に通したフレームから選んだ周期以上たったフレームだけを通す。§3.11 のパラメータは 8〜10ms 周期を前提にしている（`SMOOTH_SAMPLES` などのサンプル数）ため、既定は 8ms にする。`_MS` の付くパラメータは `time_us` から計算するので、周期の影響を受けない
+- **パラメータ**: 画面の右側に、§3.11 の値を初期値とした欄を置く。値を変えたら、読み込んでいるデータの先頭からアルゴリズムを通し直す（記録の再生中・受信中も同じ）。受信・再生で新しく来たフレームは、続けて通す
+- **表示**
+    - 上段のグラフ: raw（または補正後）に、filtered と baseline を重ねる。表示する系列を選べる
+    - 下段のグラフ（新規）: delta と output。`QUIET_THRESHOLD`・`ACTIVE_THRESHOLD`・onset のしきい値（noise_floor + `ONSET_MARGIN`）を横線で示し、onset を記録した時刻に印を付ける
+    - 状態（Acquiring / Running / Calibrating）を表示する
+- **6 キーでの近傍**: 近傍（`NEIGHBOR_RANGE`）はリングとして折り返すので、6 キー直結では両端のキーの近傍が反対側になる（§7）。物理的な配置とは合わないことを承知で評価する
+- CSV への filtered・baseline などの書き出しは、最初の版には入れない（必要になったら加える）
+
 ## 5. 通信プロトコル
 
 ### 5.1 ファーム → PC（バイナリ）
@@ -310,7 +334,7 @@ USB フルスピードの CDC で実用上 500KB/s 以上は出せるので、�
 |---|---|---|
 | 1 | ファーム: CDC 複合化、FRAME・INFO 送信、`start`/`stop`/`info`<br>PC: 最小限の受信とリアルタイムのグラフ表示、記録 | 生値の時系列が見える状態を最短で作る |
 | 2 | ファーム: EVENT、`period`、`mark`<br>PC: イベント表示、再生、統計、CSV 書き出し | チップの更新周期、ノイズの大きさ、hi/lo ずれの頻度を調べる。シナリオごとの記録を集める |
-| 3 | `touch_algo` を作り、PC アプリで動かす。パラメータの GUI、間引き、A/B 比較 | `touch_baseline.md` の方針を PC 上で試して決める |
+| 3 | `touch_algo` を作り、PC アプリで動かす。パラメータの GUI、間引き、A/B 比較（§4.6） | `touch_baseline.md` の方針を PC 上で試して決める |
 | 4 | ファームも `touch_algo` を使うようにする。PROC 送信、`set` コマンド | ファームの結果が PC 側と一致することを確かめ、実機で演奏して確認する |
 | 5 | 96 キー構成（PCA9544 あり）で段階 2〜4 を繰り返す | 16 倍の構成で、周期・帯域・アルゴリズムが問題ないことを確かめる |
 
@@ -393,6 +417,33 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
     - Note のイベントは、センサーに触れないと出ないので、GUI での実験のときに確かめる
     - CI には入れていない。VSCode の rust-analyzer は `.vscode/settings.json` でターゲットを thumbv8m に固定しているので、PC アプリのコードは正しく解析されない（§4.5）。必要になったら設定を考える
     - `flake.nix` は変えていない。Linux でビルドするには、serialport のために `pkg-config` と `libudev`、eframe のために X11 / Wayland のライブラリが要る
+
+**PC アプリ（段階 3 の最初の版）**（2026-10-01）
+
+- **`crates/touch_algo`**（no_std、依存なし）: `TouchSignal<K>` と `Params`・`KeyState`・`State`
+    - キー毎の状態は呼び出し側が `K: AsRef<[KeyState]> + AsMut<[KeyState]>` で渡す（ファームは `[KeyState; N]`、PC は `Vec<KeyState>`）。PC はキー数を実行時に知るため
+    - `process(now_us, raw, valid, calibrating)` を 1 スキャン毎に呼ぶ。結果は `keys()` の各 `KeyState` から `filtered()`・`baseline()`・`delta()`・`output()`・`noise_floor()`・`onset_us()` で読む
+    - `Params::DEFAULT` は `touch_baseline.md` §3.11 の値。hi/lo ずれの増加量（200）も `hi_lo_jump` としてパラメータにした
+    - 設計書から補ったこと
+        - メディアンは 3 サンプルそろうまで最新の値を使う。移動平均もそろうまではある分で平均する
+        - 静かさ（近傍）・大きく負の継続・固着の追跡は毎スキャン行い、基準値の更新（R1〜R5・校正）は `BASELINE_UPDATE_INTERVAL_MS` 毎に行う
+        - 初期取得中に校正のスイッチが入っていたら、初期取得が終わった次のスキャンで校正に入る
+        - 校正から戻ったときは、近傍の静かさの時刻（`quiet_since`）をリセットし、`QUIET_HOLD_MS` 待ってから上方向の追従を始める
+        - output・onset は校正中も計算する
+        - 6 キーでは近傍の片側は `min(NEIGHBOR_RANGE, キー数/2)` にする（リングの折り返しで同じキーを 2 度数えないため）
+    - 確認: `crates/touch_algo` で `cargo build`（直下の設定で thumbv8m になり、no_std でビルドできることを確かめる）と `cargo test --target host-tuple`（テスト 9 件）
+- **`tools/qubit_monitor/src/algo.rs`**（`AlgoRunner`）: Store のフレームを間引いて `TouchSignal` に通し、結果（filtered・baseline・delta・output・onset）を時刻と一緒にためる
+    - Store のフレームの通し番号（`frames_total` から数える）で、どこまで通したかを覚える。Store が作り直された・キー数が変わった・パラメータや間引きを変えたときは、Store の先頭から通し直す
+    - 間引き: 前に通したフレームから選んだ周期がたったフレームを通す。2ms 周期のフレームの揺れを吸収するため、±1ms の幅を持たせる
+    - 校正のスイッチは、操作した時刻（そのとき最後に受け取ったフレームの時刻）を覚え、それより後のフレームから切り替える。通し直しても同じ時刻で切り替わる。接続・記録を開いたときに記録を消す。再生の「最初から」では残す
+- **画面**
+    - 上段のグラフに filtered（太線）と baseline（太い点線）を重ねる
+    - 下段のグラフに delta（実線）と output（破線）。`QUIET_THRESHOLD`・`ACTIVE_THRESHOLD`・onset のしきい値（noise_floor の既定値 + `ONSET_MARGIN`）を横線で、onset を菱形の印で示す。上段と時間軸・カーソルを連動させる
+    - 右側に「アルゴリズム（touch_algo）」の欄: 有効化、間引き（間引かない / 8ms / 10ms、既定 8ms）、校正のスイッチと状態、キー毎の最後の baseline・delta・output・noise_floor、パラメータ（初期値は §3.11、「既定値に戻す」）
+    - 下のバー表示に output を出せる
+- **確認用のプログラム** `examples/replay_algo.rs`（`cargo run --example replay_algo -- <記録.qlog> [間引き µs]`）: 記録をアルゴリズムに通し、キー毎の baseline・filtered の p-p・delta の範囲・output の最大・onset の回数を表示する
+- **実データでの確認**（段階 2 の確認で記録した約 5.6 秒、触れていない状態、既定のパラメータ）: 8ms に間引いても間引かなくても、初期取得の後の delta は −2〜+5、output は最大 1、onset の誤記録は無し、baseline の変化は 0〜2
+- まだしていないこと: 触れたときの記録での評価（シナリオ毎の記録を集めてから）、GUI の操作の確認、A/B 比較
 
 ## 7. 96 キーに戻すときのための配慮
 

@@ -4,13 +4,16 @@
 
 ### 1.1 現状
 
+2026-10-01 時点（`doc/task_architecture.md` のコア・タスク構成の改修の後）。本書を書いた当初（改修前）の状態は §1.2 (c) の前提として残している。
+
 - `src/touch/read_touch.rs` は AT42QT1070 から次の 2 種類を読み、その差を入力値としている
     - Key Signal（レジスタ 4–15）: 生値
     - Reference Data（レジスタ 18–29）: チップ内部の基準値。12 スキャンに 1 回 `set_reference()` で全キー分を読み直す
-- 入力値は `raw - reference - reference_adjust`（いずれも飽和減算）で、`TOUCH_RAW_DATA` 経由で Core0 の `QubitTouch` に渡る
-- `reference_adjust` は設定画面（`WORK_MODE_DISPLAY == true`）にいる間、`raw - reference` の最大値を記録する。値は増える方向にしか更新されず、リセットする処理が無い
-- Core0 側では `Pad` が 4 サンプルの移動平均をかけてから位置を検出している（`qtouch.rs` の `MAX_MOVING_AVERAGE`）
-- Core1 のスキャンループは周期を持たず、`yield_now()` だけで回っている。Core0 の `qubit_touch_task` は `Timer::after(10ms)` で回るので、実際の周期は 10ms＋処理時間になる
+- 入力値は `raw - reference - reference_adjust`（いずれも飽和減算）で、同じ Core1 の `touch_task` の中で `QubitTouch::set_value()` に渡す
+- `reference_adjust` は設定画面（`SETTING_MODE == true`）にいる間、`raw - reference` の最大値を記録する。値は増える方向にしか更新されず、リセットする処理が無い
+- `QubitTouch` の `Pad` が 4 サンプルの移動平均をかけてから位置を検出している（`qtouch.rs` の `MAX_MOVING_AVERAGE`）
+- スキャンは `touch_task` の `Ticker` で一定周期（既定 10ms、`constants.rs` の `SCAN_PERIOD_US`）に行い、解析は 10ms 毎（`analysis_divider()`）。`debug_stream` feature では周期の既定が 2ms で、PC から 2 / 5 / 10 / 20ms に変えられる（`doc/debug_env.md`）
+- 12 スキャンに 1 回の `set_reference()` で、そのスキャンだけ時間が延びる。2ms 周期では周期を超える（`doc/debug_env.md` §6.1 の実測）
 
 ### 1.2 問題点
 
@@ -33,6 +36,8 @@
 これまでの経験から、生値にはかなりのノイズが乗っている。現状は Core0 側の 4 サンプル移動平均と、`qtouch.rs` の単発スパイク除去（`SINGLE_PAD_SPIKE_*`）で対処している。
 
 **(c) 触れる速さを取る土台が無い**
+
+（以下の周期と OLED の問題は、改修前の構成でのもの。`doc/task_architecture.md` の改修で、スキャンは Core1 で一定周期になり、OLED は Core0 の I2C0 に移って解消した。残っているのは、`QubitTouch` の時間の計算が「10ms 毎に呼ばれる」前提のままであること）
 
 今後、「どれだけ速く触れたか（少しずつ値が増えたのか、急に大きくなったのか）」を取りたい。速さの判定そのものは `qtouch.rs` 側の仕事だが、今の信号の渡し方では時間の情報が失われている。
 
@@ -275,15 +280,15 @@ CLAUDE.md にある「設定画面ではセンサーに触れない」という�
 
 | ファイル | 変更内容 |
 |---|---|
-| `src/touch/baseline.rs`（新規） | ノイズ除去・基準値・onset の計算（`TouchSignal`）。I2C には触れない純粋な計算だけにする。PC アプリと共有するため、`crates/touch_algo`（no_std）として切り出す予定（`doc/debug_env.md` §4.5） |
-| `src/touch/mod.rs` | `pub mod baseline;` を追加 |
+| `crates/touch_algo`（新規） | ノイズ除去・基準値・onset の計算（`TouchSignal`）。I2C には触れない純粋な計算だけにする。no_std のクレートとし、PC アプリ（`tools/qubit_monitor`）とファームの両方から path 依存で使う（2026-10-01 決定。`doc/debug_env.md` §4.6）。PC アプリで先に作って調整し、ファームへはその後に移す |
+| `Cargo.toml` | 依存に `touch_algo` を path で追加する（ファームへ移すとき） |
 | `src/touch/read_touch.rs` | チップの基準値を読む処理と `reference_adjust` を削除し、`TouchSignal` を呼び出して output と onset を得る |
 | `src/devices/at42qt.rs` | `read_6key` の `reference` 引数を削除する |
 | `src/tasks/touch.rs` | `touch_task` で、`read_touch` の結果（output）を従来どおり `QubitTouch` に渡す |
 | `src/touch/qtouch.rs` | `Pad` の移動平均を外す（`MAX_MOVING_AVERAGE` = 1）。`TOUCH_THRESHOLD` を調整し直す |
 | `CLAUDE.md` | `read_touch.rs` の説明、設定画面の説明を新方式に合わせて更新する |
 
-### 4.2 `src/touch/baseline.rs`（新規）
+### 4.2 `TouchSignal`（`crates/touch_algo`、新規）
 
 ノイズ除去・基準値・onset の計算を I2C の読み取りから切り離し、1 スキャン分の raw 配列を渡すと output と onset が返る形にする。こうしておくと、ロジックだけを読み・直しやすくなる（ユニットテストは無いが、将来ホスト側でテストする余地も残せる）。
 
@@ -386,7 +391,7 @@ impl TouchSignal {
 
 スキャン時間の実測・周期化・OLED の分離は、`task_architecture.md` で済んでいる。
 
-1. **基準値の自前管理**: `baseline.rs` を作り、Acquiring と Running の R1–R5 だけを実装する。`read_touch.rs` を差し替え、`at42qt.rs` の引数を整理する。この段階ではノイズ除去は無し（filtered = raw）、`Pad` の移動平均も残す
+1. **基準値の自前管理**: `touch_algo`（PC アプリで先に作ったもの。`doc/debug_env.md` §4.6）をファームから使い、Acquiring と Running の R1–R5 だけを実装する。`read_touch.rs` を差し替え、`at42qt.rs` の引数を整理する。この段階ではノイズ除去は無し（filtered = raw）、`Pad` の移動平均も残す
 2. **実機確認と調整**: §6 の 6.1–6.3 を確認し、`TOUCH_THRESHOLD` と追従パラメータを調整する
 3. **ノイズ除去の移設**: 信号処理にメディアンと移動平均を入れ、`Pad` の移動平均を外す。6.9 を確認する
 4. **Calibrating**: 設定画面での校正（§3.7）を追加し、6.4 を確認する

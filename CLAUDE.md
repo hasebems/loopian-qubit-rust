@@ -21,9 +21,11 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 # PC アプリ（qubit_monitor、デバッグ環境用）。必ず tools/qubit_monitor の中で実行する（直下の .cargo/config.toml のターゲットが効くため）
 cd tools/qubit_monitor && cargo run --release       # GUI
 cd tools/qubit_monitor && cargo run --example probe # GUI 無しでファームとの通信を確かめる
+cd tools/qubit_monitor && cargo run --example replay_algo -- 記録.qlog   # 記録を touch_algo に通して結果を表示
+cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号処理（no_std のビルドと、ホストでのテスト）
 ```
 
-- ユニットテストは無い（no_std・実機依存）。確認は `cargo check` / clippy と実機動作で行う。PC アプリ（`tools/qubit_monitor`）には `cargo test` がある（プロトコルの解釈・記録ファイル・統計）
+- ユニットテストは無い（no_std・実機依存）。確認は `cargo check` / clippy と実機動作で行う。PC アプリ（`tools/qubit_monitor`）と `crates/touch_algo` には `cargo test` がある（プロトコルの解釈・記録ファイル・統計・信号処理）
 - `build.rs` が `memory.x` を OUT_DIR にコピーし、`BUILD_DATE` と `BUILD_VERSION`（`Cargo.toml` の version）を環境変数として埋め込む。起動画面（OLED page 0）に表示される
 - リンク時に `output.map` を生成する（git 管理外）
 - 開発環境は `flake.nix` + direnv（`.envrc`）でも用意できる（stable Rust + picotool）
@@ -84,6 +86,7 @@ cd tools/qubit_monitor && cargo run --example probe # GUI 無しでファーム�
 - `src/ui/ringled.rs`: NeoPixel の描画ロジック
 - `src/debug_protocol.rs`: `debug_stream` のパケットの組み立て。PC 側の解釈は `tools/qubit_monitor/src/protocol.rs` で、形式を変えるときは両方を直す
 - `tools/qubit_monitor/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
+- `crates/touch_algo/`: タッチの信号処理（ノイズ除去・基準値・onset、`doc/touch_baseline.md` §3）。no_std で、今は PC アプリだけが使う。ファームへは debug_env の段階 4 で移す
 
 ## 動作モードと MIDI
 

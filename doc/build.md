@@ -34,10 +34,20 @@ cargo fmt --check
 cd tools/qubit_monitor
 cargo run --release              # GUI を起動
 cargo run --example probe        # GUI 無しで、ファームとの通信を一通り確かめる
+cargo run --example replay_algo -- 記録.qlog   # 記録を touch_algo に通して、キー毎の結果を表示
 cargo test                       # PC アプリのテスト
 ```
 
 - **必ず `tools/qubit_monitor` に移動してから実行する**。リポジトリ直下から `--manifest-path` で指定すると、直下の `.cargo/config.toml` の組み込み向けターゲットが効いて失敗する
 - 使い方: ポートを選んで［接続］→［▶ 開始］でグラフが動く。［● 記録］で `.qlog` に保存、［記録を開く］で再生、［CSV 書き出し］で `.qlog` を CSV にする
 - 周期（2 / 5 / 10 / 20ms）はツールバーから変えられる。［マーカー］で波形に目印を付けられる
+- 右側の「アルゴリズム（touch_algo）」で、基準値などの計算を通す。パラメータを変えると表示中のデータに通し直す。［設定画面（校正）］は PC の計算だけのスイッチ（実機とは連動しない）
 - Mac では QUBIT は `/dev/cu.usbmodem*` として見える。認識がおかしいときは、Audio MIDI 設定から QUBIT を削除して挿し直す
+
+## touch_algo（信号処理）
+
+```sh
+cd crates/touch_algo
+cargo build                      # 組み込み向け（thumbv8m、no_std）でビルドできるか
+cargo test --target host-tuple   # テストは PC 上で動かす（直下の設定が thumbv8m なので --target が要る）
+```

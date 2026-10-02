@@ -2,6 +2,7 @@
 //!
 //! 画面は main.rs / app.rs、それ以外（プロトコル・記録・再生・統計）はこのライブラリに置く。
 //! examples/probe.rs からも使う
+pub mod algo;
 pub mod csv_export;
 pub mod playback;
 pub mod protocol;

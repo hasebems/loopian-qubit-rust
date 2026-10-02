@@ -16,3 +16,5 @@ egui_plot = "0.36"
 serialport = "4.10"
 rfd = "0.17"
 chrono = "0.4"
+# ノイズ除去・基準値・onset の計算。ファームと共有する（crates/touch_algo）
+touch_algo = { path = "../../crates/touch_algo" }

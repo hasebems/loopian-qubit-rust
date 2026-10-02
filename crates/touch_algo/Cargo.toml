@@ -1,0 +1,11 @@
+[package]
+name = "touch_algo"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Loopian::QUBIT のタッチ信号処理（ノイズ除去・基準値・onset）。ファームと PC アプリで共有する（doc/touch_baseline.md）"
+
+# ファーム・PC アプリのどちらのワークスペースにも入れず、それぞれが path 依存で使う
+[workspace]
+
+[dependencies]
