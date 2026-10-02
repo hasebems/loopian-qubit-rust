@@ -27,6 +27,9 @@ use qubit_monitor::store::{self, Store};
 /// ファームの period コマンドで選べる周期（µs）。ファームの SCAN_PERIODS_US と同じ
 const PERIODS_US: [u32; 4] = [2_000, 5_000, 10_000, 20_000];
 /// 1 本の折れ線に描く点の上限の目安。超えたら区間毎の最小・最大に間引く
+/// 上の操作の行（接続・記録・開始など）の文字の大きさと、ボタンの内側の余白
+const TOOLBAR_FONT_SIZE: f32 = 18.0;
+const TOOLBAR_BUTTON_PADDING: egui::Vec2 = egui::vec2(12.0, 6.0);
 const MAX_PLOT_POINTS: usize = 4000;
 const REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 /// 縦軸を固定するグラフ（下段・バー）で選べる範囲の上端。［+］で狭め、［−］で広げる
@@ -294,6 +297,7 @@ impl MonitorApp {
     // ------------------------------------------------------------------
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
+            large_controls(ui);
             let connected = self.link.is_some();
             ui.add_enabled_ui(!connected, |ui| {
                 let selected = self
@@ -371,7 +375,7 @@ impl MonitorApp {
                 let current = self.store.info.as_ref().map(|i| i.scan_period_us);
                 let text = current.map_or("?".into(), |us| format!("{}ms", us as f64 / 1000.0));
                 egui::ComboBox::from_id_salt("period")
-                    .width(60.0)
+                    .width(80.0)
                     .selected_text(text)
                     .show_ui(ui, |ui| {
                         for us in PERIODS_US {
@@ -437,6 +441,7 @@ impl MonitorApp {
         let mut rewind = false;
         let mut close = false;
         ui.horizontal(|ui| {
+            large_controls(ui);
             ui.label(RichText::new("再生").strong());
             let label = if player.playing {
                 "⏸ 一時停止"
@@ -455,7 +460,7 @@ impl MonitorApp {
             }
             ui.label("速さ:");
             egui::ComboBox::from_id_salt("speed")
-                .width(60.0)
+                .width(80.0)
                 .selected_text(format!("×{}", player.speed))
                 .show_ui(ui, |ui| {
                     for speed in playback::SPEEDS {
@@ -1102,6 +1107,19 @@ fn param<N: egui::emath::Numeric>(
 }
 
 /// バー表示。縦軸は 0〜選んだ範囲に固定する
+/// 操作の行のボタン・選択・文字を大きくする（その ui の中だけ）
+fn large_controls(ui: &mut egui::Ui) {
+    let style = ui.style_mut();
+    for text_style in [egui::TextStyle::Button, egui::TextStyle::Body] {
+        style
+            .text_styles
+            .insert(text_style, egui::FontId::proportional(TOOLBAR_FONT_SIZE));
+    }
+    style.spacing.button_padding = TOOLBAR_BUTTON_PADDING;
+    style.spacing.interact_size.y = TOOLBAR_FONT_SIZE + 2.0 * TOOLBAR_BUTTON_PADDING.y;
+    style.spacing.item_spacing.x = 8.0;
+}
+
 fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>, scale: &mut usize) {
     let nkeys = bars.len() as f64;
     ui.horizontal(|ui| {
