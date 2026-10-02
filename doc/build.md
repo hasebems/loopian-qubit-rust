@@ -19,6 +19,9 @@ cargo run --release                                 # 書き込み・実行（BO
 cargo run --release --features no_pca9544,debug_stream   # デバッグ環境の実験用（6 キー直結）
 ```
 
+- リンカの引数（`--nmagic`・`-Tlink.x`・`-Map=output.map`）は `build.rs` から渡している（2026-10-02 から）。以前は `.cargo/config.toml` の rustflags で渡していたが、CI の nightly のジョブ（新しい cargo）で rustflags がリンカに届かず、`__sidata` などが未定義でリンクに失敗した。build.rs からなら cargo の版に関係なく渡せる
+- CI の nightly のジョブは参考用（`continue-on-error`）。失敗しても CI 全体の結果は成功になる
+
 git push の前に（CI と同じ条件）:
 
 ```sh
