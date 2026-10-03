@@ -256,7 +256,7 @@ CLAUDE.md にある「設定画面ではセンサーに触れない」という�
 
 ### 3.10 デバッグ表示
 
-- デバッグ表示用の `POINT0`–`POINT5` はキー 0–5 の値を出す。何を出すか（raw / filtered / baseline / output）は `const` で切り替えられるようにする
+- デバッグ表示用の `POINT0`–`POINT5` はキー 0–5 の output を出す（2026-10-03 決定。演奏の確認に分かりやすいため。切り替えの `const` は設けない）
 - 1 周のスキャン時間は、`task_architecture.md` で追加した OLED の診断ページ（`SCAN_TIME` の最小・平均・最大）で確認できる
 
 ### 3.11 調整パラメータ（初期値は仮。実機で調整する）
@@ -292,60 +292,52 @@ CLAUDE.md にある「設定画面ではセンサーに触れない」という�
 
 ### 4.1 変更の全体像
 
+ファームへの適用（`doc/debug_env.md` の段階 4）で行うこと。2026-10-03 に、できあがった `touch_algo` に合わせて見直した。
+
 | ファイル | 変更内容 |
 |---|---|
-| `crates/touch_algo`（新規） | ノイズ除去・基準値の計算（`TouchSignal`）。I2C には触れない純粋な計算だけにする。no_std のクレートとし、PC アプリ（`tools/qubit_monitor`）とファームの両方から path 依存で使う（2026-10-01 決定。`doc/debug_env.md` §4.6）。PC アプリで先に作って調整し、ファームへはその後に移す |
-| `Cargo.toml` | 依存に `touch_algo` を path で追加する（ファームへ移すとき） |
-| `src/touch/read_touch.rs` | チップの基準値を読む処理と `reference_adjust` を削除し、`TouchSignal` を呼び出して output を得る |
-| `src/devices/at42qt.rs` | `read_6key` の `reference` 引数を削除する |
-| `src/tasks/touch.rs` | `touch_task` で、`read_touch` の結果（output）を従来どおり `QubitTouch` に渡す |
-| `src/touch/qtouch.rs` | `Pad` の移動平均を外す（`MAX_MOVING_AVERAGE` = 1）。`TOUCH_THRESHOLD` を調整し直す |
-| `CLAUDE.md` | `read_touch.rs` の説明、設定画面の説明を新方式に合わせて更新する |
+| `crates/touch_algo` | 変更しない（PC アプリで作って確かめたものを、そのまま使う） |
+| `Cargo.toml` | 依存に `touch_algo` を path で追加する |
+| `src/touch/read_touch.rs` | チップの基準値を読む処理と `reference_adjust` を削除する。全キーの raw と読み取り成功フラグ（`valid`）を返すだけにする |
+| `src/devices/at42qt.rs` | `read_6key` と `read_1key` の `reference` 引数を削除し、Key Signal（レジスタ 4〜）だけを読む |
+| `src/tasks/touch.rs` | `TouchSignal` を持ち、解析と同じ周期で `process()` を呼んで、output を `QubitTouch` に渡す。`POINT0`–`POINT5` に output を出す |
+| `src/touch/qtouch.rs` | `Pad` の移動平均を外す（`MAX_MOVING_AVERAGE` = 1）。`TOUCH_THRESHOLD` は実際に演奏して必要なら調整する |
+| `CLAUDE.md` | `read_touch.rs` の説明、設定画面での校正、`touch_algo` の使われ方を新方式に合わせて更新する |
 
-### 4.2 `TouchSignal`（`crates/touch_algo`、新規）
+### 4.2 `TouchSignal`（`crates/touch_algo`）
 
-ノイズ除去・基準値の計算を I2C の読み取りから切り離し、1 スキャン分の raw 配列を渡すと output が返る形にする。こうしておくと、ロジックだけを読み・直しやすくなる（ユニットテストは無いが、将来ホスト側でテストする余地も残せる）。
+ノイズ除去・基準値の計算を I2C の読み取りから切り離した、純粋な計算のクレート（no_std）。PC アプリとファームで同じコードを使う。API は次のとおり（実装済み）。
 
 ```rust
-pub struct TouchSignal {
-    keys: [KeySignal; TOTAL_QT_KEYS], // フィルタ履歴・基準値など
-    state: BaselineState,             // Acquiring / Running / Calibrating
-    acquire_started: Instant,
-    last_update: Instant,
-    calib_started: Instant,
-}
+// K はキー毎の状態の置き場所。ファームは [KeyState; TOTAL_QT_KEYS]、PC は Vec<KeyState>
+pub struct TouchSignal<K> { pub params: Params, /* ... */ }
 
-impl TouchSignal {
-    pub const fn new() -> Self;
+impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
+    /// keys は全キー分の KeyState::INITIAL で埋めて渡す
+    pub fn new(keys: K, params: Params) -> Self;
 
-    /// 1 スキャン分の raw を受け取り、output を書き出す。
-    /// valid[i] が false のキーは読み取り失敗として扱い、フィルタ履歴にも基準値にも反映しない。
-    pub fn process(
-        &mut self,
-        raw: &[u16; TOTAL_QT_KEYS],
-        valid: &[bool; TOTAL_QT_KEYS],
-        calibrating: bool,         // SETTING_MODE
-        now: Instant,
-        output: &mut [u16; TOTAL_QT_KEYS],
-    );
+    /// 1 回分を処理する
+    /// - now_us: 時刻（µs、u32。一周は wrapping_sub で扱う）
+    /// - raw: キー毎の生値
+    /// - valid: 読み取り成功フラグ（1 bit / キー）。失敗したキーはフィルタ履歴にも基準値にも反映しない
+    /// - calibrating: 設定画面にいるか（SETTING_MODE）
+    pub fn process(&mut self, now_us: u32, raw: &[u16], valid: u128, calibrating: bool);
 
-    /// デバッグ表示用
-    pub fn filtered(&self, key: usize) -> u16;
-    pub fn baseline(&self, key: usize) -> u16;
-    pub fn noise_floor(&self, key: usize) -> u16;
+    pub fn state(&self) -> State;          // Acquiring / Running / Calibrating
+    pub fn keys(&self) -> &[KeyState];      // 結果: output()・filtered()・baseline()・delta()・noise_floor()
 }
 ```
 
 `process()` の中の処理の流れは次のとおり。
 
-1. `calibrating` の立ち上がり・立ち下がりを検出して、状態を切り替える（§3.7）
-2. 読み取りに成功したキーだけ、ノイズ除去をかけて filtered を更新する（§3.3）
-3. 全キーの delta を計算する（`filtered - (baseline_q >> 8)`、`i32` で計算）
-4. `now - last_update >= BASELINE_UPDATE_INTERVAL_MS` なら、状態に応じて基準値を更新する
+1. 読み取りに成功したキーだけ、ノイズ除去をかけて filtered を更新する（§3.3）
+2. `calibrating` の立ち上がり・立ち下がりを検出して、状態を切り替える（§3.7）
+3. 近傍の静かさ・大きく負の継続・固着を、全キー分判定する（§3.6, §3.7）。判定と更新を分けるのは、更新済みのキーの値で近傍判定がぶれないようにするため
+4. 前回の更新から `BASELINE_UPDATE_INTERVAL_MS` 以上たっていれば、状態に応じて基準値を更新する
     - Acquiring: 積算する（§3.5）
-    - Running: 近傍の静かさを先に全キー分判定し、その後で R1–R5 と固着回復を適用する（§3.6, §3.7）。判定と更新を分けるのは、更新済みのキーの値で近傍判定がぶれないようにするため
+    - Running: R1–R5、または固着からの回復（§3.6, §3.7）
     - Calibrating: 速い追従とノイズの計測（§3.7）
-5. output を計算する（§3.7）
+5. delta と output を計算する（§3.7）
 
 ### 4.3 `src/touch/read_touch.rs`
 
@@ -355,34 +347,36 @@ impl TouchSignal {
 - `set_reference()` と、12 スキャンに 1 回それを呼ぶ処理
     - これで 12 スキャンに 1 回、全 16 チャンネル分の読み取り（PCA9544 の切り替えを含む）が無くなり、スキャン時間のばらつきも減る
 - スキャンループ内の `reference_adjust` の更新と、差し引き
+- `POINT0`–`POINT5` の更新（`touch_task` に移す）
 
-**追加・変更するもの**
+**変更するもの**
 
-- フィールド `signal: TouchSignal`、`valid: [bool; TOTAL_QT_KEYS]`
-- `touch_sensor_scan()`
-    1. 従来どおり全チャンネルを読み、`raw_value` を更新する。読み取りに成功したキーは `valid = true`、失敗したキーは `valid = false` にする
-    2. 全チャンネルを読み終えたら、`signal.process(...)` を呼んで output を得て、呼び出し元（`touch_task`）に返す
-    3. `POINT0`–`POINT5` を更新する（§3.10）
+- `touch_sensor_scan()` は、全チャンネルを読んで `raw_value` を更新するだけにする。hi/lo ずれの読み直し（§3.3）と、読み取りに失敗したキーに前回の値を残すことは今までどおり
+- 読み取り成功フラグ `valid`（u128、1 bit / キー）を、`debug_stream` のときだけでなく常に持つ。`raw_value` と `valid` を返す（`debug_stream` でもこれをそのまま送る）
 
 **初期化**
 
-- `init_touch_sensors()` は変更しない。チップの LP_MODE / MAX_DUR の設定はチップ内部の判定用で、raw には影響しないため、現状のままで問題ない（key6 の無効化は §1.3 で実装済み）
+- `init_touch_sensors()` は変更しない（key6 の無効化は §1.3 で実装済み）
 - AVE（レジスタ 39–45）を上げてチップ側で S/N を稼ぐ案は、§7 の未決事項とする
 
 ### 4.4 `touch_task`
 
-- スキャンの周期化と、スキャン → 解析をひと続きにする構成は、`doc/task_architecture.md` で導入済みとする
-- `touch_task` は `read_touch` から output を受け取り、従来どおり `QubitTouch` に渡す
+- `TouchSignal<[KeyState; TOTAL_QT_KEYS]>` を `touch_task` の中に持つ（タスクの future は静的に確保されるので、スタックは使わない。96 キーで数 KB）
+- **`process()` を呼ぶ周期**: 解析（`QubitTouch`）と同じ、`analysis_divider()` フレームに 1 回（約 10ms 毎）とする（2026-10-03 決定）。§3.11 のパラメータ（移動平均のサンプル数など）は 8〜10ms 周期を前提にしているため。通常の構成ではスキャンが 10ms なので毎スキャンになる。`debug_stream`（スキャン 2ms）では 5 スキャンに 1 回になり、PC で間引いて見ていたのと同じ扱いになる
+- **起動直後**: `TOUCH_STARTUP_SETTLE_MS`（500ms）の間は `process()` も呼ばない（2026-10-03 決定）。チップ自身の起動時の校正（230ms 未満）が終わる前の値で初期取得しないため。500ms の後、`ACQUIRE_MS` の初期取得が終わるまで output は 0
+- `calibrating` には `SETTING_MODE` を渡す
+- 各キーの `output()` を、従来どおり `QubitTouch::set_value()` で渡す
+- `POINT0`–`POINT5`（OLED の表示）には、キー 0〜5 の output を出す（2026-10-03 決定。演奏の確認に分かりやすいため）
 - 毎フレームの解析（フレーム駆動）と、`QubitTouch` の時間基準化は、速さ検出の設計で扱う
 
 ### 4.5 `src/devices/`
 
-- `at42qt.rs`: `read_6key(i2c, result, reference: bool)` から `reference` 引数を削除し、Key Signal（レジスタ 4）だけを読む関数にする。チップの基準値を比較用に見たくなる可能性があるので、`read_6key_reference()` を `#[allow(dead_code)]` 付きで残すかどうかは実装時に決める
+- `at42qt.rs`: `read_6key` と `read_1key` から `reference` 引数を削除し、Key Signal（レジスタ 4〜）だけを読む関数にする。チップの基準値は読まない
 
 ### 4.6 `src/touch/qtouch.rs`
 
-- `Pad::MAX_MOVING_AVERAGE` を 1 にする（ノイズ除去は信号処理に移るため）。構造ごと外すかどうかは、実機で確認してから決める
-- `TOUCH_THRESHOLD` を調整し直す
+- `Pad::MAX_MOVING_AVERAGE` を 1 にする（ノイズ除去は `touch_algo` に移るため。2026-10-03 決定）。構造ごと外すかどうかは、実機で確認してから決める
+- `TOUCH_THRESHOLD`（32）は、まずそのままで演奏して確かめ、必要なら調整する。output は `delta − noise_floor` で、今の「raw − チップの基準値 − reference_adjust」と大きさはほぼ同じはず
 - 位置検出・追跡・ノート変換のロジックは変えない
 
 ### 4.7 変更しないもの
@@ -398,27 +392,26 @@ impl TouchSignal {
 
 本設計の方針は一度には決めず、実際に触りながら決めていく。そのため、まず `doc/debug_env.md` のデバッグ環境（USB CDC で生値を PC に送り、PC アプリで表示・記録・アルゴリズムを試す）を作る。実験は PCA9544 無しの 6 キー構成（`no_pca9544`）で行う。以下の手順は、PC 上で方針が固まった後にファームへ移すときの目安とする。§3 の仮の値や規則は、PC での実験結果で置き換えていく。
 
-各ステップの終わりに `cargo build`、`--features test_mode`、`--features no_pca9544`、clippy がすべて通ることを確認し、ステップごとにコミットする。どの段階で挙動が変わったかを追えるようにするため。
+各ステップの終わりに `cargo build`、`--features test_mode`、`--features no_pca9544`、`--features no_pca9544,debug_stream`、clippy がすべて通ることを確認し、ステップごとにコミットする。
 
 スキャン時間の実測・周期化・OLED の分離は、`task_architecture.md` で済んでいる。
 
-1. **基準値の自前管理**: `touch_algo`（PC アプリで先に作ったもの。`doc/debug_env.md` §4.6）をファームから使い、Acquiring と Running の R1–R5 だけを実装する。`read_touch.rs` を差し替え、`at42qt.rs` の引数を整理する。この段階ではノイズ除去は無し（filtered = raw）、`Pad` の移動平均も残す
-2. **実機確認と調整**: §6.2 の F1・F2 を確認し、`TOUCH_THRESHOLD` と追従パラメータを調整する
-3. **ノイズ除去の移設**: 信号処理にメディアンと移動平均を入れ、`Pad` の移動平均を外す。F2 で反応の遅れが体感で増えないことを確認する
-4. **Calibrating**: 設定画面での校正（§3.7）を追加し、F6 を確認する
-5. **固着回復**: §3.7 を追加し、F3・F4・F5 を確認する
-6. **ドキュメント**: `CLAUDE.md` を更新する
+`touch_algo` は PC アプリで、ノイズ除去・基準値・校正・固着からの回復まですべてそろえて確かめてある（§6.1）。そのため、ファームへは少しずつではなく、まとめて入れる（2026-10-03 見直し）。
+
+1. **ファームへの適用**: §4 のとおり、`read_touch.rs`・`at42qt.rs`・`touch_task`・`qtouch.rs`（`Pad` の移動平均を外す）を変える
+2. **実機での確認**: §6.2 の F1〜F6 を確かめる。`TOUCH_THRESHOLD` と追従のパラメータは、必要なら実際に演奏して調整する
+3. **ドキュメント**: `CLAUDE.md` を更新する
 
 ## 6. 確認項目
 
 確認は 2 つの段階に分ける（2026-10-03 決定。進め方は `doc/debug_env.md` §6.2）。
 
-- **6.1 baseline 処理の確定**（PC、ファームに入れる前）: ファームはまだチップの基準値を使っているので、演奏の結果（ノートの出方）では確かめられない。6 キー直結で記録し、qubit_monitor で再生して `touch_algo` の baseline・output で判断する
+- **6.1 baseline 処理の確定**（PC、ファームに入れる前）: ファームはまだチップの基準値を使っているので、演奏の結果（ノートの出方）では確かめられない。6 キー直結で、qubit_monitor に表示される `touch_algo` の baseline・output を見て判断する
 - **6.2 ファームに適用した後**（実機）: 6.1 で確定したものをファームに入れ、演奏の結果で確かめる
 
 ### 6.1 baseline 処理の確定（PC）
 
-シナリオ毎に記録し（区切りはマーカーで付ける）、間引きは最終構成に近い 8ms にする。確かめた記録は残し、ファームに入れた後の比較にも使う。
+qubit_monitor の画面で、ある程度目で確かめられれば十分とする（記録を残して後で比べるほどの厳密さは求めない。2026-10-03）。間引きは最終構成に近い 8ms にする。
 
 | # | シナリオ | 見るところ | 期待する結果 |
 |---|---|---|---|
