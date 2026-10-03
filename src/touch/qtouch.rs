@@ -11,7 +11,9 @@ use portable_atomic::Ordering;
 //      Touch Constants
 // =========================================================
 pub const MAX_PADS: u16 = TOTAL_QT_KEYS as u16; // MAX_SENS;
-pub const TOUCH_THRESHOLD: u16 = 32; // Threshold for touch point detection
+// Threshold for touch point detection。Pad の移動平均（4 サンプルの合計）を外したので、
+// 以前の 32 を 1/4 にして同じ感度にしている（doc/touch_baseline.md §4.6）
+pub const TOUCH_THRESHOLD: u16 = 8;
 pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec あたりの片側変化量
 pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
 pub const HISTERESIS: f32 = 0.7; // Hysteresis value for touch point detection
@@ -38,12 +40,14 @@ const TOUCH_POINT_ERROR: u8 = 0xfe;
 // =========================================================
 #[derive(Copy, Clone, Debug)]
 pub struct Pad {
-    mv_avg_value: u16, // 移動平均(MAX_MOVING_AVERAGEで割らない)
+    mv_avg_value: u16, // 移動平均(MAX_MOVING_AVERAGEで割らない。今は 1 なので値そのもの)
     past_value: [u16; Pad::MAX_MOVING_AVERAGE],
     past_index: usize,
 }
 impl Pad {
-    const MAX_MOVING_AVERAGE: usize = 4; // Number of samples for moving average}
+    // Number of samples for moving average。ノイズ除去は touch_algo が行うので 1 にした
+    // （doc/touch_baseline.md §4.6）。構造ごと外すかは実機で確認してから決める
+    const MAX_MOVING_AVERAGE: usize = 1;
 
     fn new() -> Self {
         Pad {
@@ -53,6 +57,7 @@ impl Pad {
         }
     }
     /// 移動平均を更新するために、現在の値をセットする
+    #[allow(clippy::modulo_one)] // MAX_MOVING_AVERAGE を 1 にしている間（構造は残す）
     fn set_crnt(&mut self, value: u16) {
         let crnt_value = value;
         self.past_value[self.past_index] = crnt_value;
@@ -435,14 +440,16 @@ where
         velocity = velocity.clamp(32, 112);
         velocity as u8
     }
-    // デフォルトの Note On ベロシティ計算: 強度に基づいて 100..255 の範囲で線形に決定
+    // デフォルトの Note On ベロシティ計算: 強度に基づいて 100..255 の範囲で線形に決定。
+    // Pad の移動平均（4 サンプルの合計）を外して強度が 1/4 になったので、
+    // 以前（> 255 で上限、>> 4）と同じ結果になるよう、> 63 と >> 2 にしている
     fn default_note_on_velocity(intensity: i16) -> u8 {
         if intensity < 0 {
             0
-        } else if intensity > 255 {
+        } else if intensity > 63 {
             255
         } else {
-            (100 + (intensity >> 4)) as u8
+            (100 + (intensity >> 2)) as u8
         }
     }
 

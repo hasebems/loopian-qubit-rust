@@ -6,6 +6,7 @@ impl At42Qt1070 {
     const _STATUS: u8 = 2;
     const LP_MODE: u8 = 54;
     const MAX_DUR: u8 = 55;
+    const KEY_SIGNAL: u8 = 4; // Key Signal（key0 の上位バイト）。チップの基準値（18〜）は読まない
     const AVE_AKS_KEY6: u8 = 45;
 
     pub const fn new() -> Self {
@@ -27,38 +28,28 @@ impl At42Qt1070 {
         i2c.write(Self::ADDR, &i2cdata).await
     }
 
-    /// 1キーの状態を読み取る
-    pub async fn read_1key<I2C>(
-        &mut self,
-        i2c: &mut I2C,
-        key: u8,
-        reference: bool,
-    ) -> Result<u16, I2C::Error>
+    /// 1キーの Key Signal を読み取る（key: 0-6）
+    pub async fn read_1key<I2C>(&mut self, i2c: &mut I2C, key: u8) -> Result<u16, I2C::Error>
     where
         I2C: embedded_hal_async::i2c::I2c,
     {
         let mut buf = [0u8; 2];
-        let wr_adrs = if reference {
-            18 + key * 2
-        } else {
-            4 + key * 2 //  0-6
-        };
+        let wr_adrs = Self::KEY_SIGNAL + key * 2;
         i2c.write_read(Self::ADDR, &[wr_adrs], &mut buf).await?;
         Ok(buf[0] as u16 * 256 + buf[1] as u16)
     }
-    /// 6キーの状態を読み取る
+    /// 6キーの Key Signal を読み取る
     pub async fn read_6key<I2C>(
         &mut self,
         i2c: &mut I2C,
         result: &mut [u16; 6],
-        reference: bool,
     ) -> Result<(), I2C::Error>
     where
         I2C: embedded_hal_async::i2c::I2c,
     {
         let mut buf = [0u8; 12];
-        let wr_adrs = if reference { 18 } else { 4 };
-        i2c.write_read(Self::ADDR, &[wr_adrs], &mut buf).await?;
+        i2c.write_read(Self::ADDR, &[Self::KEY_SIGNAL], &mut buf)
+            .await?;
         for i in 0..6 {
             result[i] = buf[i * 2] as u16 * 256 + buf[i * 2 + 1] as u16;
         }

@@ -1332,6 +1332,7 @@ dependencies = [
  "ssd1306",
  "static_cell",
  "tb6612fng",
+ "touch_algo",
  "usbd-hid",
 ]
 
@@ -1967,6 +1968,10 @@ checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "touch_algo"
+version = "0.1.0"
 
 [[package]]
 name = "tracing"

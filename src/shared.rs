@@ -23,7 +23,7 @@ pub const MIDI_TX_QUEUE_SIZE: usize = 16;
 pub static MIDI_TX: Channel<CriticalSectionRawMutex, MidiPacket, MIDI_TX_QUEUE_SIZE> =
     Channel::new();
 
-// 表示用変数: read_touch → OLED (page 2)
+// 表示用変数: キー 0〜5 の output（touch_algo）: touch_task → OLED (page 2)
 pub static POINT0: AtomicU16 = AtomicU16::new(0);
 pub static POINT1: AtomicU16 = AtomicU16::new(0);
 pub static POINT2: AtomicU16 = AtomicU16::new(0);
@@ -48,7 +48,7 @@ pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果: press
 // 動作モード（Piano/Violin）: ui_task → touch_task, pressure_task, midi_rx_task, OLED
 pub static WORK_MODE: AtomicU8 = AtomicU8::new(0);
 // 設定画面にいる（タッチ・圧力の基準値を補正中。センサーに触れない前提）
-// ui_task → touch_task (read_touch), pressure_task, ringled
+// ui_task → touch_task (touch_algo の校正), pressure_task, ringled
 pub static SETTING_MODE: AtomicBool = AtomicBool::new(false);
 pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用: touch_task (qtouch のビブラート) → OLED (page 1)
 pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false); // touch_task (qtouch) → pressure_task

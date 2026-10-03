@@ -1,21 +1,14 @@
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::I2C1;
 use embassy_time::{Duration, with_timeout};
-use portable_atomic::Ordering;
 
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
-use crate::shared::SETTING_MODE;
-use crate::shared::{POINT0, POINT1, POINT2, POINT3, POINT4, POINT5};
 
+/// 全キーの生値（Key Signal）を読む。基準値の管理・ノイズ除去は touch_algo が行う（doc/touch_baseline.md §4.3）
 pub struct ReadTouch {
     raw_value: [u16; constants::TOTAL_QT_KEYS],
-    reference: [u16; constants::TOTAL_QT_KEYS],
-    reference_adjust: [u16; constants::TOTAL_QT_KEYS],
-    reference_counter: usize,
-    // デバッグ用: 最後のスキャンの読み取り成功フラグ（1 bit / キー）
-    #[cfg(feature = "debug_stream")]
-    debug_valid: u128,
+    valid: u128, // 最後のスキャンの読み取り成功フラグ（1 bit / キー）
 }
 
 impl ReadTouch {
@@ -53,11 +46,7 @@ impl ReadTouch {
     pub fn new() -> Self {
         Self {
             raw_value: [0u16; constants::TOTAL_QT_KEYS],
-            reference: [0u16; constants::TOTAL_QT_KEYS],
-            reference_adjust: [0u16; constants::TOTAL_QT_KEYS],
-            reference_counter: 0,
-            #[cfg(feature = "debug_stream")]
-            debug_valid: 0,
+            valid: 0,
         }
     }
 
@@ -103,55 +92,15 @@ impl ReadTouch {
         true
     }
 
-    pub async fn set_reference(
-        &mut self,
-        pca: &pca9544::Pca9544,
-        at42: &mut at42qt::At42Qt1070,
-        i2c: &mut I2c<'static, I2C1, i2c::Async>,
-    ) {
-        for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
-            let dev = ch / constants::PCA9544_NUM_CHANNELS;
-            let ch_in_dev = Self::convert_channel(ch);
-            pca.select(i2c, dev, ch_in_dev).await.ok();
-
-            let sid = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
-            let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
-            let read_result = with_timeout(
-                Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
-                at42.read_6key(i2c, &mut raw_data, true),
-            )
-            .await;
-            if let Ok(Ok(())) = read_result {
-                for (offset, reference_raw) in raw_data
-                    .iter()
-                    .take(constants::AT42QT_KEYS_PER_DEVICE)
-                    .enumerate()
-                {
-                    let shifted_sid = Self::shifted_index(sid + offset);
-                    self.reference[shifted_sid] = *reference_raw;
-                }
-            }
-            // PCA9544のチャネルが最後のときに切断する
-            if Self::is_last_channel(ch) {
-                pca.disconnect(i2c, dev).await.ok();
-            }
-        }
-    }
-
-    /// 全キーをスキャンし、基準値を差し引いた値を out に書き込む
+    /// 全キーをスキャンし、生値と読み取り成功フラグを更新する。
+    /// 読み取りに失敗したキーはフラグを 0 にし、生値は前回のままにする
     pub async fn touch_sensor_scan(
         &mut self,
         pca: &pca9544::Pca9544,
         at42: &mut at42qt::At42Qt1070,
         i2c: &mut I2c<'static, I2C1, i2c::Async>,
-        out: &mut [u16; constants::TOTAL_QT_KEYS],
     ) {
-        let work_mode_display = SETTING_MODE.load(Ordering::Relaxed);
-        let mut data = [0u16; constants::TOTAL_QT_KEYS];
-        #[cfg(feature = "debug_stream")]
-        {
-            self.debug_valid = 0;
-        }
+        self.valid = 0;
         for ch in 0..(constants::TOTAL_CH as u8) {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
             let ch_in_dev = Self::convert_channel(ch);
@@ -161,7 +110,7 @@ impl ReadTouch {
             let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
             let read_result = with_timeout(
                 Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
-                at42.read_6key(i2c, &mut raw_data, false),
+                at42.read_6key(i2c, &mut raw_data),
             )
             .await;
 
@@ -178,7 +127,7 @@ impl ReadTouch {
                         // hi/lo ずれの疑い。このキーだけ読み直す。失敗したら前回の値を使う
                         raw = match with_timeout(
                             Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
-                            at42.read_1key(i2c, key as u8, false),
+                            at42.read_1key(i2c, key as u8),
                         )
                         .await
                         {
@@ -186,38 +135,8 @@ impl ReadTouch {
                             _ => old,
                         };
                     }
-                    #[cfg(feature = "debug_stream")]
-                    {
-                        self.debug_valid |= 1u128 << shifted_sid;
-                    }
                     self.raw_value[shifted_sid] = raw;
-                    if work_mode_display {
-                        // 表示モード中は補正値を大きい方向にのみ更新する
-                        let adjust = raw.saturating_sub(self.reference[shifted_sid]);
-                        if adjust > self.reference_adjust[shifted_sid] {
-                            self.reference_adjust[shifted_sid] = adjust;
-                        }
-                    }
-
-                    data[shifted_sid] = raw
-                        .saturating_sub(self.reference[shifted_sid])
-                        .saturating_sub(self.reference_adjust[shifted_sid]);
-                }
-            } else {
-                // 読み取り失敗時は前回値を維持してスキャン結果を連続化する
-                for sid in start_ch..(start_ch + constants::AT42QT_KEYS_PER_DEVICE) {
-                    let shifted_sid = Self::shifted_index(sid);
-                    let raw = self.raw_value[shifted_sid];
-                    if work_mode_display {
-                        let adjust = raw.saturating_sub(self.reference[shifted_sid]);
-                        if adjust > self.reference_adjust[shifted_sid] {
-                            self.reference_adjust[shifted_sid] = adjust;
-                        }
-                    }
-
-                    data[shifted_sid] = raw
-                        .saturating_sub(self.reference[shifted_sid])
-                        .saturating_sub(self.reference_adjust[shifted_sid]);
+                    self.valid |= 1u128 << shifted_sid;
                 }
             }
             // PCA9544のチャネルが最後のときに切断する
@@ -225,25 +144,11 @@ impl ReadTouch {
                 pca.disconnect(i2c, dev).await.ok();
             }
         }
-        out.copy_from_slice(&data);
-
-        if self.reference_counter == 0 {
-            self.set_reference(pca, at42, i2c).await;
-        }
-        self.reference_counter = (self.reference_counter + 1) % 12;
-
-        POINT0.store(self.raw_value[0], Ordering::Relaxed);
-        POINT1.store(self.raw_value[1], Ordering::Relaxed);
-        POINT2.store(self.raw_value[2], Ordering::Relaxed);
-        POINT3.store(self.raw_value[3], Ordering::Relaxed);
-        POINT4.store(self.raw_value[4], Ordering::Relaxed);
-        POINT5.store(self.raw_value[5], Ordering::Relaxed);
     }
 
-    /// デバッグ用: 最後のスキャンの生値（hi/lo ずれを読み直した後）と読み取り成功フラグ。
+    /// 最後のスキャンの生値（hi/lo ずれを読み直した後）と読み取り成功フラグ（1 bit / キー）。
     /// 読み取りに失敗したキーはフラグが 0 で、生値は前回のまま
-    #[cfg(feature = "debug_stream")]
-    pub fn debug_raw(&self) -> (&[u16; constants::TOTAL_QT_KEYS], u128) {
-        (&self.raw_value, self.debug_valid)
+    pub fn raw(&self) -> (&[u16; constants::TOTAL_QT_KEYS], u128) {
+        (&self.raw_value, self.valid)
     }
 }

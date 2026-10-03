@@ -13,6 +13,8 @@ no_pca9544 = ["test_mode"]
 debug_stream = []
 
 [dependencies]
+# タッチの信号処理（ノイズ除去・基準値）。PC アプリ（tools/qubit_monitor）と共有する
+touch_algo = { path = "crates/touch_algo" }
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", branch = "main" }
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", branch = "main" }
 embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", branch = "main", features = ["arch-cortex-m", "executor-thread", "executor-interrupt"] }

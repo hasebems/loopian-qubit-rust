@@ -28,10 +28,9 @@ pub const fn analysis_divider(scan_period_us: u32) -> u32 {
     let divider = ANALYSIS_PERIOD_US / scan_period_us;
     if divider == 0 { 1 } else { divider }
 }
-// 起動後、この時間はスキャンだけを行い、解析（ノートの生成）をしない。
-// read_touch はチップの基準値を最初のスキャンの後に初めて読むため、最初のフレームは基準値 0 で全キーが大きな値になる。
-// また AT42QT1070 自身も電源投入から 230ms 未満で基準値を校正する（データシート §6.5 TD）。
-// 基準値は 12 スキャン (120ms) 毎に読み直されるので、何度か更新されて落ち着くまで待つ
+// 起動後、この時間はスキャンだけを行い、信号処理（touch_algo）にも解析（ノートの生成）にも渡さない。
+// AT42QT1070 は電源投入から 230ms 未満で自身を校正する（データシート §6.5 TD）ので、
+// その前の値で touch_algo が基準値を初期取得しないようにする（doc/touch_baseline.md §4.4）
 pub const TOUCH_STARTUP_SETTLE_MS: u64 = 500;
 
 pub const MIDI_NOTE_ON: u8 = 0x90;

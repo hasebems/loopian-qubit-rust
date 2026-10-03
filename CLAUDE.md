@@ -51,7 +51,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 デュアルコアで、各コアが独立した Embassy `Executor` を持つ。Core1 はタッチの処理だけ、Core0 は入出力を受け持つ（設計は `doc/task_architecture.md`）。タスクの本体は `src/tasks/`、一覧は `src/tasks/mod.rs`。
 
 **Core1**
-- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。解析は `analysis_divider()` フレームに 1 回（`QubitTouch` の時間の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）は基準値が落ち着いていないので解析しない
+- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ 信号処理（`touch_algo` の `TouchSignal`。ノイズ除去・基準値）→ `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。信号処理と解析は `analysis_divider()` フレームに 1 回（`QubitTouch` と `touch_algo` の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）はチップが自身を校正しているので、信号処理にも解析にも渡さない。その後 `touch_algo` が基準値を初期取得する間（300ms）は output が 0。OLED の POINT 表示（キー 0〜5）は output
 - I2C1 は Core1 の中で `I2c::new_async` する。embassy-rp は呼び出したコアの NVIC で割り込みを有効にするので、こうすると I2C1 の割り込みも Core1 で処理される
 
 **Core0**
@@ -80,20 +80,20 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `src/tasks/`: タスク本体（ループ・周期・共有状態の読み書き）。計算や描画のロジックは `touch/`・`ui/` に置く
 - `src/constants.rs`: キー数・MIDI チャンネル・`WorkMode`・スキャン周期など。`test_mode` feature でキー数が変わる
 - `src/devices/`: I2C デバイスの最小ドライバ（`at42qt`, `pca9544`, `ssd1306`）。I2C を所有せず、呼び出し毎に `&mut I2C` を借用する
-- `src/touch/read_touch.rs`: PCA9544 の ch 切替と AT42QT 読み込み、基準値の差し引き。ch 順は `CH_CONVERSION` で反転、キー番号は `TOUCH_INDEX_SHIFT` で回転する
+- `src/touch/read_touch.rs`: PCA9544 の ch 切替と AT42QT の生値（Key Signal）の読み込み、hi/lo ずれの読み直し。チップの基準値は使わない。ch 順は `CH_CONVERSION` で反転、キー番号は `TOUCH_INDEX_SHIFT` で回転する
 - `src/touch/qtouch.rs`: タッチ位置検出・追跡（最大 4 点）、ノート変換、ベロシティ、ビブラート検出。MIDI 出力はコールバック経由
 - `src/touch/pressure.rs`: ADC の移動平均基準値（上昇 / 下降で追従率を変える）と CC11 変換テーブル。送る CC はパケットとして返し、送信はタスク側が行う
 - `src/ui/oled_display.rs`: OLED ページ描画（page 0–3 と 5（診断）を左右スイッチで巡回、4 は設定画面、10 以降はデモ）
 - `src/ui/ringled.rs`: NeoPixel の描画ロジック
 - `src/debug_protocol.rs`: `debug_stream` のパケットの組み立て。PC 側の解釈は `tools/qubit_monitor/src/protocol.rs` で、形式を変えるときは両方を直す
 - `tools/qubit_monitor/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
-- `crates/touch_algo/`: タッチの信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。no_std で、今は PC アプリだけが使う。ファームへは debug_env の段階 4 で移す
+- `crates/touch_algo/`: タッチの信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。no_std で、ファーム（`touch_task`）と PC アプリが同じコードを使う。パラメータは `Params::DEFAULT`
 
 ## 動作モードと MIDI
 
 - `WorkMode::Piano`: ノートは ch 13 (`MIDI_CH_FLOW` = 12)。受信ノートをリング LED に表示
 - `WorkMode::Violin`: ノートと CC11 は ch 2 (`MIDI_CH_VIOLIN` = 1)。SWAM Solo Strings 向けで、Expression (CC11) を送らないと音が出ない（`doc/midi_spec.md`）。モードに入るとき All Sound Off と CC11 初期値を送る
-- 左右スイッチの同時押しで設定画面（page 4、`SETTING_MODE=true`）に入り、エラーコードと診断値（最小・最大・回数）もクリアされる。設定画面で左スイッチを押すとモードが切り替わる。設定画面にいる間はタッチ・圧力の基準値補正を行うので、センサーに触れないこと
+- 左右スイッチの同時押しで設定画面（page 4、`SETTING_MODE=true`）に入り、エラーコードと診断値（最小・最大・回数）もクリアされる。設定画面で左スイッチを押すとモードが切り替わる。設定画面にいる間はタッチ・圧力の基準値補正（タッチは `touch_algo` の校正: 基準値の速い追従と noise_floor の計測）を行うので、センサーに触れないこと
 
 ## エラー処理の約束事
 
@@ -107,6 +107,6 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - ヒープ無し。配列は固定長、static は `StaticCell`（`make_static!` マクロ）で確保する
 - Core1 のスタックは `CORE1_STACK_SIZE` = 16KB（`QubitTouch` が約 3.7KB あるため）、Core0 は `memory.x` の `_stack_size` = 8KB。大きな配列をタスク内のローカル変数に置くときはスタック量に注意する
 - 処理時間や周期超過は OLED の診断ページ（page 5）で確認できる。計測値は `shared.rs` の `SCAN_TIME` / `ANALYSIS_TIME` / `UI_DRAW_TIME`（`TimeStat`）、`PERIOD_OVERRUN`、`MIDI_TX_MAX_USED` / `MIDI_TX_OVERFLOW`
-- 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`qtouch.rs`, `pressure.rs`, `read_touch.rs`）。調整の意図を日本語コメントで残す
+- 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`qtouch.rs`, `pressure.rs`, `read_touch.rs`）と `touch_algo` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
 - 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）

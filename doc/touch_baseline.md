@@ -377,6 +377,7 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
 
 - `Pad::MAX_MOVING_AVERAGE` を 1 にする（ノイズ除去は `touch_algo` に移るため。2026-10-03 決定）。構造ごと外すかどうかは、実機で確認してから決める
 - `TOUCH_THRESHOLD`（32）は、まずそのままで演奏して確かめ、必要なら調整する。output は `delta − noise_floor` で、今の「raw − チップの基準値 − reference_adjust」と大きさはほぼ同じはず
+    - （実装時に判明）`Pad` の「移動平均」は 4 サンプルの合計で、4 で割っていなかった。つまり `QubitTouch` は値の 4 倍を見ていた。移動平均を外すと値が 1/4 になるので、同じ感度になるよう `TOUCH_THRESHOLD` を 32 → 8 にし、`default_note_on_velocity()` も以前と同じ結果になるよう直した（上限の判定 > 255 → > 63、`>> 4` → `>> 2`）。そこから先の調整は演奏して決める
 - 位置検出・追跡・ノート変換のロジックは変えない
 
 ### 4.7 変更しないもの
@@ -398,9 +399,9 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
 
 `touch_algo` は PC アプリで、ノイズ除去・基準値・校正・固着からの回復まですべてそろえて確かめてある（§6.1）。そのため、ファームへは少しずつではなく、まとめて入れる（2026-10-03 見直し）。
 
-1. **ファームへの適用**: §4 のとおり、`read_touch.rs`・`at42qt.rs`・`touch_task`・`qtouch.rs`（`Pad` の移動平均を外す）を変える
+1. **ファームへの適用**: §4 のとおり、`read_touch.rs`・`at42qt.rs`・`touch_task`・`qtouch.rs`（`Pad` の移動平均を外す）を変える — 2026-10-03 実装済み（実機での確認はまだ）
 2. **実機での確認**: §6.2 の F1〜F6 を確かめる。`TOUCH_THRESHOLD` と追従のパラメータは、必要なら実際に演奏して調整する
-3. **ドキュメント**: `CLAUDE.md` を更新する
+3. **ドキュメント**: `CLAUDE.md` を更新する — 2026-10-03 済み
 
 ## 6. 確認項目
 

@@ -6,18 +6,22 @@ use portable_atomic::Ordering;
 use crate::constants::*;
 use crate::devices;
 use crate::error;
-use crate::shared::{ANALYSIS_TIME, PERIOD_OVERRUN, SCAN_TIME, WORK_MODE, scan_period_us};
+use crate::shared::{
+    ANALYSIS_TIME, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4, POINT5, SCAN_TIME,
+    SETTING_MODE, WORK_MODE, scan_period_us,
+};
 use crate::tasks::midi::queue_midi;
 use crate::touch;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//      Touch Task (Core1): I2C1 を専有し、スキャン → 解析 → ノートイベントの生成を
-//      scan_period_us() 毎に行う。ノートイベントは MIDI 送信キューに入れる
+//      Touch Task (Core1): I2C1 を専有し、スキャン → 信号処理（touch_algo）→ 解析 →
+//      ノートイベントの生成を scan_period_us() 毎に行う。ノートイベントは MIDI 送信キューに入れる
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     use core::cell::Cell;
     use touch::qtouch::QubitTouch;
+    use touch_algo::{KeyState, Params, TouchSignal};
 
     const TOUCH_INIT_TIMEOUT_MS: u64 = 80;
 
@@ -63,8 +67,10 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     let mut divider = analysis_divider(period_us);
     let mut ticker = Ticker::every(period);
     let mut frame = 0u32;
-    let mut touch_values = [0u16; TOTAL_QT_KEYS];
-    // 起動直後は基準値が落ち着いていないので、この時刻までは解析しない（誤ったノートを出さないため）
+    // 信号処理（ノイズ除去・基準値。doc/touch_baseline.md §3）。タスクの future は静的に確保されるので、
+    // 96 キー分（数 KB）でもスタックは使わない
+    let mut signal = TouchSignal::new([KeyState::INITIAL; TOTAL_QT_KEYS], Params::DEFAULT);
+    // 起動直後はチップが自身を校正しているので、この時刻までは信号処理にも解析にも渡さない
     let analysis_start_at = Instant::now() + Duration::from_millis(TOUCH_STARTUP_SETTLE_MS);
 
     // Task Loop
@@ -81,7 +87,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
         // タッチセンサのスキャン
         read_touch
-            .touch_sensor_scan(&pca, &mut at42, &mut i2c, &mut touch_values)
+            .touch_sensor_scan(&pca, &mut at42, &mut i2c)
             .await;
         SCAN_TIME.record(cycle_start.elapsed().as_micros() as u32);
 
@@ -89,8 +95,8 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         #[cfg(feature = "debug_stream")]
         queue_debug_frame(&read_touch, frame, cycle_start);
 
-        // 解析: QubitTouch は 10ms 毎に呼ばれる前提なので、divider フレームに 1 回行う（20ms 周期では毎回）。
-        // 起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わない
+        // 信号処理と解析: QubitTouch と touch_algo のパラメータは 10ms 毎（8〜10ms）に呼ばれる前提なので、
+        // divider フレームに 1 回行う（20ms 周期では毎回）。起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わない
         if cycle_start >= analysis_start_at && frame.is_multiple_of(divider) {
             let analysis_start = Instant::now();
             let work_mode = WORK_MODE
@@ -99,8 +105,24 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
                 .unwrap_or(WorkMode::Piano);
             current_mode.set(work_mode);
 
-            for (ch, tv) in touch_values.iter().enumerate() {
-                qt.set_value(ch, *tv);
+            // 設定画面にいる間は校正（基準値の速い追従と noise_floor の計測）
+            let (raw, valid) = read_touch.raw();
+            signal.process(
+                cycle_start.as_micros() as u32,
+                raw,
+                valid,
+                SETTING_MODE.load(Ordering::Relaxed),
+            );
+            let keys = signal.keys();
+            for (ch, key) in keys.iter().enumerate() {
+                qt.set_value(ch, key.output());
+            }
+            // OLED の表示用: キー 0〜5 の output
+            for (point, key) in [&POINT0, &POINT1, &POINT2, &POINT3, &POINT4, &POINT5]
+                .into_iter()
+                .zip(keys)
+            {
+                point.store(key.output(), Ordering::Relaxed);
             }
             qt.seek_and_update_touch_point(work_mode);
 
@@ -130,7 +152,7 @@ fn queue_debug_frame(read_touch: &touch::read_touch::ReadTouch, seq: u32, scan_s
     if !DEBUG_STREAMING.load(Ordering::Relaxed) {
         return;
     }
-    let (raw, valid) = read_touch.debug_raw();
+    let (raw, valid) = read_touch.raw();
     let debug_frame = DebugFrame {
         seq,
         time_us: scan_start.as_micros() as u32,
