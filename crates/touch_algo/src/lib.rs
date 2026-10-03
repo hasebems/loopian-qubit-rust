@@ -1,7 +1,7 @@
 //! Loopian::QUBIT のタッチ信号処理（doc/touch_baseline.md §3）
 //!
 //! 1 スキャン分の生値を `TouchSignal::process` に渡すと、キー毎に
-//! filtered（ノイズ除去後）・baseline（基準値）・delta・output・onset を更新する。
+//! filtered（ノイズ除去後）・baseline（基準値）・delta・output を更新する。
 //! I2C や時計には触れない純粋な計算だけで、ファーム（no_std）と PC アプリ（tools/qubit_monitor）で共有する。
 //!
 //! - 時刻は u32 の µs（ファームの `embassy_time::Instant` の µs、PC ではフレームの `time_us`）。
@@ -20,12 +20,8 @@ pub struct Params {
     pub acquire_ms: u32,
     /// 静かさの判定に使う近傍の片側キー数
     pub neighbor_range: u8,
-    /// delta がこれ未満なら「静か」
+    /// delta がこれ未満なら「静か」。これ以上で固着検出を始める
     pub quiet_threshold: u16,
-    /// delta がこれ以上なら「触れられている」（固着検出の開始条件）
-    pub active_threshold: u16,
-    /// noise_floor にこれを足した値を onset のしきい値にする
-    pub onset_margin: u16,
     /// 静かになってから上方向に追従し始めるまでの待ち時間
     pub quiet_hold_ms: u32,
     /// 上方向の追従率 1/2^n
@@ -40,8 +36,10 @@ pub struct Params {
     pub neg_recal_ms: u32,
     /// 固着とみなすまでの時間
     pub stuck_time_ms: u32,
-    /// この値を超えて揺れていれば人の指とみなす
+    /// filtered がこの値を超えて揺れていれば人の指とみなす
     pub stuck_variation: u16,
+    /// 固着からの回復で、基準値を上げる速さ（カウント/秒）
+    pub stuck_recover_rate: u16,
     /// 校正中の追従率 1/2^n
     pub calib_shift: u8,
     /// 校正に入ってからノイズを計り始めるまでの時間
@@ -59,8 +57,6 @@ impl Params {
         acquire_ms: 300,
         neighbor_range: 2,
         quiet_threshold: 8,
-        active_threshold: 24,
-        onset_margin: 4,
         quiet_hold_ms: 1000,
         rise_shift: 8,
         rise_max_step_q: 16,
@@ -69,6 +65,7 @@ impl Params {
         neg_recal_ms: 100,
         stuck_time_ms: 30_000,
         stuck_variation: 6,
+        stuck_recover_rate: 1,
         calib_shift: 2,
         calib_settle_ms: 500,
         noise_floor_default: 4,
@@ -118,15 +115,14 @@ pub struct KeyState {
     noise_measured: bool, // 校正で noise_floor を計り始めたか
     quiet_since: Option<u32>,
     neg_since: Option<u32>,
-    active_since: Option<u32>,
-    active_min: i32,
-    active_max: i32,
+    stuck_since: Option<u32>, // 静かでなくなった時刻（固着検出用）
+    stuck_min: u16,           // 固着検出区間の filtered の最小・最大
+    stuck_max: u16,
+    recovering: bool, // 固着からの回復中
 
     // --- 結果
     delta: i32,
     output: u16,
-    onset_us: Option<u32>,
-    onset_armed: bool, // 静かな状態を通ってきた（次に上がったら onset を記録する）
 }
 
 impl KeyState {
@@ -147,13 +143,12 @@ impl KeyState {
         noise_measured: false,
         quiet_since: None,
         neg_since: None,
-        active_since: None,
-        active_min: 0,
-        active_max: 0,
+        stuck_since: None,
+        stuck_min: 0,
+        stuck_max: 0,
+        recovering: false,
         delta: 0,
         output: 0,
-        onset_us: None,
-        onset_armed: false,
     };
 
     /// ノイズ除去後の値
@@ -178,11 +173,6 @@ impl KeyState {
 
     pub fn noise_floor(&self) -> u16 {
         self.noise_floor
-    }
-
-    /// 静かな状態から上がり始めた時刻（µs）。静かに戻ると None
-    pub fn onset_us(&self) -> Option<u32> {
-        self.onset_us
     }
 
     /// 最後のスキャンで読み取りに成功したか
@@ -245,7 +235,7 @@ impl Default for KeyState {
     }
 }
 
-/// ノイズ除去・基準値・onset の計算。K はキー毎の状態の置き場所（`[KeyState; N]` や `Vec<KeyState>`）
+/// ノイズ除去・基準値の計算。K はキー毎の状態の置き場所（`[KeyState; N]` や `Vec<KeyState>`）
 pub struct TouchSignal<K> {
     keys: K,
     pub params: Params,
@@ -333,7 +323,8 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
                     for key in self.keys.as_mut().iter_mut() {
                         key.noise_floor = 0;
                         key.noise_measured = false;
-                        key.active_since = None;
+                        key.stuck_since = None;
+                        key.recovering = false;
                         key.neg_since = None;
                     }
                     self.enter(State::Calibrating, now_us);
@@ -352,9 +343,10 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
                     self.track_running_conditions(now_us);
                 }
                 if elapsed_ms(self.last_update) >= params.baseline_update_interval_ms {
+                    let interval_us = now_us.wrapping_sub(self.last_update);
                     self.last_update = now_us;
                     match self.state {
-                        State::Running => self.update_baseline_running(now_us),
+                        State::Running => self.update_baseline_running(now_us, interval_us),
                         State::Calibrating => self.update_baseline_calibrating(now_us),
                         State::Acquiring => {}
                     }
@@ -362,7 +354,7 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
                 self.update_delta();
             }
         }
-        self.update_output_and_onset(now_us);
+        self.update_output();
     }
 
     fn enter(&mut self, state: State, now_us: u32) {
@@ -407,45 +399,62 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
                 key.neg_since = None;
             }
 
-            // 固着の追跡（§3.7）。指は必ず揺れるので、揺れが大きければ追跡をやり直す
-            if key.delta >= params.active_threshold as i32 {
-                match key.active_since {
+            // 固着の追跡（§3.7）。静かでない間、filtered の揺れを見る（回復中は基準値が動くので
+            // delta では見ない）。指は必ず揺れるので、揺れが大きければ追跡をやり直す
+            let not_quiet = key.delta >= quiet_threshold;
+            let still_recovering = key.recovering && key.delta > 0;
+            if not_quiet || still_recovering {
+                match key.stuck_since {
                     None => {
-                        key.active_since = Some(now_us);
-                        key.active_min = key.delta;
-                        key.active_max = key.delta;
+                        key.stuck_since = Some(now_us);
+                        key.stuck_min = key.filtered;
+                        key.stuck_max = key.filtered;
                     }
                     Some(_) => {
-                        key.active_min = key.active_min.min(key.delta);
-                        key.active_max = key.active_max.max(key.delta);
-                        if key.active_max - key.active_min > params.stuck_variation as i32 {
-                            key.active_since = Some(now_us);
-                            key.active_min = key.delta;
-                            key.active_max = key.delta;
+                        key.stuck_min = key.stuck_min.min(key.filtered);
+                        key.stuck_max = key.stuck_max.max(key.filtered);
+                        if key.stuck_max - key.stuck_min > params.stuck_variation {
+                            // 回復中なら止め、基準値はその位置のままにする
+                            key.stuck_since = Some(now_us);
+                            key.stuck_min = key.filtered;
+                            key.stuck_max = key.filtered;
+                            key.recovering = false;
                         }
                     }
                 }
-                if let Some(since) = key.active_since
+                if let Some(since) = key.stuck_since
                     && now_us.wrapping_sub(since) / 1000 >= params.stuck_time_ms
                     && key.valid
                 {
-                    key.set_baseline(key.filtered);
-                    key.active_since = None;
+                    key.recovering = true;
                 }
             } else {
-                key.active_since = None;
+                // 静か（回復中は delta が 0 以下）になったら追跡と回復を終える
+                key.stuck_since = None;
+                key.recovering = false;
             }
         }
     }
 
-    /// 追従規則 R1〜R5（§3.6）。上から順に判定し、最初に当てはまったものを適用する
-    fn update_baseline_running(&mut self, now_us: u32) {
+    /// 追従規則 R1〜R5（§3.6）。上から順に判定し、最初に当てはまったものを適用する。
+    /// 固着からの回復中（§3.7）は R2〜R5 の代わりに、一定の速さで基準値を filtered に近づける
+    /// `interval_us` は前回の更新からの実際の時間（スキャン周期の都合で設定の周期より長くなる）
+    fn update_baseline_running(&mut self, now_us: u32, interval_us: u32) {
         let params = self.params;
+        // 回復の上げ幅（Q8）。実際の間隔から計算し、スキャン周期によらず設定の速さにする
+        let recover_step_q = ((params.stuck_recover_rate as u64 * 256 * interval_us as u64
+            / 1_000_000) as u32)
+            .max(1);
         for key in self.keys.as_mut().iter_mut() {
             if !key.valid || !key.has_baseline {
                 continue; // R1
             }
-            if let Some(since) = key.neg_since
+            if key.recovering {
+                let target_q = (key.filtered as u32) << 8;
+                if target_q > key.baseline_q {
+                    key.baseline_q += recover_step_q.min(target_q - key.baseline_q);
+                }
+            } else if let Some(since) = key.neg_since
                 && now_us.wrapping_sub(since) / 1000 >= params.neg_recal_ms
             {
                 key.set_baseline(key.filtered); // R2: 即時再校正
@@ -478,9 +487,8 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
         }
     }
 
-    /// output と onset（§3.7, §3.8）
-    fn update_output_and_onset(&mut self, now_us: u32) {
-        let params = self.params;
+    /// output（§3.7）
+    fn update_output(&mut self) {
         let acquiring = self.state == State::Acquiring;
         for key in self.keys.as_mut().iter_mut() {
             key.output = if acquiring || !key.has_baseline {
@@ -488,17 +496,6 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
             } else {
                 (key.delta - key.noise_floor as i32).clamp(0, u16::MAX as i32) as u16
             };
-            if acquiring {
-                continue;
-            }
-            let onset_threshold = key.noise_floor as i32 + params.onset_margin as i32;
-            if key.delta < params.quiet_threshold as i32 {
-                key.onset_us = None;
-                key.onset_armed = true;
-            } else if key.onset_armed && key.delta >= onset_threshold {
-                key.onset_us = Some(now_us);
-                key.onset_armed = false;
-            }
         }
     }
 }
@@ -556,7 +553,6 @@ mod tests {
             sim.key(2).output(),
             60 - Params::DEFAULT.noise_floor_default
         );
-        assert!(sim.key(2).onset_us().is_some());
         assert_eq!(sim.key(0).output(), 0);
     }
 
@@ -609,8 +605,15 @@ mod tests {
         sim.run([900; N], 400, false);
         let mut raw = [900; N];
         raw[2] = 960; // 揺れない（異物）
-        sim.run(raw, 31_000, false);
+        sim.run(raw, 29_000, false);
+        assert_eq!(sim.key(2).baseline(), 900); // STUCK_TIME_MS まではそのまま
+        sim.run(raw, 11_000, false);
+        // 回復が始まり、1 カウント/秒で上がっている（一気には合わせない）
+        let b = sim.key(2).baseline();
+        assert!((905..=912).contains(&b), "{b}");
+        sim.run(raw, 60_000, false);
         assert_eq!(sim.key(2).baseline(), 960);
+        assert_eq!(sim.key(2).output(), 0);
 
         let mut sim = Sim::new();
         sim.run([900; N], 400, false);
@@ -620,6 +623,18 @@ mod tests {
             sim.run(raw, 80, false);
         }
         assert_eq!(sim.key(2).baseline(), 900);
+    }
+
+    #[test]
+    fn weak_stuck_object_between_quiet_and_touch_recovers() {
+        // QUIET_THRESHOLD（8）を少し超えるだけの弱い物でも、固着として回復する
+        let mut sim = Sim::new();
+        sim.run([900; N], 400, false);
+        let mut raw = [900; N];
+        raw[2] = 915;
+        sim.run(raw, 50_000, false);
+        assert_eq!(sim.key(2).baseline(), 915);
+        assert_eq!(sim.key(2).output(), 0);
     }
 
     #[test]

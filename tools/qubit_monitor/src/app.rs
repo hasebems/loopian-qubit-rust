@@ -10,10 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
-use egui_plot::{
-    Bar, BarChart, HLine, Legend, Line, LineStyle, MarkerShape, Plot, PlotBounds, PlotPoints,
-    Points,
-};
+use egui_plot::{Bar, BarChart, HLine, Legend, Line, LineStyle, Plot, PlotBounds, PlotPoints};
 use touch_algo::{Params, State};
 
 use qubit_monitor::algo::{self, AlgoRunner};
@@ -637,10 +634,9 @@ impl MonitorApp {
                 );
             }
         }
-        // 下段: delta・output と、しきい値・onset
+        // 下段: delta・output と、しきい値
         let lower = algo_on && (self.show_delta || self.show_output);
         let mut lower_lines = Vec::new();
-        let mut onset_points = Vec::new();
         if lower {
             for k in (0..self.store.nkeys).filter(|&k| shown(k)) {
                 if self.show_delta {
@@ -668,27 +664,6 @@ impl MonitorApp {
                         Line::new(format!("key{k} output"), PlotPoints::new(points))
                             .color(key_color(k))
                             .style(LineStyle::dashed_loose()),
-                    );
-                }
-                // onset を記録した時刻に、そのときの delta の位置で印を付ける
-                let marks: Vec<[f64; 2]> = self
-                    .algo
-                    .onsets
-                    .iter()
-                    .filter(|(t, key)| *key == k && (t0..=t1).contains(t))
-                    .filter_map(|(t, _)| {
-                        let i = self.algo.time_us.partition_point(|&x| x < *t);
-                        (i < self.algo.time_us.len())
-                            .then(|| [*t as f64 / 1e6, self.algo.delta[k][i] as f64])
-                    })
-                    .collect();
-                if !marks.is_empty() {
-                    onset_points.push(
-                        Points::new(format!("key{k} onset"), PlotPoints::new(marks))
-                            .color(key_color(k))
-                            .shape(MarkerShape::Diamond)
-                            .filled(true)
-                            .radius(5.0),
                     );
                 }
             }
@@ -724,7 +699,6 @@ impl MonitorApp {
 
         if lower {
             let params = self.algo.params;
-            let onset_default = params.noise_floor_default as f64 + params.onset_margin as f64;
             let height = ui.available_height();
             ui.horizontal(|ui| {
                 y_scale_buttons(ui, &mut self.lower_scale);
@@ -750,21 +724,8 @@ impl MonitorApp {
                             HLine::new("QUIET_THRESHOLD", params.quiet_threshold as f64)
                                 .color(gray),
                         );
-                        plot_ui.hline(
-                            HLine::new("ACTIVE_THRESHOLD", params.active_threshold as f64)
-                                .color(gray)
-                                .style(LineStyle::dashed_loose()),
-                        );
-                        plot_ui.hline(
-                            HLine::new("onset しきい値（noise_floor 既定値）", onset_default)
-                                .color(gray)
-                                .style(LineStyle::dotted_dense()),
-                        );
                         for line in lower_lines {
                             plot_ui.line(line);
-                        }
-                        for points in onset_points {
-                            plot_ui.points(points);
                         }
                     });
             });
@@ -863,8 +824,6 @@ impl MonitorApp {
                         param(ui, "ACQUIRE_MS", &mut p.acquire_ms, 0..=5000);
                         param(ui, "NEIGHBOR_RANGE", &mut p.neighbor_range, 0..=8);
                         param(ui, "QUIET_THRESHOLD", &mut p.quiet_threshold, 0..=200);
-                        param(ui, "ACTIVE_THRESHOLD", &mut p.active_threshold, 0..=500);
-                        param(ui, "ONSET_MARGIN", &mut p.onset_margin, 0..=100);
                         param(ui, "QUIET_HOLD_MS", &mut p.quiet_hold_ms, 0..=10_000);
                         param(ui, "RISE_SHIFT", &mut p.rise_shift, 0..=16);
                         param(ui, "RISE_MAX_STEP_Q", &mut p.rise_max_step_q, 0..=4096);
@@ -878,6 +837,7 @@ impl MonitorApp {
                         param(ui, "NEG_RECAL_MS", &mut p.neg_recal_ms, 0..=5000);
                         param(ui, "STUCK_TIME_MS", &mut p.stuck_time_ms, 0..=300_000);
                         param(ui, "STUCK_VARIATION", &mut p.stuck_variation, 0..=200);
+                        param(ui, "STUCK_RECOVER_RATE", &mut p.stuck_recover_rate, 0..=100);
                         param(ui, "CALIB_SHIFT", &mut p.calib_shift, 0..=16);
                         param(ui, "CALIB_SETTLE_MS", &mut p.calib_settle_ms, 0..=10_000);
                         param(
@@ -919,8 +879,10 @@ impl MonitorApp {
                 stats.lost_frames
             ));
             ui.label("ノイズを見るときは、触れていない区間を表示してください");
+            // filtered の p-p は、固着判定の STUCK_VARIATION と比べるためのもの
+            let algo_on = self.algo_enabled && self.algo.filtered.len() == self.store.nkeys;
             egui::Grid::new("key_stats").striped(true).show(ui, |ui| {
-                for h in ["キー", "平均", "σ", "p-p"] {
+                for h in ["キー", "raw 平均", "raw σ", "raw p-p", "filtered p-p"] {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
@@ -929,6 +891,10 @@ impl MonitorApp {
                     ui.label(format!("{:.1}", ks.mean));
                     ui.label(format!("{:.2}", ks.std));
                     ui.label(format!("{}", ks.peak_to_peak));
+                    let filtered_pp = algo_on
+                        .then(|| self.algo.filtered_peak_to_peak(t0, t1, k))
+                        .flatten();
+                    ui.label(filtered_pp.map_or("-".into(), |pp| pp.to_string()));
                     ui.end_row();
                 }
             });

@@ -41,9 +41,7 @@ fn main() {
     // 初期取得の後（最初の 0.5 秒を除く）の範囲で集計する
     let t_start = runner.time_us[0] + 500_000;
     let from = runner.time_us.partition_point(|&t| t < t_start);
-    println!(
-        "キー  baseline(最初→最後)  filtered の p-p  delta 最小/最大  output 最大  onset 回数"
-    );
+    println!("キー  baseline(最初→最後)  filtered の p-p  delta 最小/最大  output 最大");
     for k in 0..runner.baseline.len() {
         let range = from..n;
         let filtered: Vec<u16> = range.clone().map(|i| runner.filtered[k][i]).collect();
@@ -54,16 +52,14 @@ fn main() {
             .max()
             .unwrap_or(0);
         let pp = filtered.iter().max().unwrap_or(&0) - filtered.iter().min().unwrap_or(&0);
-        let onsets = runner.onsets.iter().filter(|(_, key)| *key == k).count();
         println!(
-            "key{k}  {:>5} → {:>5}        {:>3}             {:>4} / {:>4}        {:>4}      {}",
+            "key{k}  {:>5} → {:>5}        {:>3}             {:>4} / {:>4}        {:>4}",
             runner.baseline[k].get(from).copied().unwrap_or(0),
             runner.baseline[k][n - 1],
             pp,
             delta.iter().min().unwrap_or(&0),
             delta.iter().max().unwrap_or(&0),
-            output_max,
-            onsets
+            output_max
         );
     }
 }

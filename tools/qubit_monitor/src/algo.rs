@@ -1,4 +1,4 @@
-//! touch_algo（ノイズ除去・基準値・onset）を、受信・再生したフレームに通す（doc/debug_env.md §4.6）
+//! touch_algo（ノイズ除去・基準値）を、受信・再生したフレームに通す（doc/debug_env.md §4.6）
 //!
 //! - Store のフレームを、間引いてから TouchSignal::process に 1 フレームずつ通し、結果を時刻と一緒にためる
 //! - パラメータ・間引き・キー数が変わったら、Store の先頭から通し直す
@@ -14,7 +14,6 @@ use crate::store::{MAX_FRAMES, Store};
 pub const DECIMATIONS_US: [u32; 3] = [0, 8_000, 10_000];
 /// 間引いた周期を前後このくらいずれても通す（2ms 周期のフレームの揺れを吸収する）
 const DECIMATION_TOLERANCE_US: u64 = 1_000;
-const MAX_ONSETS: usize = 100_000;
 
 pub struct AlgoRunner {
     pub params: Params,
@@ -32,8 +31,7 @@ pub struct AlgoRunner {
     pub baseline: Vec<VecDeque<u16>>,
     pub delta: Vec<VecDeque<i32>>,
     pub output: Vec<VecDeque<u16>>,
-    pub onsets: VecDeque<(u64, usize)>, // onset を記録した時刻とキー
-    pub noise_floor: Vec<u16>,          // 最後のフレームでのキー毎の noise_floor
+    pub noise_floor: Vec<u16>, // 最後のフレームでのキー毎の noise_floor
 }
 
 impl AlgoRunner {
@@ -52,7 +50,6 @@ impl AlgoRunner {
             baseline: Vec::new(),
             delta: Vec::new(),
             output: Vec::new(),
-            onsets: VecDeque::new(),
             noise_floor: Vec::new(),
         }
     }
@@ -158,7 +155,6 @@ impl AlgoRunner {
         self.baseline = vec![VecDeque::new(); nkeys];
         self.delta = vec![VecDeque::new(); nkeys];
         self.output = vec![VecDeque::new(); nkeys];
-        self.onsets.clear();
         self.noise_floor = vec![0; nkeys];
     }
 
@@ -182,12 +178,6 @@ impl AlgoRunner {
             self.delta[k].push_back(key.delta());
             self.output[k].push_back(key.output());
             self.noise_floor[k] = key.noise_floor();
-            if key.onset_us() == Some(t as u32) {
-                if self.onsets.len() >= MAX_ONSETS {
-                    self.onsets.pop_front();
-                }
-                self.onsets.push_back((t, k));
-            }
         }
     }
 
@@ -196,6 +186,16 @@ impl AlgoRunner {
         let start = self.time_us.partition_point(|&t| t < t0);
         let end = self.time_us.partition_point(|&t| t <= t1);
         start..end.max(start)
+    }
+
+    /// 時刻 [t0, t1] の、キー k の filtered の p-p（固着判定の STUCK_VARIATION と比べるため）。
+    /// 結果が無ければ None
+    pub fn filtered_peak_to_peak(&self, t0: u64, t1: u64, k: usize) -> Option<u16> {
+        let values = self.filtered.get(k)?;
+        let range = self.range(t0, t1);
+        let min = range.clone().map(|i| values[i]).min()?;
+        let max = range.map(|i| values[i]).max()?;
+        Some(max - min)
     }
 }
 
@@ -256,6 +256,21 @@ mod tests {
         let store = store_with(&[(0, 900)]);
         runner.update(&store);
         assert_eq!(runner.time_us.len(), 1);
+    }
+
+    #[test]
+    fn filtered_peak_to_peak_in_range() {
+        // 8ms 毎に 900 → 0.4 秒後から 906（移動平均 2 なので 903 を経て 906 になる）
+        let frames: Vec<(u32, u16)> = (0..100)
+            .map(|i| (i * 8000, if i < 50 { 900 } else { 906 }))
+            .collect();
+        let store = store_with(&frames);
+        let mut runner = AlgoRunner::new();
+        runner.update(&store);
+        assert_eq!(runner.filtered_peak_to_peak(0, 300_000, 0), Some(0));
+        assert_eq!(runner.filtered_peak_to_peak(0, 800_000, 0), Some(6));
+        assert_eq!(runner.filtered_peak_to_peak(0, 800_000, 5), None); // 無いキー
+        assert_eq!(runner.filtered_peak_to_peak(900_000, 950_000, 0), None); // 範囲外
     }
 
     #[test]

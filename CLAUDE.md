@@ -87,7 +87,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `src/ui/ringled.rs`: NeoPixel の描画ロジック
 - `src/debug_protocol.rs`: `debug_stream` のパケットの組み立て。PC 側の解釈は `tools/qubit_monitor/src/protocol.rs` で、形式を変えるときは両方を直す
 - `tools/qubit_monitor/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
-- `crates/touch_algo/`: タッチの信号処理（ノイズ除去・基準値・onset、`doc/touch_baseline.md` §3）。no_std で、今は PC アプリだけが使う。ファームへは debug_env の段階 4 で移す
+- `crates/touch_algo/`: タッチの信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。no_std で、今は PC アプリだけが使う。ファームへは debug_env の段階 4 で移す
 
 ## 動作モードと MIDI
 
