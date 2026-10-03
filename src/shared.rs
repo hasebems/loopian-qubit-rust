@@ -102,9 +102,9 @@ impl TimeStat {
 }
 
 pub static SCAN_TIME: TimeStat = TimeStat::new(); // タッチのスキャン時間: touch_task
-pub static ANALYSIS_TIME: TimeStat = TimeStat::new(); // QubitTouch の解析時間: touch_task
+pub static ANALYSIS_TIME: TimeStat = TimeStat::new(); // 信号処理（touch_algo）と QubitTouch の解析の時間: touch_task
 pub static UI_DRAW_TIME: TimeStat = TimeStat::new(); // OLED の描画で 1 回に Core0 を止めた最長の時間（転送を除く）: ui_task
-// スキャン＋解析が周期 (scan_period_us()) を超えた回数: touch_task
+// スキャン＋信号処理＋解析が周期 (scan_period_us()) を超えた回数: touch_task
 pub static PERIOD_OVERRUN: AtomicU32 = AtomicU32::new(0);
 // MIDI_TX の最大使用数とあふれた回数: queue_midi (touch_task, pressure_task)
 pub static MIDI_TX_MAX_USED: AtomicU32 = AtomicU32::new(0);
@@ -124,7 +124,7 @@ pub fn reset_diagnostics() {
 //      デバッグ用: touch_task (Core1) → debug_stream_task (Core0) → USB CDC → PC
 //      doc/debug_env.md
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-/// 1 回のスキャンで読んだ生値（hi/lo ずれ補正の前）
+/// 1 回のスキャンで読んだ生値（hi/lo ずれは読み直し済み。touch_algo に渡す値と同じ）
 #[cfg(feature = "debug_stream")]
 pub struct DebugFrame {
     pub seq: u32, // スキャン番号（送らなかったフレームも数える。PC は欠けで取りこぼしを知る）

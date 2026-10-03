@@ -4,7 +4,7 @@
 //  https://opensource.org/licenses/mit-license.php
 //
 
-// コア1のスタックサイズ。Core1 の touch_task は QubitTouch (約3.7KB) と ReadTouch (約0.6KB) を持ち、
+// コア1のスタックサイズ。Core1 の touch_task は QubitTouch (約3.7KB)・TouchSignal (96 キーで数 KB)・ReadTouch を持ち、
 // 初期化時に一時的にスタックに置かれることがあるので、余裕を持たせる
 pub const CORE1_STACK_SIZE: usize = 16384;
 

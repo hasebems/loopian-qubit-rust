@@ -6,6 +6,8 @@
 
 2026-10-01 時点（`doc/task_architecture.md` のコア・タスク構成の改修の後）。本書を書いた当初（改修前）の状態は §1.2 (c) の前提として残している。
 
+> **（2026-10-03 追記）** 以下は `touch_algo` への置き換え（`doc/debug_env.md` の段階 4）の前の状態。置き換えで、チップの基準値（`set_reference()`）・`reference_adjust`・`Pad` の移動平均は無くなった。今は `read_touch` が生値と読み取り成功フラグ（`valid`）を返し、`touch_task` が `touch_algo` の `TouchSignal` で output を作って `QubitTouch` に渡す（§4）。12 スキャンに 1 回の読み直しによるスキャン時間の延びも無くなった
+
 - `src/touch/read_touch.rs` は AT42QT1070 から次の 2 種類を読み、その差を入力値としている
     - Key Signal（レジスタ 4–15）: 生値
     - Reference Data（レジスタ 18–29）: チップ内部の基準値。12 スキャンに 1 回 `set_reference()` で全キー分を読み直す
@@ -33,7 +35,7 @@
 
 **(b) ノイズが多い**
 
-これまでの経験から、生値にはかなりのノイズが乗っている。現状は Core0 側の 4 サンプル移動平均と、`qtouch.rs` の単発スパイク除去（`SINGLE_PAD_SPIKE_*`）で対処している。
+これまでの経験から、生値にはかなりのノイズが乗っている。本書を書いた時点では、`qtouch.rs` の `Pad` の 4 サンプル移動平均（改修前は Core0 で動いていた）と、単発スパイク除去（`SINGLE_PAD_SPIKE_*`）で対処していた。移動平均は `touch_algo` のノイズ除去（§3.3）に置き換えて外した（2026-10-03。§4.6）。スパイク除去は残している。
 
 **(c) 触れる速さを取る土台が無い**
 
@@ -91,7 +93,7 @@
 ```
 [Core1: touch_task]
   AT42QT1070 (8ms 周期で自走)
-    │ I2C 読み取り（SCAN_PERIOD_MS 毎）
+    │ I2C 読み取り（scan_period_us() 毎）
     ▼
   raw（hi/lo ずれは読み直し済み）──► スパイク除去（3 点メディアン）──► 平滑化（短い移動平均）──► filtered
                                                                                               │
@@ -108,9 +110,9 @@
 
 ### 3.2 スキャン周期
 
-- Core1 のスキャンループを `Ticker` で **`SCAN_PERIOD_MS` 毎** に回す。サンプル間隔が一定になり、フィルタの係数や傾きの計算が時間として意味を持つ
-- `SCAN_PERIOD_MS` はチップのサイクル（8ms）以上にする。8ms より速く読んでも、同じ値を重複して読むだけになるため
-- 1 周のスキャン時間は、見積もりでは 1 チャンネルあたり約 0.5ms × 16 チャンネル ≒ 8ms 前後。これを **実測** し、`SCAN_PERIOD_MS` を決める（8ms か 10ms の想定）
+- Core1 のスキャンループを `Ticker` で **`scan_period_us()` 毎**（既定値は `constants.rs` の `SCAN_PERIOD_US`）に回す。サンプル間隔が一定になり、フィルタの係数や傾きの計算が時間として意味を持つ
+- スキャン周期はチップのサイクル（8ms）以上にする（`debug_stream` で 2ms にするのは、チップの更新を観察するため）。8ms より速く読んでも、同じ値を重複して読むだけになるため
+- 1 周のスキャン時間は、見積もりでは 1 チャンネルあたり約 0.5ms × 16 チャンネル ≒ 8ms 前後。これを **実測** し、スキャン周期を決める（8ms か 10ms の想定。今の既定は 10ms）
 - OLED 転送（約 25ms と見積もり）がスキャンを止める問題は、`doc/task_architecture.md` で OLED を Core0 の I2C0 に移すことで解消する。周期化もそちらの段階 5 で行う
 - 周期に間に合わなかった場合（`Ticker` の遅れ）でも、フレームの時刻は実際にスキャンした時刻を記録する
 
@@ -128,7 +130,7 @@
 2. **スパイク除去**: 直近 3 サンプルのメディアン。単発のスパイクを取り除く。遅れは 1 サンプル
 3. **平滑化**: 直近 `SMOOTH_SAMPLES` サンプル（初期値 2〜4）の移動平均。遅れは (N−1)/2 サンプル
 
-速さへの影響を次の表に示す（`SCAN_PERIOD_MS` = 8ms の場合）。
+速さへの影響を次の表に示す（スキャン周期 8ms の場合）。
 
 | 構成 | 合計の遅れ | 立ち上がりの鈍り |
 |---|---|---|
@@ -152,13 +154,15 @@
 | `stuck_min` / `stuck_max` | `u16` | 固着検出区間の filtered の最小・最大 |
 | `recovering` | `bool` | 固着からの回復中か |
 
-フィルタの履歴（キーあたり数サンプル）を合わせても、96 キーで数 KB に収まる。`ReadTouch` は Core1 のタスク（静的に確保される future）に置かれるため、スタックへの影響は小さい。
+フィルタの履歴（キーあたり数サンプル）を合わせても、96 キーで数 KB に収まる。`TouchSignal` は Core1 の `touch_task`（静的に確保される future）の中に置くため、スタックへの影響は小さい（§4.4）。
+
+実装（`crates/touch_algo` の `KeyState`）では、時刻を `Instant` ではなく u32 の µs で持ち（`Option<u32>`）、`quiet_since` も `Option<u32>` にした。ほかに初期取得の積算（`acquire_sum` / `acquire_count`）や、noise_floor を計り始めたか（`noise_measured`）を持つ（`doc/debug_env.md` §4.6）。
 
 全体の状態として、次を持つ。
 
 - `state`: `Acquiring`（初期取得中）/ `Running`（通常）/ `Calibrating`（設定画面中）
 - `last_update`: 基準値を最後に更新した時刻
-- `prev_work_mode_display`: 設定画面に入った瞬間を検出するための前回値
+- `prev_work_mode_display`: 設定画面に入った瞬間を検出するための前回値（実装では `prev_calibrating`。`process()` の `calibrating` の前回値）
 
 ### 3.5 初期取得（Acquiring）
 
@@ -252,7 +256,7 @@ CLAUDE.md にある「設定画面ではセンサーに触れない」という�
 信号処理と解析は、どちらも Core1 の `touch_task` の中にある（`doc/task_architecture.md` §4.1）。受け渡しはコアをまたがず、関数呼び出しで行う。
 
 - `TouchSignal::process()` が返す `output` を、従来どおり `QubitTouch::set_value()` で渡す
-- PC に送るデバッグ用のフレーム（raw・filtered・baseline・output）は、`doc/debug_env.md` の `DEBUG_FRAMES` で Core0 の送信タスクに渡す
+- PC に送るデバッグ用のフレームは raw だけで、`doc/debug_env.md` の `DEBUG_FRAMES` で Core0 の送信タスクに渡す。filtered・baseline・output は PC 側で同じ `touch_algo` に通して求める（ファームの計算結果を送る PROC は見送った。`doc/debug_env.md` §6）
 
 ### 3.10 デバッグ表示
 
@@ -261,11 +265,11 @@ CLAUDE.md にある「設定画面ではセンサーに触れない」という�
 
 ### 3.11 調整パラメータ（初期値は仮。実機で調整する）
 
-`read_touch.rs`（またはベースラインの新モジュール）の先頭に集める。
+`crates/touch_algo` の `Params::DEFAULT` に集めた（PC アプリからは画面で変えられる）。`SCAN_PERIOD_US` だけは `constants.rs` にある。
 
 | 定数 | 仮の値 | 意味 |
 |---|---|---|
-| `SCAN_PERIOD_MS` | 8 または 10 | スキャン周期。実測してから決める（§3.2） |
+| `SCAN_PERIOD_US`（`constants.rs`） | 8000 または 10000（今は 10000） | スキャン周期（µs）。実測してから決める（§3.2） |
 | `SMOOTH_SAMPLES` | 2 | 平滑化の移動平均のサンプル数（§3.3） |
 | `BASELINE_UPDATE_INTERVAL_MS` | 20 | 基準値の更新周期 |
 | `ACQUIRE_MS` | 300 | 起動時に平均を取る時間 |
@@ -286,7 +290,7 @@ CLAUDE.md にある「設定画面ではセンサーに触れない」という�
 | `NOISE_FLOOR_DEFAULT` | 4 | 校正前のデッドゾーン |
 | `NOISE_FLOOR_MAX` | 16 | デッドゾーンの上限 |
 
-`qtouch.rs` の `TOUCH_THRESHOLD`（現在 32）は、これまで「チップの基準値 + `reference_adjust`」を引き、Core0 で移動平均をかけた値に合わせて調整されている。新方式では output の大きさが変わるので、調整し直す。
+`qtouch.rs` の `TOUCH_THRESHOLD`（本書を書いた時点では 32）は、これまで「チップの基準値 + `reference_adjust`」を引き、移動平均（4 サンプルの合計）をかけた値に合わせて調整されていた。新方式に移すときに、合計の分を除いて 8 にした（§4.6）。そこから先は演奏して調整する。
 
 ## 4. 現状の実装からの変更点
 
@@ -407,7 +411,7 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
 
 確認は 2 つの段階に分ける（2026-10-03 決定。進め方は `doc/debug_env.md` §6.2）。
 
-- **6.1 baseline 処理の確定**（PC、ファームに入れる前）: ファームはまだチップの基準値を使っているので、演奏の結果（ノートの出方）では確かめられない。6 キー直結で、qubit_monitor に表示される `touch_algo` の baseline・output を見て判断する
+- **6.1 baseline 処理の確定**（PC、ファームに入れる前）: この時点のファームはまだチップの基準値を使っていたので、演奏の結果（ノートの出方）では確かめられない。6 キー直結で、qubit_monitor に表示される `touch_algo` の baseline・output を見て判断する
 - **6.2 ファームに適用した後**（実機）: 6.1 で確定したものをファームに入れ、演奏の結果で確かめる
 
 ### 6.1 baseline 処理の確定（PC）
@@ -441,7 +445,7 @@ PC では確かめられないこと: `QubitTouch` と組み合わせたとき�
 
 ## 7. 未決事項
 
-- **1 周のスキャン時間**: 実測してから `SCAN_PERIOD_MS` を 8ms にするか 10ms にするかを決める（§3.2）。10ms にすると、チップの 8ms 周期とずれて、ときどきサンプルを 1 つ飛ばす
+- **1 周のスキャン時間**: 96 キーで実測してから、スキャン周期（`SCAN_PERIOD_US`）を 8ms にするか 10ms にするかを決める（§3.2）。10ms にすると、チップの 8ms 周期とずれて、ときどきサンプルを 1 つ飛ばす
 - **平滑化の強さ**: `SMOOTH_SAMPLES` を 2 にするか 4 にするか。ノイズの実測を見て決める
 - **AVE の変更**: チップの AVE を 8 → 16 / 32 に上げて S/N を稼ぐか。その場合、OVERFLOW ビットを確認して 8ms に収まるかを見る
 - **近傍単位の追従による偏り**: ほぼ常にどこかが触れられている演奏では、触れられていない範囲だけが追従する。リング全体が一様に温度変化する場合、演奏中の指の周辺だけ基準値が遅れる。これを問題とみなすかどうかは実機で判断する

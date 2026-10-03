@@ -4,6 +4,8 @@
 > - `constants.rs` の `SCAN_PERIOD_MS` は `SCAN_PERIOD_US`（µs、既定値）に、`ANALYSIS_DIVIDER` は `analysis_divider(周期)` に変わった。実行中の周期は `shared::scan_period_us()` で読む（`debug_stream` feature では PC から変えられる）
 > - エラー 25（予約）は `SPAWN_DEBUG_STREAM` として使っている（`debug_stream` feature のときだけ）
 > - `task_architecture` ブランチは、そこから分けた `debug_env` ブランチにすべて含まれているので削除した（2026-10-01）。その後の改修（§4.4.1 の描画の分割など）も `debug_env` で行う
+- OLED の描画を分割した（2026-10-01、§4.4.1）。診断ページの `Drw`（`UI_DRAW_TIME`）は「描画 1 回の時間」から「1 回に Core0 を止めた最長の時間」に変わった
+- タッチの基準値をチップの基準値から `touch_algo`（`crates/touch_algo` の `TouchSignal`）に置き換えた（2026-10-03、`doc/debug_env.md` の段階 4、`doc/touch_baseline.md` §4）。`read_touch` はチップの基準値と `reference_adjust` を使わず、生値と読み取り成功フラグ（`valid`）を返すだけになった。`touch_task` はスキャンと解析の間で `TouchSignal::process()` を呼び、その output を `QubitTouch` に渡す。`POINT0`–`POINT5` はキー 0〜5 の output を出す
 
 
 ## 1. 目的と位置づけ
@@ -80,14 +82,14 @@ Core0 (Executor)                              Core1 (Executor)
 | 割り込み | I2C0, USB, ADC, PIO0, DMA | **I2C1**（Core1 で `new_async` を呼ぶ） |
 
 - Core1 にはタッチの処理だけを置く。スキャンした直後に同じコアで解析するので、2 つの周期のずれ（P4）が無くなり、Core0 の処理に待たされること（P6）も無くなる
-- 後で信号処理（`touch_baseline.md` の `TouchSignal`）を載せるのも Core1 で、スキャンと解析の間に入る
+- 信号処理（`touch_algo` の `TouchSignal`。`touch_baseline.md`）も Core1 の `touch_task` の中で、スキャンと解析の間に行う（2026-10-03 実装）
 - RP2350 の 2 つのコア（Cortex-M33）はどちらも FPU を持つので、`qtouch.rs` の f32 の計算を Core1 に移しても問題ない
 
 ### 3.2 タスク一覧
 
 | タスク | コア | 周期・起動 | 内容 | 現在のタスク |
 |---|---|---|---|---|
-| `touch_task` | 1 | `Ticker`（`SCAN_PERIOD_MS`） | I2C1 を専有。タッチセンサの初期化、スキャン、`QubitTouch` での解析。ノートイベントを `MIDI_TX` に入れ、タッチ位置を `TOUCH0-3` に公開 | `core1_i2c_task` のタッチ部分 ＋ `qubit_touch_task` の解析部分 |
+| `touch_task` | 1 | `Ticker`（`SCAN_PERIOD_MS`） | I2C1 を専有。タッチセンサの初期化、スキャン、信号処理（`touch_algo`。2026-10-03 から）、`QubitTouch` での解析。ノートイベントを `MIDI_TX` に入れ、タッチ位置を `TOUCH0-3` に公開 | `core1_i2c_task` のタッチ部分 ＋ `qubit_touch_task` の解析部分 |
 | `midi_tx_task` | 0 | `MIDI_TX` の受信で起動 | `Sender` を専有し、USB MIDI に送る（`with_timeout`） | `qubit_touch_task` の送信部分 |
 | `midi_rx_task` | 0 | USB の受信で起動 | 受信ノートを `RINGLED_RX_BITS`（96 ビット）に反映 | 同名 |
 | `usb_task` | 0 | 常駐 | USB デバイスの駆動 | 同名 |
@@ -104,7 +106,7 @@ Core1                                        Core0
 touch_task                                   midi_tx_task ──► USB MIDI
   スキャン (I2C1)                                 ▲
     ▼                                            │ MIDI_TX (Channel、コアをまたぐ)
-  （後で）信号処理                                │
+  信号処理 (touch_algo)                           │
     ▼                                            ├────────── pressure_task ◄── ADC
   QubitTouch で解析 ──ノートイベント────────────┘     (CC11, All Sound Off)
     │                                                  ▲ ANY_TOUCH
@@ -141,10 +143,11 @@ loop {
 
 - `SCAN_PERIOD_MS` の初期値は **10ms**。`QubitTouch` の中の時間の定数（`TOUCH_SAMPLE_PERIOD_SEC` = 0.01、`RELEASE_WAITING_TIME`、ベロシティ計算の 10ms tick など）は「10ms 毎に呼ばれる」ことを前提にしているため。これで改修前と同じ振る舞いになる
 - **解析する周期**: `SCAN_PERIOD_MS` を 10ms より短くする場合（デバッグ環境での 2ms など）でも、解析は 10ms 毎に行う。`ANALYSIS_DIVIDER = ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS` フレームに 1 回解析する（`ANALYSIS_PERIOD_MS` = 10）。そのため `SCAN_PERIOD_MS` は 10 の約数（1, 2, 5, 10）に限り、倍数であることをコンパイル時に確認する。3 つの定数は `constants.rs` に置く
-- **起動直後の `TOUCH_STARTUP_SETTLE_MS`（500ms）の間は、スキャンだけを行い解析しない**。`read_touch` はチップの基準値を最初のスキャンの後に初めて読むので、最初のフレームは基準値 0 で引かれて全キーが大きな値になる。スキャンの直後に必ず解析する構成では、これを確実に拾って誤ったノートを出してしまう（改修前は Core0 の解析が別周期で、読み飛ばすことが多かった）。チップ自身の校正（電源投入から 230ms 未満）と、基準値の読み直し（120ms 毎）が何度か行われるまで待つ
+- **起動直後の `TOUCH_STARTUP_SETTLE_MS`（500ms）の間は、スキャンだけを行い解析しない**。改修の時点では、`read_touch` がチップの基準値を最初のスキャンの後に初めて読むので、最初のフレームは基準値 0 で引かれて全キーが大きな値になり、スキャンの直後に必ず解析する構成ではこれを確実に拾って誤ったノートを出していた（§6.1「動作チェック後の修正」）。チップ自身の校正（電源投入から 230ms 未満）と、基準値の読み直し（120ms 毎）が何度か行われるまで待つ、という理由だった
+    - （2026-10-03 追記）`touch_algo` への置き換えの後は、チップの基準値は読まない。待つ理由は、チップ自身の校正が終わる前の値で `touch_algo` が基準値を初期取得しないようにするため。この間は信号処理（`TouchSignal::process()`）も呼ばない。500ms の後、`touch_algo` の初期取得（`ACQUIRE_MS` = 300ms）が終わるまで output は 0 になる（`touch_baseline.md` §4.4）
 - 毎フレームの解析（フレーム駆動）と、`QubitTouch` の時間基準化は、`touch_baseline.md`（速さ検出）の段階で行う
 - `ReadTouch` と `QubitTouch` は同じタスクの中の構造体で、値は関数呼び出しで渡す。今の `TOUCH_RAW_DATA`（Mutex）は不要になる
-- 読み取り中に `SETTING_MODE`（§4.5）を参照する。基準値の補正（現状の `reference_adjust`）は、今の段階では従来どおり
+- `SETTING_MODE`（§4.5）を参照して基準値を補正する。改修の時点では `read_touch` の `reference_adjust` で従来どおり行っていた。2026-10-03 からは `TouchSignal::process()` の `calibrating` に渡し、`touch_algo` が校正（基準値の速い追従と noise_floor の計測）を行う（`touch_baseline.md` §3.7）
 
 **周期を超えたときの扱い**
 
@@ -233,7 +236,7 @@ loop {
 | `WORK_MODE` | `AtomicU8` | ui (C0) | touch (C1), pressure, midi_rx, ui (C0) | 変更なし |
 | `SETTING_MODE` | `AtomicBool` | ui (C0) | touch (C1), pressure, ringled (C0) | 旧 `WORK_MODE_DISPLAY`。設定画面（基準値の補正中）であることを表すので、名前を意味に合わせる |
 | `ERROR_CODE` | `AtomicU8` | 全タスク | status_led, ui (C0) | `src/error.rs` へ移し、外からは見えないようにする。`error::set` / `clear` / `get` で扱う（§4.7） |
-| `POINT0`–`POINT5`, `DEBUG_VALUE`, `AD_VALUE*` | Atomic | 各タスク | ui (C0) | デバッグ表示用。`debug_env.md` の段階で PC 側に移し、整理する |
+| `POINT0`–`POINT5`, `DEBUG_VALUE`, `AD_VALUE*` | Atomic | 各タスク | ui (C0) | デバッグ表示用。`debug_env.md` の段階で PC 側に移し、整理する。→ `POINT0`–`POINT5` は PC 側に移さず、キー 0〜5 の `touch_algo` の output を出すことにした（2026-10-03、`touch_baseline.md` §3.10） |
 | `SCAN_TIME`, `ANALYSIS_TIME`, `UI_DRAW_TIME` | `TimeStat`（最小・平均・最大の Atomic の組） | touch (C1)、ui (C0) | ui (C0) | 新規。診断用（§4.6） |
 | `PERIOD_OVERRUN`, `MIDI_TX_MAX_USED`, `MIDI_TX_OVERFLOW` | `AtomicU32` | touch (C1)、`queue_midi` の呼び出し元 | ui (C0) | 新規。診断用（§4.6） |
 
@@ -432,8 +435,8 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 ## 8. 未決事項
 
 - 96 キー構成で、スキャン＋解析が 10ms を超えることが常態化するか。段階 5 以降、`PERIOD_OVERRUN` を見て、常態化するようなら §4.1 のとおりタスクを分けるなどの対処を考える
-- OLED の描画時間が Core0 の MIDI 送信に与える影響。段階 3 以降、MIDI の送信の遅れなど問題が見えたら §4.4 の対処を行う
-- `InterruptExecutor` を使うかどうか（§4.4）
+- ~~OLED の描画時間が Core0 の MIDI 送信に与える影響~~ → **対処済み**（2026-10-01、描画の分割。§4.4.1・§6.1）。1 回に Core0 を止める時間は最大約 0.9ms になり、エラー 45・23 も出ていない
+- `InterruptExecutor` を使うかどうか（§4.4）→ 描画の分割で十分に短くなったので、**今は使わない**。描画を 10fps に戻すなど、止める時間が再び問題になったときに改めて考える
 - **Core0 で panic したときの表示**: 段階 3 で `status_led_task` を Core0 に移したため、Core0 で panic すると LED の点滅も止まり、エラー 55 を表示できない（Core1 の panic は Core0 の LED で 55 と表示される）。改修前は LED のタスクが Core1 にあったので、Core0 の panic も表示できた。対策としては、panic ハンドラの中で LED を直接点滅させる（Executor に頼らないビジーループ）などが考えられる
-- **OLED の描画による Core0 のタスクの遅れ**（→ 描画の分割で対処する。§4.4.1）: 描画に平均約 3ms かかり、その間 `midi_tx_task` と `ringled_task` が待たされる。5fps にしたので頻度は半分になったが、MIDI の送信が最大で描画時間の分だけ遅れることは変わらない。根本的には、`midi_tx_task` と `ringled_task` を `InterruptExecutor`（優先度付き）で動かし、描画の途中でも割り込めるようにする（§4.4 の 3）。描画処理そのものを速くする（`OledBuffer` の `DrawTarget` で塗りつぶしをまとめて処理する、など）余地もある
+- ~~**OLED の描画による Core0 のタスクの遅れ**~~ → **対処済み**（2026-10-01、描画の分割。§4.4.1・§6.1）: 分割前は描画 1 回（平均約 3ms）の間 `midi_tx_task` と `ringled_task` が待たされていた。テキスト 1 行・図形 1 つ毎に譲るようにし、実機で `Drw` の最大が 3087µs → 880µs に下がった。さらに短くする手段（長い行を区切って譲る、テキストを速く描く専用の関数、`InterruptExecutor`）は、問題が出たときに考える
 - `pressure_task`（ADC）を Core1 に置く案。センシングをまとめる考え方もあるが、Core1 の周期を乱す要因を増やさないため、今回は Core0 に置く
