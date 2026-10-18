@@ -109,4 +109,4 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - 処理時間や周期超過は OLED の診断ページ（page 5）で確認できる。計測値は `shared.rs` の `SCAN_TIME` / `ANALYSIS_TIME` / `UI_DRAW_TIME`（`TimeStat`）、`PERIOD_OVERRUN`、`MIDI_TX_MAX_USED` / `MIDI_TX_OVERFLOW`
 - 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`qtouch.rs`, `pressure.rs`, `read_touch.rs`）と `touch_algo` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
-- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）
+- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）
