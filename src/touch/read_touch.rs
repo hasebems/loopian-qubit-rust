@@ -14,6 +14,8 @@ pub struct ReadTouch {
 impl ReadTouch {
     const CH_CONVERSION: [u8; 4] = [0, 1, 2, 3];
     const AT42_READ_TIMEOUT_MS: u64 = 2;
+    // スキャン中の PCA9544 の切替・切断。I2C1 が固まっても touch_task を止めないため
+    const PCA_TIMEOUT_MS: u64 = 2;
     const INIT_I2C_TIMEOUT_MS: u64 = 3;
     // 前回の値とこれ以上違えば、そのキーだけ読み直す。
     // AT42QT1070 は 16bit の値の 2 バイトをまとめて固定しないので、上位を読んでから下位を読むまでの間に
@@ -100,17 +102,30 @@ impl ReadTouch {
         for ch in 0..(constants::TOTAL_CH as u8) {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
             let ch_in_dev = Self::convert_channel(ch);
-            pca.select(i2c, dev, ch_in_dev).await.ok();
+            let selected = matches!(
+                with_timeout(
+                    Duration::from_millis(Self::PCA_TIMEOUT_MS),
+                    pca.select(i2c, dev, ch_in_dev),
+                )
+                .await,
+                Ok(Ok(()))
+            );
 
             let start_ch = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
             let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
-            let read_result = with_timeout(
-                Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
-                at42.read_6key(i2c, &mut raw_data),
-            )
-            .await;
+            // 切り替えに失敗したチャネルは読まない（このチップのキーは読み取り失敗になる）
+            let read_result = if selected {
+                with_timeout(
+                    Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
+                    at42.read_6key(i2c, &mut raw_data),
+                )
+                .await
+                .ok()
+            } else {
+                None
+            };
 
-            if let Ok(Ok(())) = read_result {
+            if let Some(Ok(())) = read_result {
                 for (key, rawd) in raw_data
                     .iter()
                     .take(constants::AT42QT_KEYS_PER_DEVICE)
@@ -137,7 +152,12 @@ impl ReadTouch {
             }
             // PCA9544のチャネルが最後のときに切断する
             if Self::is_last_channel(ch) {
-                pca.disconnect(i2c, dev).await.ok();
+                with_timeout(
+                    Duration::from_millis(Self::PCA_TIMEOUT_MS),
+                    pca.disconnect(i2c, dev),
+                )
+                .await
+                .ok();
             }
         }
     }
