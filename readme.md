@@ -66,7 +66,7 @@ src/
 └── devices/           I2C デバイスの最小ドライバ（AT42QT1070, PCA9544, SSD1306）
 
 tools/
-└── qubit_monitor/     PC アプリ（タッチ信号の表示・記録。ホスト向けの独立したプロジェクト）
+└── qubit_etude/     PC アプリ（タッチ信号の表示・記録。ホスト向けの独立したプロジェクト）
 ```
 
 ## 使い方
@@ -89,10 +89,10 @@ feature フラグと PC アプリの起動方法の一覧は `doc/build.md`。�
 
 ## デバッグ環境
 
-タッチセンサの生値を USB CDC で PC に送り、PC のモニターアプリ（`tools/qubit_monitor`、Rust + egui）でリアルタイムに表示・記録する。詳細は `doc/debug_env.md`。
+タッチセンサの生値を USB CDC で PC に送り、PC のモニターアプリ（`tools/qubit_etude`、Rust + egui）でリアルタイムに表示・記録する。詳細は `doc/debug_env.md`。
 
 - ファームを `debug_stream` feature 付きで書き込むと、USB が MIDI + CDC（仮想シリアル）の複合デバイスになる。MIDI の演奏データはこれまでどおり流れる
-- PC アプリは `cd tools/qubit_monitor && cargo run --release` で起動する（必ずそのディレクトリで実行する）
+- PC アプリは `cd tools/qubit_etude && cargo run --release` で起動する（必ずそのディレクトリで実行する）
 - できること: 生値の時系列グラフ、Note On/Off とマーカーの表示、スキャン周期の切替（2 / 5 / 10 / 20ms）、記録（`.qlog`）と再生、統計（ノイズ・サンプル間隔・値の更新間隔）、CSV 書き出し
 - 予定: 基準値やノイズ除去のアルゴリズムを、ファームと PC アプリで同じコード（`crates/touch_algo`）にし、PC 上で調整してからファームに移す
 
@@ -103,7 +103,7 @@ feature フラグと PC アプリの起動方法の一覧は `doc/build.md`。�
 | `doc/build.md` | feature フラグ、ビルド・書き込み、PC アプリの起動方法のメモ |
 | `doc/task_architecture.md` | コア・タスク構成の改修 |
 | `doc/hw_modify.md` | ハードウェアの改修（OLED の I2C0 への移動） |
-| `doc/debug_env.md` | デバッグ環境（USB CDC、PC モニターアプリ qubit_monitor） |
+| `doc/debug_env.md` | デバッグ環境（USB CDC、PC モニターアプリ qubit_etude） |
 | `doc/touch_baseline.md` | タッチセンサの基準値の自前管理とノイズ対策 |
 | `doc/midi_spec.md` | MIDI の仕様 |
 | `doc/i2c_problem260802.md` | I2C ロックアップの調査記録 |

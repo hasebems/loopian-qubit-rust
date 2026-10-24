@@ -6,7 +6,7 @@ license = "MIT"
 
 [features]
 # 動作仕様を決めるための版: PCA9544 1台×2チャネル (AT42QT1070 2個、12キー)。キー数は今後も変わりうる (デフォルトは4チャネル×4台、96キー)
-# PC アプリ (tools/qubit_monitor) で見ながら使うので、debug_stream を含む
+# PC アプリ (tools/qubit_etude) で見ながら使うので、debug_stream を含む
 etude = ["debug_stream"]
 # 簡単な動作チェック用: PCA9544 を使わず AT42QT1070 1個を I2C に直結する (6キー)。etude より優先する
 no_pca9544 = []
@@ -14,7 +14,7 @@ no_pca9544 = []
 debug_stream = []
 
 [dependencies]
-# タッチの信号処理（ノイズ除去・基準値）。PC アプリ（tools/qubit_monitor）と共有する
+# タッチの信号処理（ノイズ除去・基準値）。PC アプリ（tools/qubit_etude）と共有する
 touch_algo = { path = "crates/touch_algo" }
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", branch = "main" }
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", branch = "main" }

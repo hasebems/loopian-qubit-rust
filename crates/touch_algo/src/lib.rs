@@ -2,7 +2,7 @@
 //!
 //! 1 スキャン分の生値を `TouchSignal::process` に渡すと、キー毎に
 //! filtered（ノイズ除去後）・baseline（基準値）・delta・output を更新する。
-//! I2C や時計には触れない純粋な計算だけで、ファーム（no_std）と PC アプリ（tools/qubit_monitor）で共有する。
+//! I2C や時計には触れない純粋な計算だけで、ファーム（no_std）と PC アプリ（tools/qubit_etude）で共有する。
 //!
 //! - 時刻は u32 の µs（ファームの `embassy_time::Instant` の µs、PC ではフレームの `time_us`）。
 //!   約 71 分で一周するので、時間の差は `wrapping_sub` で求める

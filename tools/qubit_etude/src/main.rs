@@ -1,6 +1,6 @@
-//! qubit_monitor: Loopian::QUBIT のタッチ信号を受信・表示・記録する PC アプリ（doc/debug_env.md §4）
+//! qubit_etude: Loopian::QUBIT のタッチ信号を受信・表示・記録する PC アプリ（doc/debug_env.md §4）
 //!
-//! 実行: `cd tools/qubit_monitor && cargo run --release`
+//! 実行: `cd tools/qubit_etude && cargo run --release`
 //! （リポジトリ直下から --manifest-path で指定すると、組み込み向けのターゲットが効いて失敗する）
 mod app;
 
@@ -12,15 +12,15 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 860.0])
-            .with_title("qubit_monitor"),
+            .with_title("qubit_etude"),
         ..Default::default()
     };
     eframe::run_native(
-        "qubit_monitor",
+        "qubit_etude",
         options,
         Box::new(|cc| {
             setup_japanese_font(&cc.egui_ctx);
-            Ok(Box::new(app::MonitorApp::new()))
+            Ok(Box::new(app::EtudeApp::new()))
         }),
     )
 }

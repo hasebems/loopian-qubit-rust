@@ -1,11 +1,12 @@
 //! 画面（doc/debug_env.md §4.2）
 //!
 //! 上: 接続・記録・開始/停止・マーカー・周期、再生の操作、受信の状態
-//! 左: 表示するキー・系列・時間幅
+//! 左: 表示するキー（0-5 / 6-11）・系列・時間幅
 //! 中央: 時系列グラフ（イベントを縦線で重ねる）。上段は raw と filtered・baseline、下段は delta・output
 //! 右: アルゴリズム（touch_algo）の設定と、統計（表示している時間の範囲で計算する）
-//! 下: 全キーの今の値のバー表示
+//! 下: キーの今の値のバー表示（0-5 / 6-11 / 0-11）
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -13,13 +14,13 @@ use eframe::egui::{self, Color32, RichText};
 use egui_plot::{Bar, BarChart, HLine, Legend, Line, LineStyle, Plot, PlotBounds, PlotPoints};
 use touch_algo::{Params, State};
 
-use qubit_monitor::algo::{self, AlgoRunner};
-use qubit_monitor::csv_export;
-use qubit_monitor::playback::{self, Player};
-use qubit_monitor::protocol::{Packet, Parser};
-use qubit_monitor::qlog;
-use qubit_monitor::serial::{self, Command, Link, Notice, PortEntry};
-use qubit_monitor::store::{self, Store};
+use qubit_etude::algo::{self, AlgoRunner};
+use qubit_etude::csv_export;
+use qubit_etude::playback::{self, Player};
+use qubit_etude::protocol::{Packet, Parser};
+use qubit_etude::qlog;
+use qubit_etude::serial::{self, Command, Link, Notice, PortEntry};
+use qubit_etude::store::{self, Store};
 
 /// ファームの period コマンドで選べる周期（µs）。ファームの SCAN_PERIODS_US と同じ
 const PERIODS_US: [u32; 4] = [2_000, 5_000, 10_000, 20_000];
@@ -33,6 +34,47 @@ const REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 const Y_SCALES: [f64; 8] = [10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0];
 /// 下段のグラフの下端は、上端のこの割合だけ負にする（delta の負の値も見えるように）
 const LOWER_NEGATIVE_RATIO: f64 = 0.2;
+/// AT42QT1070 1 個のキー数。時系列グラフはこの単位でキーを切り替える（doc/debug_env.md §4.2.1）
+const KEYS_PER_CHIP: usize = 6;
+
+/// 時系列グラフに出すキーの組（チップ 1 個分）
+#[derive(Clone, Copy, PartialEq)]
+enum TraceKeys {
+    Lower, // key0〜5
+    Upper, // key6〜11
+}
+
+impl TraceKeys {
+    fn range(self) -> Range<usize> {
+        match self {
+            Self::Lower => 0..KEYS_PER_CHIP,
+            Self::Upper => KEYS_PER_CHIP..2 * KEYS_PER_CHIP,
+        }
+    }
+}
+
+/// バー表示に出すキー
+#[derive(Clone, Copy, PartialEq)]
+enum BarKeys {
+    Lower, // key0〜5
+    Upper, // key6〜11
+    All,   // key0〜11
+}
+
+impl BarKeys {
+    fn range(self) -> Range<usize> {
+        match self {
+            Self::Lower => 0..KEYS_PER_CHIP,
+            Self::Upper => KEYS_PER_CHIP..2 * KEYS_PER_CHIP,
+            Self::All => 0..2 * KEYS_PER_CHIP,
+        }
+    }
+}
+
+/// キーの範囲を、データにあるキー（0..nkeys）に収める
+fn clip_keys(keys: Range<usize>, nkeys: usize) -> Range<usize> {
+    keys.start.min(nkeys)..keys.end.min(nkeys)
+}
 
 const KEY_COLORS: [Color32; 8] = [
     Color32::from_rgb(0x4e, 0x79, 0xa7),
@@ -49,7 +91,7 @@ fn key_color(key: usize) -> Color32 {
     KEY_COLORS[key % KEY_COLORS.len()]
 }
 
-pub struct MonitorApp {
+pub struct EtudeApp {
     ports: Vec<PortEntry>,
     selected_port: Option<String>,
     link: Option<Link>,
@@ -65,7 +107,8 @@ pub struct MonitorApp {
     message: String, // 最後の操作の結果など
 
     // 表示
-    show_keys: Vec<bool>,
+    trace_keys: TraceKeys, // 時系列グラフに出すキー
+    bar_keys: BarKeys,     // バー表示に出すキー
     show_raw: bool,
     span_s: f64,
     paused: bool,
@@ -83,7 +126,7 @@ pub struct MonitorApp {
     bars_scale: usize,  // バー表示の縦軸（Y_SCALES の添字）
 }
 
-impl MonitorApp {
+impl EtudeApp {
     pub fn new() -> Self {
         let ports = serial::list_ports();
         let selected_port = ports.first().map(|p| p.name.clone());
@@ -99,7 +142,8 @@ impl MonitorApp {
             marker_count: 0,
             rate: RateMeter::default(),
             message: String::new(),
-            show_keys: Vec::new(),
+            trace_keys: TraceKeys::Lower,
+            bar_keys: BarKeys::All,
             show_raw: true,
             span_s: 5.0,
             paused: false,
@@ -509,36 +553,20 @@ impl MonitorApp {
     // ------------------------------------------------------------------
     fn view_panel(&mut self, ui: &mut egui::Ui) {
         let nkeys = self.store.nkeys;
-        if self.show_keys.len() != nkeys {
-            // 既定は最初の 6 キーを表示する
-            self.show_keys = (0..nkeys).map(|k| k < 6).collect();
-            self.stats_key = self.stats_key.min(nkeys.saturating_sub(1));
+        self.stats_key = self.stats_key.min(nkeys.saturating_sub(1));
+        // 6 キーのデータでは 6-11 が無いので、0-5 だけにする
+        let has_upper = nkeys > KEYS_PER_CHIP;
+        if !has_upper {
+            self.trace_keys = TraceKeys::Lower;
         }
         ui.heading("表示");
-        ui.label("キー");
+        ui.label("キー（時系列グラフ）");
         ui.horizontal(|ui| {
-            if ui.small_button("全部").clicked() {
-                self.show_keys.iter_mut().for_each(|s| *s = true);
-            }
-            if ui.small_button("なし").clicked() {
-                self.show_keys.iter_mut().for_each(|s| *s = false);
-            }
-        });
-        egui::ScrollArea::vertical()
-            .max_height(260.0)
-            .show(ui, |ui| {
-                egui::Grid::new("keys").show(ui, |ui| {
-                    for k in 0..nkeys {
-                        ui.checkbox(
-                            &mut self.show_keys[k],
-                            RichText::new(format!("{k}")).color(key_color(k)),
-                        );
-                        if k % 4 == 3 {
-                            ui.end_row();
-                        }
-                    }
-                });
+            ui.selectable_value(&mut self.trace_keys, TraceKeys::Lower, "0-5");
+            ui.add_enabled_ui(has_upper, |ui| {
+                ui.selectable_value(&mut self.trace_keys, TraceKeys::Upper, "6-11");
             });
+        });
         ui.separator();
         ui.label("系列");
         ui.checkbox(&mut self.show_raw, "raw（生値）");
@@ -587,14 +615,14 @@ impl MonitorApp {
             });
             return;
         };
-        let shown = |k: usize| self.show_keys.get(k).copied().unwrap_or(false);
+        let keys = clip_keys(self.trace_keys.range(), self.store.nkeys);
         let algo_on = self.algo_enabled && self.algo.filtered.len() == self.store.nkeys;
         let algo_range = self.algo.range(t0, t1);
 
         // 上段: raw・filtered・baseline
         let range = self.store.range(t0, t1);
         let mut lines = Vec::new();
-        for k in (0..self.store.nkeys).filter(|&k| shown(k)) {
+        for k in keys.clone() {
             let store = &self.store;
             let valid = |i: usize| store.is_valid(i, k);
             if self.show_raw {
@@ -638,7 +666,7 @@ impl MonitorApp {
         let lower = algo_on && (self.show_delta || self.show_output);
         let mut lower_lines = Vec::new();
         if lower {
-            for k in (0..self.store.nkeys).filter(|&k| shown(k)) {
+            for k in keys {
                 if self.show_delta {
                     let delta = &self.algo.delta[k];
                     let points = decimate(
@@ -969,16 +997,30 @@ impl MonitorApp {
     }
 
     // ------------------------------------------------------------------
-    //  下: 全キーの今の output
+    //  下: キーの今の output（0-5 / 6-11 / 0-11）
     // ------------------------------------------------------------------
     fn bars(&mut self, ui: &mut egui::Ui) {
         let nkeys = self.store.nkeys;
+        // 6 キーのデータでは 6-11 が無いので、0-5 にする（0-11 は 0-5 と同じになる）
+        let has_upper = nkeys > KEYS_PER_CHIP;
+        if !has_upper && self.bar_keys == BarKeys::Upper {
+            self.bar_keys = BarKeys::Lower;
+        }
+        ui.horizontal(|ui| {
+            ui.label("キー（バー表示）");
+            ui.selectable_value(&mut self.bar_keys, BarKeys::Lower, "0-5");
+            ui.add_enabled_ui(has_upper, |ui| {
+                ui.selectable_value(&mut self.bar_keys, BarKeys::Upper, "6-11");
+            });
+            ui.selectable_value(&mut self.bar_keys, BarKeys::All, "0-11");
+        });
+        let keys = clip_keys(self.bar_keys.range(), nkeys);
         let algo_on = self.algo_enabled && self.algo.output.len() == nkeys;
         // output（アルゴリズムの結果）の、表示範囲の最後の値（一時停止中は範囲の終わり）
         let bars: Vec<Bar> = match self.window_us() {
             Some((t0, t1)) if algo_on => {
                 let r = self.algo.range(t0, t1);
-                (0..nkeys)
+                keys.clone()
                     .map(|k| {
                         let v = r.end.checked_sub(1).map_or(0, |i| self.algo.output[k][i]);
                         Bar::new(k as f64, v as f64)
@@ -989,11 +1031,11 @@ impl MonitorApp {
             }
             _ => Vec::new(),
         };
-        bar_plot(ui, "output", bars, &mut self.bars_scale);
+        bar_plot(ui, "output", bars, keys, &mut self.bars_scale);
     }
 }
 
-impl eframe::App for MonitorApp {
+impl eframe::App for EtudeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
         if let Some(player) = &mut self.player {
@@ -1086,8 +1128,9 @@ fn large_controls(ui: &mut egui::Ui) {
     style.spacing.item_spacing.x = 8.0;
 }
 
-fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>, scale: &mut usize) {
-    let nkeys = bars.len() as f64;
+/// keys: 横軸に並べるキーの範囲（バーの横の位置はキー番号）
+fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>, keys: Range<usize>, scale: &mut usize) {
+    let (x0, x1) = (keys.start as f64, keys.end.max(keys.start + 1) as f64);
     ui.horizontal(|ui| {
         y_scale_buttons(ui, scale);
         let y_max = Y_SCALES[*scale];
@@ -1098,10 +1141,8 @@ fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>, scale: &mut usize) {
             .allow_scroll(false)
             .x_axis_label("キー")
             .show(ui, |plot_ui| {
-                plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                    [-0.5, 0.0],
-                    [nkeys.max(1.0) - 0.5, y_max],
-                ));
+                plot_ui
+                    .set_plot_bounds(PlotBounds::from_min_max([x0 - 0.5, 0.0], [x1 - 0.5, y_max]));
                 plot_ui.set_auto_bounds([false, false]);
                 plot_ui.bar_chart(BarChart::new(name, bars).width(0.8))
             });

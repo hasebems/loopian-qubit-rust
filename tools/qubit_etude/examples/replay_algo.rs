@@ -1,12 +1,12 @@
 //! 記録（.qlog）を touch_algo に通し、キー毎の結果をまとめて表示する（GUI を使わない）
 //!
-//! 実行: `cd tools/qubit_monitor && cargo run --example replay_algo -- <記録.qlog> [間引き µs（既定 8000、0 で間引かない）]`
+//! 実行: `cd tools/qubit_etude && cargo run --example replay_algo -- <記録.qlog> [間引き µs（既定 8000、0 で間引かない）]`
 //! PC アプリと同じ AlgoRunner を使う。パラメータは既定値（doc/touch_baseline.md §3.11）
 use std::path::PathBuf;
 
-use qubit_monitor::algo::AlgoRunner;
-use qubit_monitor::playback::Player;
-use qubit_monitor::store::Store;
+use qubit_etude::algo::AlgoRunner;
+use qubit_etude::playback::Player;
+use qubit_etude::store::Store;
 
 fn main() {
     let mut args = std::env::args().skip(1);

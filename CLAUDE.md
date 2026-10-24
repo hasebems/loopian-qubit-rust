@@ -18,14 +18,14 @@ cargo build --features no_pca9544,debug_stream  # デバッグ環境: USB を MI
 cargo fmt                       # CI で --check される
 cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前に通すこと
 
-# PC アプリ（qubit_monitor、デバッグ環境用）。必ず tools/qubit_monitor の中で実行する（直下の .cargo/config.toml のターゲットが効くため）
-cd tools/qubit_monitor && cargo run --release       # GUI
-cd tools/qubit_monitor && cargo run --example probe # GUI 無しでファームとの通信を確かめる
-cd tools/qubit_monitor && cargo run --example replay_algo -- 記録.qlog   # 記録を touch_algo に通して結果を表示
+# PC アプリ（qubit_etude、デバッグ環境用）。必ず tools/qubit_etude の中で実行する（直下の .cargo/config.toml のターゲットが効くため）
+cd tools/qubit_etude && cargo run --release       # GUI
+cd tools/qubit_etude && cargo run --example probe # GUI 無しでファームとの通信を確かめる
+cd tools/qubit_etude && cargo run --example replay_algo -- 記録.qlog   # 記録を touch_algo に通して結果を表示
 cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号処理（no_std のビルドと、ホストでのテスト）
 ```
 
-- ユニットテストは無い（no_std・実機依存）。確認は `cargo check` / clippy と実機動作で行う。PC アプリ（`tools/qubit_monitor`）と `crates/touch_algo` には `cargo test` がある（プロトコルの解釈・記録ファイル・統計・信号処理）
+- ユニットテストは無い（no_std・実機依存）。確認は `cargo check` / clippy と実機動作で行う。PC アプリ（`tools/qubit_etude`）と `crates/touch_algo` には `cargo test` がある（プロトコルの解釈・記録ファイル・統計・信号処理）
 - `build.rs` が `memory.x` を OUT_DIR にコピーし、`BUILD_DATE` と `BUILD_VERSION`（`Cargo.toml` の version）を環境変数として埋め込む。起動画面（OLED page 0）に表示される
 - リンカの引数（`--nmagic`・`-Tlink.x`・`-Map=output.map`）も `build.rs` から渡す（`cargo:rustc-link-arg-bins`）。`.cargo/config.toml` の rustflags には `target-cpu` だけを置く。rustflags で渡すと、新しい cargo（nightly）でリンカに届かずリンクに失敗したため
 - リンク時に `output.map` を生成する（git 管理外）
@@ -85,8 +85,8 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `src/touch/pressure.rs`: ADC の移動平均基準値（上昇 / 下降で追従率を変える）と CC11 変換テーブル。送る CC はパケットとして返し、送信はタスク側が行う
 - `src/ui/oled_display.rs`: OLED ページ描画（page 0–3 と 5（診断）を左右スイッチで巡回、4 は設定画面、10 以降はデモ）
 - `src/ui/ringled.rs`: NeoPixel の描画ロジック
-- `src/debug_protocol.rs`: `debug_stream` のパケットの組み立て。PC 側の解釈は `tools/qubit_monitor/src/protocol.rs` で、形式を変えるときは両方を直す
-- `tools/qubit_monitor/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
+- `src/debug_protocol.rs`: `debug_stream` のパケットの組み立て。PC 側の解釈は `tools/qubit_etude/src/protocol.rs` で、形式を変えるときは両方を直す
+- `tools/qubit_etude/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
 - `crates/touch_algo/`: タッチの信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。no_std で、ファーム（`touch_task`）と PC アプリが同じコードを使う。パラメータは `Params::DEFAULT`
 
 ## 動作モードと MIDI

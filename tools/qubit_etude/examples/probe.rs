@@ -1,15 +1,15 @@
 //! ファームとの通信を確かめる（GUI を使わない）。PC アプリと同じ受信スレッド・Parser・Store を使う
 //!
-//! 実行: `cd tools/qubit_monitor && cargo run --example probe [ポート]`
+//! 実行: `cd tools/qubit_etude && cargo run --example probe [ポート]`
 //! ポートを省くと、見つかった QUBIT を使う。
 //! INFO → start → FRAME → period → mark → 不正なコマンド → stop の順に確かめ、結果を表示する
 use std::time::{Duration, Instant};
 
-use qubit_monitor::playback::Player;
-use qubit_monitor::protocol::{EVENT_MARKER, Packet, Parser};
-use qubit_monitor::serial::{self, Command, Link, Notice};
-use qubit_monitor::store::Store;
-use qubit_monitor::{csv_export, qlog};
+use qubit_etude::playback::Player;
+use qubit_etude::protocol::{EVENT_MARKER, Packet, Parser};
+use qubit_etude::serial::{self, Command, Link, Notice};
+use qubit_etude::store::Store;
+use qubit_etude::{csv_export, qlog};
 
 struct Probe {
     link: Link,
@@ -77,8 +77,7 @@ impl Probe {
             .collect();
         println!("    間隔の分布: {}", hist.join("  "));
         for (k, ks) in stats.keys.iter().enumerate() {
-            let changes =
-                qubit_monitor::store::Summary::of(&self.store.change_intervals(t0, t1, k));
+            let changes = qubit_etude::store::Summary::of(&self.store.change_intervals(t0, t1, k));
             println!(
                 "    key{k}: 平均 {:.1} σ {:.2} p-p {}  値の更新間隔 平均 {:.2} ms ({} 回)",
                 ks.mean,
