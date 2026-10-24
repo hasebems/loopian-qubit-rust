@@ -42,23 +42,23 @@ pub const RINGLED_CMD_TX_ON: u8 = MIDI_NOTE_ON; // 送信用Note Onコマンド
 pub const RINGLED_CMD_TX_OFF: u8 = MIDI_NOTE_OFF; // 送信用Note Offコマンド
 pub const RINGLED_CMD_TX_MOVED: u8 = 0xa0; // 送信用Note Moveコマンド(NoteOff)
 
-// チェック用
-#[cfg(not(feature = "test_mode"))]
+// キー数の構成: 本番 4ch×4台 (96キー)、etude 2ch×1台 (12キー)、no_pca9544 直結1個 (6キー)。
+// CI の clippy --all-features で両方が有効になるので、no_pca9544 を優先する
+#[cfg(not(any(feature = "etude", feature = "no_pca9544")))]
 pub const PCA9544_NUM_CHANNELS: u8 = 4; // PCA9544のチャネル数
-#[cfg(feature = "test_mode")]
-pub const PCA9544_NUM_CHANNELS: u8 = 1; // PCA9544のチャネル数 (テストモード)
+#[cfg(all(feature = "etude", not(feature = "no_pca9544")))]
+pub const PCA9544_NUM_CHANNELS: u8 = 2; // PCA9544のチャネル数 (etude)
+#[cfg(feature = "no_pca9544")]
+pub const PCA9544_NUM_CHANNELS: u8 = 1; // PCA9544 無しで直結 (no_pca9544)
 
-#[cfg(not(feature = "test_mode"))]
+#[cfg(not(any(feature = "etude", feature = "no_pca9544")))]
 pub const PCA9544_NUM_DEVICES: u8 = 4; // PCA9544の台数
-#[cfg(feature = "test_mode")]
-pub const PCA9544_NUM_DEVICES: u8 = 1; // PCA9544の台数 (テストモード)
+#[cfg(any(feature = "etude", feature = "no_pca9544"))]
+pub const PCA9544_NUM_DEVICES: u8 = 1; // PCA9544の台数 (etude / no_pca9544)
 pub const AT42QT_KEYS_PER_DEVICE: usize = 6; // AT42QT1070
 
 pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
 pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
-// AT42の読み取りインデックスnを (n + TOUCH_INDEX_SHIFT) % TOTAL_QT_KEYS に再配置する
-// 96キー構成では「6 -> 0」「0 -> 90」となる
-pub const TOUCH_INDEX_SHIFT: usize = TOTAL_QT_KEYS - 6;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
 pub const RINGLED_RX_WORDS: usize = NUM_LEDS.div_ceil(32); // 受信ノート表示のビット列(1bit/LED)を格納する u32 の個数
 

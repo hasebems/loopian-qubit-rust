@@ -79,7 +79,7 @@ tools/
 ```sh
 cargo build --release
 cargo run --release                # picotool で書き込み・実行（BOOTSEL/USB 接続が必要）
-cargo build --features test_mode   # PCA9544 1 台 × 1ch 構成（6 キー）
+cargo build --features etude   # PCA9544 1 台 × 2ch 構成（AT42QT1070 2 個、12 キー）。debug_stream を含み、生値を PC に送る
 cargo build --features no_pca9544  # PCA9544 無しで AT42QT1070 1 個を直結（6 キー）
 cargo run --release --features no_pca9544,debug_stream   # デバッグ環境（6 キー直結、生値を PC に送る）
 cargo clippy --all-features -- --deny=warnings

@@ -3,12 +3,15 @@
 | フィーチャー | 効果 |
 |---|---|
 | なし（デフォルト） | PCA9544: 4ch×4台（96 キー）、ADC: 3ch。本番用 |
-| `test_mode` | PCA9544: 1ch×1台（6 キー） |
-| `no_pca9544` | PCA9544 無し（AT42QT1070 1個を I2C に直結、6 キー）。`test_mode` を含む |
+| `etude` | PCA9544: 2ch×1台（0x70。AT42QT1070 2個、12 キー）。PCA9544 が必須。センサチップを 2 個以上使って、動作仕様を決めるための構成。`debug_stream` を含む（qubit_monitor で見ながら使うため） |
+| `no_pca9544` | PCA9544 無し（AT42QT1070 1個を I2C に直結、6 キー）。`etude` は含まない。簡単な動作チェック用 |
 | `debug_stream` | デバッグ環境。USB を MIDI + CDC（仮想シリアル）にし、タッチの生値を PC に送る。スキャン周期の既定が 2ms になる（`doc/debug_env.md`） |
 
 - 組み合わせるときはカンマで区切る: `--features no_pca9544,debug_stream`
-- `debug_stream` は `no_pca9544` を含まない。6 キー直結で使うときは両方を指定する
+- `etude` は `debug_stream` を含む（2026-10-24 から）。12 キーで使うときは `etude` だけを指定する
+- `no_pca9544` は `debug_stream` を含まない。6 キー直結で PC に生値を送るときは `no_pca9544,debug_stream` を指定する。`debug_stream` 単独（96 キー）も使える
+- `etude` と `no_pca9544` は同時には指定しない。両方を指定すると `no_pca9544`（6 キー）が優先される（CI の `clippy --all-features` でビルドが通るようにするため）
+- 2026-10-24 に `test_mode`（6 キー、1ch×1台）を `etude`（12 キー、2ch×1台）に変えた。名前を用途に合わせ、キー数は名前に入れない（仕様を決めるためのキー数は今後も変わりうるため）。それまでは `no_pca9544` が `test_mode` を含み、キー数（6）を `test_mode` から得ていた
 - 以前あった `adc_ch4`（ADC 4ch）は、今の `Cargo.toml` には無い
 
 ## ファームのビルド・書き込み
@@ -17,6 +20,7 @@
 cargo build                                         # dev ビルド
 cargo run --release                                 # 書き込み・実行（BOOTSEL で USB 接続）
 cargo run --release --features no_pca9544,debug_stream   # デバッグ環境の実験用（6 キー直結）
+cargo run --release --features etude                 # デバッグ環境の実験用（PCA9544 経由の 12 キー。debug_stream を含む）
 ```
 
 - リンカの引数（`--nmagic`・`-Tlink.x`・`-Map=output.map`）は `build.rs` から渡している（2026-10-02 から）。以前は `.cargo/config.toml` の rustflags で渡していたが、CI の nightly のジョブ（新しい cargo）で rustflags がリンカに届かず、`__sidata` などが未定義でリンクに失敗した。build.rs からなら cargo の版に関係なく渡せる

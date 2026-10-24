@@ -12,7 +12,7 @@ pub struct ReadTouch {
 }
 
 impl ReadTouch {
-    const CH_CONVERSION: [u8; 4] = [3, 2, 1, 0];
+    const CH_CONVERSION: [u8; 4] = [0, 1, 2, 3];
     const AT42_READ_TIMEOUT_MS: u64 = 2;
     const INIT_I2C_TIMEOUT_MS: u64 = 3;
     // 前回の値とこれ以上違えば、そのキーだけ読み直す。
@@ -37,10 +37,6 @@ impl ReadTouch {
 
     fn convert_channel(ch: u8) -> u8 {
         Self::CH_CONVERSION[Self::channel_in_device(ch) as usize]
-    }
-
-    fn shifted_index(raw_index: usize) -> usize {
-        (raw_index + constants::TOUCH_INDEX_SHIFT) % constants::TOTAL_QT_KEYS
     }
 
     pub fn new() -> Self {
@@ -120,9 +116,9 @@ impl ReadTouch {
                     .take(constants::AT42QT_KEYS_PER_DEVICE)
                     .enumerate()
                 {
-                    let shifted_sid = Self::shifted_index(start_ch + key);
+                    let sid = start_ch + key;
                     let mut raw = *rawd;
-                    let old = self.raw_value[shifted_sid];
+                    let old = self.raw_value[sid];
                     if old != 0 && raw.abs_diff(old) >= Self::HI_LO_REREAD_DIFF {
                         // hi/lo ずれの疑い。このキーだけ読み直す。失敗したら前回の値を使う
                         raw = match with_timeout(
@@ -135,8 +131,8 @@ impl ReadTouch {
                             _ => old,
                         };
                     }
-                    self.raw_value[shifted_sid] = raw;
-                    self.valid |= 1u128 << shifted_sid;
+                    self.raw_value[sid] = raw;
+                    self.valid |= 1u128 << sid;
                 }
             }
             // PCA9544のチャネルが最後のときに切断する

@@ -10,10 +10,6 @@ pub struct RingLed {
 }
 
 impl RingLed {
-    fn source_index_for_led(led_index: usize) -> usize {
-        (led_index + TOUCH_INDEX_SHIFT) % NUM_LEDS
-    }
-
     pub fn new() -> Self {
         Self { counter: 0 }
     }
@@ -37,8 +33,7 @@ impl RingLed {
         let setting_blink_on = (self.counter / 25).is_multiple_of(2);
 
         for (i, led) in data.iter_mut().enumerate().take(NUM_LEDS) {
-            let source_index = Self::source_index_for_led(i);
-            let source_pos = source_index as f32;
+            let source_pos = i as f32;
             let led_angle = (i as f32 / num_leds_f) * 2.0 * PI;
 
             // 8x finer spatial wave and darker output for NeoPixel brightness perception.
@@ -68,7 +63,7 @@ impl RingLed {
                 }
 
                 // rx key: only this LED lights cyan
-                if ((rxkey_bits[source_index / 32] >> (source_index % 32)) & 1) != 0 {
+                if ((rxkey_bits[i / 32] >> (i % 32)) & 1) != 0 {
                     g = g.saturating_add(120);
                     b = b.saturating_add(180);
                 }

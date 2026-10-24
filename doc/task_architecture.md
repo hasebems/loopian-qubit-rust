@@ -326,7 +326,7 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
 
 各段階の終わりに、次を確認してコミットする。
 
-- ビルド: `cargo build`, `--release`, `--features test_mode`, `--features no_pca9544`, `cargo clippy --all-features -- --deny=warnings`, `cargo fmt --check`
+- ビルド: `cargo build`, `--release`, `--features etude`（2026-10-24 から 12 キー）, `--features no_pca9544`, `cargo clippy --all-features -- --deny=warnings`, `cargo fmt --check`
 - 実機: 下の「確認」欄
 
 | 段階 | 内容 | 確認 |

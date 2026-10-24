@@ -12,8 +12,8 @@ Loopian::QUBIT のファームウェア。96 個の静電タッチパッドが�
 cargo build                     # dev ビルド (opt-level 2, overflow-checks 有効)
 cargo build --release
 cargo run --release             # picotool load -u -v -x -t elf で書き込み・実行（BOOTSEL/USB 接続が必要）
-cargo build --features test_mode   # PCA9544 1台×1ch 構成（6 キー）で動かす試験用
-cargo build --features no_pca9544  # PCA9544 無しで AT42QT1070 1個を直結する試験用（test_mode を含む）
+cargo build --features etude   # PCA9544 1台×2ch 構成（AT42QT1070 2個、12 キー）で動作仕様を決めるための版。PCA9544 が必須。debug_stream を含む
+cargo build --features no_pca9544  # PCA9544 無しで AT42QT1070 1個を直結する試験用（6 キー。etude とは独立）
 cargo build --features no_pca9544,debug_stream  # デバッグ環境: USB を MIDI + CDC にし、タッチの生値を PC に送る（doc/debug_env.md）
 cargo fmt                       # CI で --check される
 cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前に通すこと
@@ -78,9 +78,9 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `src/shared.rs`: タスク間の共有状態と、診断用の計測値（`TimeStat` など）
 - `src/error.rs`: エラーコードの定数と `error::set` / `clear` / `get`
 - `src/tasks/`: タスク本体（ループ・周期・共有状態の読み書き）。計算や描画のロジックは `touch/`・`ui/` に置く
-- `src/constants.rs`: キー数・MIDI チャンネル・`WorkMode`・スキャン周期など。`test_mode` feature でキー数が変わる
+- `src/constants.rs`: キー数・MIDI チャンネル・`WorkMode`・スキャン周期など。`etude`（12 キー）・`no_pca9544`（6 キー）feature でキー数が変わる
 - `src/devices/`: I2C デバイスの最小ドライバ（`at42qt`, `pca9544`, `ssd1306`）。I2C を所有せず、呼び出し毎に `&mut I2C` を借用する
-- `src/touch/read_touch.rs`: PCA9544 の ch 切替と AT42QT の生値（Key Signal）の読み込み、hi/lo ずれの読み直し。チップの基準値は使わない。ch 順は `CH_CONVERSION` で反転、キー番号は `TOUCH_INDEX_SHIFT` で回転する
+- `src/touch/read_touch.rs`: PCA9544 の ch 切替と AT42QT の生値（Key Signal）の読み込み、hi/lo ずれの読み直し。チップの基準値は使わない。ch 順は `CH_CONVERSION`（`[0, 1, 2, 3]`、そのまま）で決まり、キー番号は読み取り順のまま（回転しない）
 - `src/touch/qtouch.rs`: タッチ位置検出・追跡（最大 4 点）、ノート変換、ベロシティ、ビブラート検出。MIDI 出力はコールバック経由
 - `src/touch/pressure.rs`: ADC の移動平均基準値（上昇 / 下降で追従率を変える）と CC11 変換テーブル。送る CC はパケットとして返し、送信はタスク側が行う
 - `src/ui/oled_display.rs`: OLED ページ描画（page 0–3 と 5（診断）を左右スイッチで巡回、4 は設定画面、10 以降はデモ）
