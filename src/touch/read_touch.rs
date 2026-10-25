@@ -54,40 +54,45 @@ impl ReadTouch {
         at42: &mut at42qt::At42Qt1070,
         i2c: &mut I2c<'static, I2C1, i2c::Async>,
     ) -> bool {
+        // 失敗したチャネルがあっても、残りのチャネルの初期化は続ける。
+        // 一部のチップや配線の不具合で、正常なチップまで初期化されないと、回路の不具合の調査が難しくなるため
+        let mut all_ok = true;
         for ch in 0..constants::PCA9544_NUM_CHANNELS * constants::PCA9544_NUM_DEVICES {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
             let ch_in_dev = Self::convert_channel(ch);
-            if with_timeout(
-                Duration::from_millis(Self::INIT_I2C_TIMEOUT_MS),
-                pca.select(i2c, dev, ch_in_dev),
-            )
-            .await
-            .is_err()
-            {
-                return false;
-            }
-            if with_timeout(
-                Duration::from_millis(Self::INIT_I2C_TIMEOUT_MS),
-                at42.init(i2c),
-            )
-            .await
-            .is_err()
-            {
-                return false;
-            }
-            // PCA9544のチャネルが最後のときに切断する
-            if Self::is_last_channel(ch)
-                && with_timeout(
+            // タイムアウトだけでなく、I2C のエラー（チップが無いときの NACK など）も失敗とする
+            let selected = matches!(
+                with_timeout(
                     Duration::from_millis(Self::INIT_I2C_TIMEOUT_MS),
-                    pca.disconnect(i2c, dev),
+                    pca.select(i2c, dev, ch_in_dev),
                 )
-                .await
-                .is_err()
-            {
-                return false;
+                .await,
+                Ok(Ok(()))
+            );
+            // 切り替えに失敗したチャネルのチップは初期化しない
+            let initialized = selected
+                && matches!(
+                    with_timeout(
+                        Duration::from_millis(Self::INIT_I2C_TIMEOUT_MS),
+                        at42.init(i2c),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                );
+            all_ok &= initialized;
+            // PCA9544のチャネルが最後のときに切断する
+            if Self::is_last_channel(ch) {
+                all_ok &= matches!(
+                    with_timeout(
+                        Duration::from_millis(Self::INIT_I2C_TIMEOUT_MS),
+                        pca.disconnect(i2c, dev),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                );
             }
         }
-        true
+        all_ok
     }
 
     /// 全キーをスキャンし、生値と読み取り成功フラグを更新する。

@@ -23,7 +23,9 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     use touch::qtouch::QubitTouch;
     use touch_algo::{KeyState, Params, TouchSignal};
 
-    const TOUCH_INIT_TIMEOUT_MS: u64 = 80;
+    // 初期化は失敗しても全チャネルを続けるので、すべての I2C がタイムアウト（3ms）しても終わる時間にする。
+    // 96 キーで 16ch ×（切替＋初期化）＋ 4 台の切断 = 約 108ms
+    const TOUCH_INIT_TIMEOUT_MS: u64 = 150;
 
     // AT42QT1070 と PCA9544 の生成
     let pca = devices::pca9544::Pca9544::new();
