@@ -48,6 +48,12 @@ pub struct Params {
     pub noise_floor_default: u16,
     /// デッドゾーンの上限
     pub noise_floor_max: u16,
+    /// R3 を delta < -noise_floor のときだけにする（チップの境目のノイズ対策。§3.12）
+    pub fall_deadband: bool,
+    /// 「静か」のしきい値を、近傍の各キーで quiet_threshold + noise_floor にする（§3.12）
+    pub quiet_adapt: bool,
+    /// 起動時に noise_floor を自動で測る時間（初期取得の後。0 なら測らない。§3.12）
+    pub auto_calib_ms: u32,
 }
 
 impl Params {
@@ -70,6 +76,10 @@ impl Params {
         calib_settle_ms: 500,
         noise_floor_default: 4,
         noise_floor_max: 16,
+        // §3.12 の対策は、PC で確かめるまでファームでは使わない
+        fall_deadband: false,
+        quiet_adapt: false,
+        auto_calib_ms: 0,
     };
 }
 
@@ -91,6 +101,8 @@ pub enum State {
     Running,
     /// 設定画面での校正中
     Calibrating,
+    /// 起動時の noise_floor の自動計測中（§3.12）。処理は Calibrating と同じで、output は全キー 0
+    AutoCalibrating,
 }
 
 /// キー毎の状態と、最後のスキャンの結果
@@ -113,6 +125,7 @@ pub struct KeyState {
     acquire_count: u32,
     noise_floor: u16,
     noise_measured: bool, // 校正で noise_floor を計り始めたか
+    noise_over: bool,     // 校正で |delta| が noise_floor_max を超えたか（触れられていた）
     quiet_since: Option<u32>,
     neg_since: Option<u32>,
     stuck_since: Option<u32>, // 静かでなくなった時刻（固着検出用）
@@ -141,6 +154,7 @@ impl KeyState {
         acquire_count: 0,
         noise_floor: 0,
         noise_measured: false,
+        noise_over: false,
         quiet_since: None,
         neg_since: None,
         stuck_since: None,
@@ -166,7 +180,7 @@ impl KeyState {
         self.delta
     }
 
-    /// max(0, delta − noise_floor)。初期取得中は 0
+    /// max(0, delta − noise_floor)。初期取得中と起動時の自動計測中は 0
     pub fn output(&self) -> u16 {
         self.output
     }
@@ -306,10 +320,14 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
                         key.noise_floor = params.noise_floor_default;
                         key.quiet_since = Some(now_us);
                     }
-                    self.enter(State::Running, now_us);
+                    if params.auto_calib_ms > 0 {
+                        self.start_calibration(State::AutoCalibrating, now_us);
+                    } else {
+                        self.enter(State::Running, now_us);
+                    }
                 }
             }
-            State::Running | State::Calibrating => {
+            State::Running | State::Calibrating | State::AutoCalibrating => {
                 // 1 回も読めなかったキーは、次に読めたときの filtered を初期値にする
                 for key in self.keys.as_mut().iter_mut() {
                     if key.valid && !key.has_baseline {
@@ -320,24 +338,17 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
 
                 // 設定画面の出入り（§3.7）
                 if calibrating && !self.prev_calibrating {
-                    for key in self.keys.as_mut().iter_mut() {
-                        key.noise_floor = 0;
-                        key.noise_measured = false;
-                        key.stuck_since = None;
-                        key.recovering = false;
-                        key.neg_since = None;
-                    }
-                    self.enter(State::Calibrating, now_us);
+                    self.start_calibration(State::Calibrating, now_us);
                 } else if !calibrating && self.prev_calibrating {
-                    for key in self.keys.as_mut().iter_mut() {
-                        if !key.noise_measured {
-                            key.noise_floor = params.noise_floor_default;
-                        }
-                        key.quiet_since = None;
-                    }
-                    self.enter(State::Running, now_us);
+                    self.finish_calibration(false, now_us);
                 }
                 self.prev_calibrating = calibrating;
+                // 起動時の自動計測（§3.12）は時間で終える
+                if self.state == State::AutoCalibrating
+                    && elapsed_ms(self.state_since) >= params.auto_calib_ms
+                {
+                    self.finish_calibration(true, now_us);
+                }
 
                 if self.state == State::Running {
                     self.track_running_conditions(now_us);
@@ -347,7 +358,9 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
                     self.last_update = now_us;
                     match self.state {
                         State::Running => self.update_baseline_running(now_us, interval_us),
-                        State::Calibrating => self.update_baseline_calibrating(now_us),
+                        State::Calibrating | State::AutoCalibrating => {
+                            self.update_baseline_calibrating(now_us)
+                        }
                         State::Acquiring => {}
                     }
                 }
@@ -361,6 +374,32 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
         self.state = state;
         self.state_since = now_us;
         self.last_update = now_us;
+    }
+
+    /// 校正（設定画面 / 起動時の自動計測）に入る: noise_floor を測り直し、固着検出の追跡を解除する
+    fn start_calibration(&mut self, state: State, now_us: u32) {
+        for key in self.keys.as_mut().iter_mut() {
+            key.noise_floor = 0;
+            key.noise_measured = false;
+            key.noise_over = false;
+            key.stuck_since = None;
+            key.recovering = false;
+            key.neg_since = None;
+        }
+        self.enter(state, now_us);
+    }
+
+    /// 校正を終えて Running に戻る。測れなかったキーは既定値にする。
+    /// 起動時の自動計測（`auto`）では、|delta| が上限を超えたキーも触れられていたとみなして既定値にする
+    fn finish_calibration(&mut self, auto: bool, now_us: u32) {
+        let params = self.params;
+        for key in self.keys.as_mut().iter_mut() {
+            if !key.noise_measured || (auto && key.noise_over) {
+                key.noise_floor = params.noise_floor_default;
+            }
+            key.quiet_since = None;
+        }
+        self.enter(State::Running, now_us);
     }
 
     fn update_delta(&mut self) {
@@ -384,7 +423,12 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
             // 近傍（リングとして折り返す）が全部静かか
             let quiet = (0..=2 * range).all(|i| {
                 let j = (k + n + i - range) % n;
-                keys[j].delta < quiet_threshold
+                let threshold = if params.quiet_adapt {
+                    quiet_threshold + keys[j].noise_floor as i32
+                } else {
+                    quiet_threshold
+                };
+                keys[j].delta < threshold
             });
             let key = &mut keys[k];
             if quiet {
@@ -459,7 +503,7 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
             {
                 key.set_baseline(key.filtered); // R2: 即時再校正
                 key.neg_since = None;
-            } else if key.delta < 0 {
+            } else if key.delta < fall_limit(key, &params) {
                 key.track(params.fall_shift, None); // R3: 下方向は速めに追従
             } else if let Some(since) = key.quiet_since
                 && now_us.wrapping_sub(since) / 1000 >= params.quiet_hold_ms
@@ -479,7 +523,9 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
                 continue;
             }
             if settled {
-                let noise = key.delta.unsigned_abs().min(params.noise_floor_max as u32) as u16;
+                let noise = key.delta.unsigned_abs();
+                key.noise_over |= noise > params.noise_floor_max as u32;
+                let noise = noise.min(params.noise_floor_max as u32) as u16;
                 key.noise_floor = key.noise_floor.max(noise);
                 key.noise_measured = true;
             }
@@ -489,14 +535,23 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
 
     /// output（§3.7）
     fn update_output(&mut self) {
-        let acquiring = self.state == State::Acquiring;
+        let silent = matches!(self.state, State::Acquiring | State::AutoCalibrating);
         for key in self.keys.as_mut().iter_mut() {
-            key.output = if acquiring || !key.has_baseline {
+            key.output = if silent || !key.has_baseline {
                 0
             } else {
                 (key.delta - key.noise_floor as i32).clamp(0, u16::MAX as i32) as u16
             };
         }
+    }
+}
+
+/// R3 で基準値を下げ始める delta。不感帯（§3.12）があれば -noise_floor、無ければ 0
+fn fall_limit(key: &KeyState, params: &Params) -> i32 {
+    if params.fall_deadband {
+        -(key.noise_floor as i32)
+    } else {
+        0
     }
 }
 
@@ -515,8 +570,12 @@ mod tests {
 
     impl Sim {
         fn new() -> Self {
+            Self::with_params(Params::DEFAULT)
+        }
+
+        fn with_params(params: Params) -> Self {
             Self {
-                signal: TouchSignal::new([KeyState::INITIAL; N], Params::DEFAULT),
+                signal: TouchSignal::new([KeyState::INITIAL; N], params),
                 now: 0,
             }
         }
@@ -658,6 +717,76 @@ mod tests {
         sim.run([900; N], 8, false);
         assert_eq!(
             sim.key(0).noise_floor(),
+            Params::DEFAULT.noise_floor_default
+        );
+    }
+
+    /// §3.12 の対策をすべて入れたパラメータ
+    const BOUNDARY: Params = Params {
+        fall_deadband: true,
+        quiet_adapt: true,
+        auto_calib_ms: 3000,
+        ..Params::DEFAULT
+    };
+
+    /// key1 だけ ±6 で揺れる raw（i は 64ms 毎の番号。メディアンで消えない遅い揺れ）
+    fn noisy(i: u32) -> [u16; N] {
+        let mut raw = [900; N];
+        raw[1] = if i % 2 == 0 { 894 } else { 906 };
+        raw
+    }
+
+    #[test]
+    fn auto_calibration_measures_noise_floor_at_startup() {
+        let mut sim = Sim::with_params(BOUNDARY);
+        sim.run([900; N], 400, false);
+        assert_eq!(sim.signal.state(), State::AutoCalibrating);
+        for i in 0..48 {
+            sim.run(noisy(i), 64, false);
+            assert_eq!(sim.key(1).output(), 0); // 計測中は 0
+        }
+        assert_eq!(sim.signal.state(), State::Running);
+        let nf = sim.key(1).noise_floor();
+        assert!((6..=12).contains(&nf), "{nf}");
+        assert!(sim.key(0).noise_floor() <= 1);
+    }
+
+    #[test]
+    fn fall_deadband_keeps_noisy_key_at_zero() {
+        // 不感帯が無いと、基準値がノイズの谷に張り付き output が残る
+        for (params, expect_zero) in [
+            (
+                Params {
+                    fall_deadband: false,
+                    ..BOUNDARY
+                },
+                false,
+            ),
+            (BOUNDARY, true),
+        ] {
+            let mut sim = Sim::with_params(params);
+            sim.run([900; N], 400, false);
+            let mut max_output = 0;
+            for i in 0..500 {
+                sim.run(noisy(i), 64, false);
+                if i >= 250 {
+                    max_output = max_output.max(sim.key(1).output());
+                }
+            }
+            assert_eq!(max_output == 0, expect_zero, "{params:?} {max_output}");
+        }
+    }
+
+    #[test]
+    fn auto_calibration_ignores_key_touched_at_startup() {
+        let mut sim = Sim::with_params(BOUNDARY);
+        let mut raw = [900; N];
+        raw[2] = 1000; // 起動時に触れていて、計測中に離す
+        sim.run(raw, 1500, false);
+        sim.run([900; N], 3000, false);
+        assert_eq!(sim.signal.state(), State::Running);
+        assert_eq!(
+            sim.key(2).noise_floor(),
             Params::DEFAULT.noise_floor_default
         );
     }

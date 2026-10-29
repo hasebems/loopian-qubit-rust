@@ -36,6 +36,8 @@ const Y_SCALES: [f64; 8] = [10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.
 const LOWER_NEGATIVE_RATIO: f64 = 0.2;
 /// AT42QT1070 1 個のキー数。時系列グラフはこの単位でキーを切り替える（doc/debug_env.md §4.2.1）
 const KEYS_PER_CHIP: usize = 6;
+/// 「起動時に自動計測」を入れたときの計測時間（doc/touch_baseline.md §3.12 の案）
+const AUTO_CALIB_MS: u32 = 3000;
 
 /// 時系列グラフに出すキーの組（チップ 1 個分）
 #[derive(Clone, Copy, PartialEq)]
@@ -810,6 +812,7 @@ impl EtudeApp {
                         Some(State::Acquiring) => "初期取得中",
                         Some(State::Running) => "通常",
                         Some(State::Calibrating) => "校正中",
+                        Some(State::AutoCalibrating) => "自動計測中",
                         None => "-",
                     };
                     ui.label(format!("状態: {state}"));
@@ -832,6 +835,31 @@ impl EtudeApp {
                             ui.end_row();
                         }
                     });
+                }
+
+                // チップの境目のノイズ対策（§3.12）。変えたら先頭から通し直すので、自動計測は記録の最初で行われる
+                let mut p = self.algo.params;
+                ui.label(RichText::new("境目のノイズ対策（doc/touch_baseline.md §3.12）").strong());
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut p.fall_deadband, "R3 の不感帯");
+                    ui.checkbox(&mut p.quiet_adapt, "静かの判定に noise_floor");
+                });
+                ui.horizontal(|ui| {
+                    let mut auto = p.auto_calib_ms > 0;
+                    if ui.checkbox(&mut auto, "起動時に自動計測").changed() {
+                        p.auto_calib_ms = if auto { AUTO_CALIB_MS } else { 0 };
+                    }
+                    if auto {
+                        ui.add(
+                            egui::DragValue::new(&mut p.auto_calib_ms)
+                                .range(1..=30_000)
+                                .suffix(" ms"),
+                        );
+                    }
+                });
+                if p != self.algo.params {
+                    self.algo.params = p;
+                    self.algo.invalidate();
                 }
 
                 ui.collapsing("パラメータ（doc/touch_baseline.md §3.11）", |ui| {
