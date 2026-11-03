@@ -53,7 +53,7 @@ pub async fn ui_task(
     }
 
     // 初期画面表示
-    gui.draw_bringup_screen(&mut buffer, &mut DrawPacer::new())
+    gui.draw_bringup_screen(&mut buffer, 0, &mut DrawPacer::new())
         .await;
     flush(&oled, &buffer, &mut i2c).await;
 

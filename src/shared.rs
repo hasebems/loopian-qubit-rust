@@ -52,6 +52,9 @@ pub static WORK_MODE: AtomicU8 = AtomicU8::new(0);
 pub static SETTING_MODE: AtomicBool = AtomicBool::new(false);
 pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用: touch_task (qtouch のビブラート) → OLED (page 1)
 pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false); // touch_task (qtouch) → pressure_task
+// 起動時の校正中（チップの起動待ち・touch_algo の初期取得と noise_floor の自動計測。doc/touch_baseline.md §3.12）。
+// 起動時は true で、一度 false にしたら戻さない: touch_task → OLED (page 0)
+pub static TOUCH_CALIBRATING: AtomicBool = AtomicBool::new(true);
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      診断用: 各タスク → OLED の診断ページ (page 5)

@@ -3,7 +3,7 @@ use core::fmt::Write;
 use embassy_time::Instant;
 use embedded_graphics::image::{Image, ImageRaw};
 use embedded_graphics::mono_font::MonoTextStyle;
-use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_10X20};
+use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_8X13, FONT_10X20};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Styled;
@@ -18,11 +18,13 @@ use crate::error;
 use crate::shared::{
     AD_VALUE0, AD_VALUE1, AD_VALUE2, AD_VALUE3, ANALYSIS_TIME, DEBUG_VALUE, MIDI_TX_MAX_USED,
     MIDI_TX_OVERFLOW, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4, POINT5, PRESSURE,
-    SCAN_TIME, TOUCH0, TOUCH1, TOUCH2, TOUCH3, UI_DRAW_TIME, WORK_MODE,
+    SCAN_TIME, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3, UI_DRAW_TIME, WORK_MODE,
 };
 
 /// 設定画面のページ番号
 pub const SETTING_PAGE: u8 = 4;
+/// 起動時の校正中の表示の点滅: counter（ui_task の 100ms 毎）がこの数進む毎に点灯・消灯を切り替える（0.5 秒）
+const CALIBRATING_BLINK_TICKS: u32 = 5;
 /// 通常時に左右スイッチで巡回するページ（5: 診断ページ）
 const NORMAL_PAGES: [u8; 5] = [0, 1, 2, 3, 5];
 
@@ -108,7 +110,14 @@ impl GraphicsDisplay {
         self.page = page; // 14 demo pages
     }
 
-    pub async fn draw_bringup_screen(&self, buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
+    /// 起動画面。起動時の校正中（TOUCH_CALIBRATING）は、build 日付・バージョンの代わりに
+    /// `Calibrating...` を点滅させる（doc/touch_baseline.md §3.12）
+    pub async fn draw_bringup_screen(
+        &self,
+        buffer: &mut OledBuffer,
+        counter: u32,
+        pacer: &mut DrawPacer,
+    ) {
         buffer.clear();
         draw(buffer, pacer, &outline_frame()).await;
 
@@ -126,6 +135,18 @@ impl GraphicsDisplay {
             &Text::new("QUBIT", Point::new(64, 20), style_big),
         )
         .await;
+        if TOUCH_CALIBRATING.load(core::sync::atomic::Ordering::Relaxed) {
+            if (counter / CALIBRATING_BLINK_TICKS).is_multiple_of(2) {
+                let style_mid = MonoTextStyle::new(&FONT_8X13, BinaryColor::On);
+                draw(
+                    buffer,
+                    pacer,
+                    &Text::new("Calibrating...", Point::new(8, 50), style_mid),
+                )
+                .await;
+            }
+            return;
+        }
         let build_date = concat!("build: ", env!("BUILD_DATE"));
         draw(
             buffer,
@@ -145,7 +166,7 @@ impl GraphicsDisplay {
     /// 今のページを描く。テキスト 1 行・図形 1 つ毎に他のタスクに順番を譲る
     pub async fn tick(&mut self, buffer: &mut OledBuffer, counter: u32, pacer: &mut DrawPacer) {
         match self.page {
-            0 => self.draw_bringup_screen(buffer, pacer).await,
+            0 => self.draw_bringup_screen(buffer, counter, pacer).await,
             1 => display1(buffer, counter, pacer).await,
             2 => display2(buffer, pacer).await,
             3 => display3(buffer, pacer).await,

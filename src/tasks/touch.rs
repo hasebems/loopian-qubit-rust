@@ -8,7 +8,7 @@ use crate::devices;
 use crate::error;
 use crate::shared::{
     ANALYSIS_TIME, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4, POINT5, SCAN_TIME,
-    SETTING_MODE, WORK_MODE, scan_period_us,
+    SETTING_MODE, TOUCH_CALIBRATING, WORK_MODE, scan_period_us,
 };
 use crate::tasks::midi::queue_midi;
 use crate::touch;
@@ -21,7 +21,7 @@ use crate::touch;
 pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     use core::cell::Cell;
     use touch::qtouch::QubitTouch;
-    use touch_algo::{KeyState, Params, TouchSignal};
+    use touch_algo::{KeyState, Params, State, TouchSignal};
 
     // 初期化は失敗しても全チャネルを続けるので、すべての I2C がタイムアウト（3ms）しても終わる時間にする。
     // 96 キーで 16ch ×（切替＋初期化）＋ 4 台の切断 = 約 108ms
@@ -115,6 +115,10 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
                 valid,
                 SETTING_MODE.load(Ordering::Relaxed),
             );
+            // 起動時の校正（初期取得・noise_floor の自動計測）が終わったら、OLED の表示を消す
+            if matches!(signal.state(), State::Running | State::Calibrating) {
+                TOUCH_CALIBRATING.store(false, Ordering::Relaxed);
+            }
             let keys = signal.keys();
             for (ch, key) in keys.iter().enumerate() {
                 qt.set_value(ch, key.output());

@@ -76,10 +76,10 @@ impl Params {
         calib_settle_ms: 500,
         noise_floor_default: 4,
         noise_floor_max: 16,
-        // §3.12 の対策は、PC で確かめるまでファームでは使わない
-        fall_deadband: false,
-        quiet_adapt: false,
-        auto_calib_ms: 0,
+        // チップの境目のノイズ対策（§3.12）
+        fall_deadband: true,
+        quiet_adapt: true,
+        auto_calib_ms: 3000,
     };
 }
 
@@ -568,9 +568,17 @@ mod tests {
         now: u32,
     }
 
+    /// §3.12 の対策を入れないパラメータ。§3.5〜§3.7 の規則そのものを確かめるのに使う
+    const BASIC: Params = Params {
+        fall_deadband: false,
+        quiet_adapt: false,
+        auto_calib_ms: 0,
+        ..Params::DEFAULT
+    };
+
     impl Sim {
         fn new() -> Self {
-            Self::with_params(Params::DEFAULT)
+            Self::with_params(BASIC)
         }
 
         fn with_params(params: Params) -> Self {
@@ -721,13 +729,8 @@ mod tests {
         );
     }
 
-    /// §3.12 の対策をすべて入れたパラメータ
-    const BOUNDARY: Params = Params {
-        fall_deadband: true,
-        quiet_adapt: true,
-        auto_calib_ms: 3000,
-        ..Params::DEFAULT
-    };
+    /// §3.12 の対策をすべて入れたパラメータ（既定値）
+    const BOUNDARY: Params = Params::DEFAULT;
 
     /// key1 だけ ±6 で揺れる raw（i は 64ms 毎の番号。メディアンで消えない遅い揺れ）
     fn noisy(i: u32) -> [u16; N] {
