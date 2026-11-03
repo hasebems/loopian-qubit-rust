@@ -593,6 +593,37 @@ impl EtudeApp {
         if self.paused {
             ui.label("一時停止中も受信と記録は続けます。グラフはドラッグ・拡大できます");
         }
+
+        ui.separator();
+        ui.heading("アルゴリズム");
+        ui.add_enabled_ui(self.algo_enabled, |ui| self.boundary_noise_switches(ui));
+    }
+
+    /// チップの境目のノイズ対策（doc/touch_baseline.md §3.12）のスイッチ。
+    /// 変えたら先頭から通し直すので、自動計測は記録の最初で行われる
+    fn boundary_noise_switches(&mut self, ui: &mut egui::Ui) {
+        let mut p = self.algo.params;
+        ui.label("境目のノイズ対策（§3.12）");
+        ui.checkbox(&mut p.fall_deadband, "R3 の不感帯");
+        ui.checkbox(&mut p.quiet_adapt, "静かの判定に noise_floor");
+        let mut auto = p.auto_calib_ms > 0;
+        if ui.checkbox(&mut auto, "起動時に自動計測").changed() {
+            p.auto_calib_ms = if auto { AUTO_CALIB_MS } else { 0 };
+        }
+        if auto {
+            ui.horizontal(|ui| {
+                ui.label("計測時間");
+                ui.add(
+                    egui::DragValue::new(&mut p.auto_calib_ms)
+                        .range(1..=30_000)
+                        .suffix(" ms"),
+                );
+            });
+        }
+        if p != self.algo.params {
+            self.algo.params = p;
+            self.algo.invalidate();
+        }
     }
 
     /// 今描く時間の範囲（µs）
@@ -835,31 +866,6 @@ impl EtudeApp {
                             ui.end_row();
                         }
                     });
-                }
-
-                // チップの境目のノイズ対策（§3.12）。変えたら先頭から通し直すので、自動計測は記録の最初で行われる
-                let mut p = self.algo.params;
-                ui.label(RichText::new("境目のノイズ対策（doc/touch_baseline.md §3.12）").strong());
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut p.fall_deadband, "R3 の不感帯");
-                    ui.checkbox(&mut p.quiet_adapt, "静かの判定に noise_floor");
-                });
-                ui.horizontal(|ui| {
-                    let mut auto = p.auto_calib_ms > 0;
-                    if ui.checkbox(&mut auto, "起動時に自動計測").changed() {
-                        p.auto_calib_ms = if auto { AUTO_CALIB_MS } else { 0 };
-                    }
-                    if auto {
-                        ui.add(
-                            egui::DragValue::new(&mut p.auto_calib_ms)
-                                .range(1..=30_000)
-                                .suffix(" ms"),
-                        );
-                    }
-                });
-                if p != self.algo.params {
-                    self.algo.params = p;
-                    self.algo.invalidate();
                 }
 
                 ui.collapsing("パラメータ（doc/touch_baseline.md §3.11）", |ui| {
