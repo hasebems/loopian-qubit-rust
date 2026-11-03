@@ -51,7 +51,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 デュアルコアで、各コアが独立した Embassy `Executor` を持つ。Core1 はタッチの処理だけ、Core0 は入出力を受け持つ（設計は `doc/task_architecture.md`）。タスクの本体は `src/tasks/`、一覧は `src/tasks/mod.rs`。
 
 **Core1**
-- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ 信号処理（`touch_algo` の `TouchSignal`。ノイズ除去・基準値）→ `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。信号処理と解析は `analysis_divider()` フレームに 1 回（`QubitTouch` と `touch_algo` の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）はチップが自身を校正しているので、信号処理にも解析にも渡さない。その後 `touch_algo` が基準値を初期取得する間（300ms）は output が 0。OLED の POINT 表示（キー 0〜5）は output
+- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ 信号処理（`touch_algo` の `TouchSignal`。ノイズ除去・基準値）→ `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。信号処理と解析は `analysis_divider()` フレームに 1 回（`QubitTouch` と `touch_algo` の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）はチップが自身を校正しているので、信号処理にも解析にも渡さない。その後 `touch_algo` が基準値を初期取得し（300ms）、続けてキー毎のノイズ幅（noise_floor）を自動で測る間（3 秒、`doc/touch_baseline.md` §3.12）は output が 0。この間はセンサーに触れないこと（触れていたキーの noise_floor は既定値になる）。終わるまで `TOUCH_CALIBRATING` が true で、OLED の起動画面（page 0）に `Calibrating...` が点滅する。OLED の POINT 表示（キー 0〜5）は output
 - I2C1 は Core1 の中で `I2c::new_async` する。embassy-rp は呼び出したコアの NVIC で割り込みを有効にするので、こうすると I2C1 の割り込みも Core1 で処理される
 
 **Core0**
