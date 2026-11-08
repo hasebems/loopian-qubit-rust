@@ -3,19 +3,19 @@
 //  Released under the MIT license
 //  https://opensource.org/licenses/mit-license.php
 //
-//! 指 1 本のタッチの解析（doc/touch_analysis.md）
+//! 指 1 本のタッチ: depth・position の層（doc/touch_analysis.md §3）
 //!
-//! 電極毎の output（`electrode`）から、タッチの位置（position）と強さ（depth）を求めて追跡し、
-//! Note On/Off とビブラートの CC をコールバックで出す。
-//! ファームの `src/touch/qtouch.rs` から移したもの（2026-11-08、doc/touch_analysis.md §7）。処理は移す前と同じ
+//! 電極毎の output（`electrode`）から、1 本の指とみなした電極の depth（output の合計）と
+//! position（重心）を求め、周期をまたいで指を追跡する（`TouchTracker`）。
+//! リングのつなぎ目をまたいでも、なるべく正しく出す（§3.6）。
+//! ノートやビブラートなどの演奏情報は知らない。それは `playinfo` が、ここの結果から作る
 //!
 //! - 電極の output は、呼び出し側が用意した `[u16]`（ファームは配列、PC は Vec）に持つ
-//! - 10ms 毎に `seek_and_update_touch_point` を呼ぶ前提（`TOUCH_SAMPLE_PERIOD_SEC` など）
-//! - 共有状態（ファームの `TOUCH0-3`・`ANY_TOUCH` など）には書かない。呼び出し側が
-//!   `touch_point()`・`is_any_touched()`・`vibrato()` を読んで書く
+//! - 10ms 毎に `update` を呼ぶ前提（`RELEASE_WAITING_TIME` など）
+//! - ファームの `src/touch/qtouch.rs` から移したもの（2026-11-08、doc/touch_analysis.md §7）
 
 // =========================================================
-//      Touch Constants
+//      Constants
 // =========================================================
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
 // Threshold for touch point detection。Pad の移動平均（4 サンプルの合計）を外したので、
@@ -23,223 +23,126 @@ pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to trac
 pub const TOUCH_THRESHOLD: u16 = 8;
 pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec あたりの片側変化量
 pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
-pub const HISTERESIS: f32 = 0.7; // Hysteresis value for touch point detection
-
-// MIDI
-pub const KEYBD_LO: u8 = 21; // A0
-pub const PIANO_OFFSET: u8 = KEYBD_LO - 4;
-pub const VIOLIN_OFFSET: u8 = 55; // バイオリンモードのMIDIノートオフセット
-
-// コールバックの status（上位 4 ビット。下位 4 ビットは TouchPoint の id、CC では 0）
-pub const STATUS_NOTE_ON: u8 = 0x90; // Note On
-pub const STATUS_NOTE_OFF: u8 = 0x80; // Note Off
-pub const STATUS_NOTE_MOVED: u8 = 0xa0; // ノートが変わったときの古いノートの Note Off
-pub const STATUS_CC: u8 = 0xb0; // Control Change
-
-/// 動作モード
-#[repr(u8)]
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum WorkMode {
-    Piano = 0,
-    Violin = 1,
-}
-// u8 から WorkMode への変換を定義
-impl TryFrom<u8> for WorkMode {
-    type Error = ();
-
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
-        match v {
-            0 => Ok(WorkMode::Piano),
-            1 => Ok(WorkMode::Violin),
-            _ => Err(()), // 定義外の数値の場合はエラー
-        }
-    }
-}
-
-/// 現在のノート・位置・電極数から、新しいノートを返す
-type NewLocationFn = fn(u8, f32, u16) -> Result<u8, u8>;
 
 const INIT_VAL: f32 = 100.0; // Invalid location initially
 const RELEASE_WAITING_TIME: u32 = 5; // Number of cycles to wait before considering a touch point released
 const CANDIDATE_MERGE_RANGE: f32 = 1.6; // Merge close candidates in the same cycle
-const HISTORY_SIZE: usize = 128; // Number of past locations
-const TOUCH_SAMPLE_PERIOD_SEC: f32 = 0.01; // 10ms tick
-const FEW_HZ_MIN: f32 = 1.5;
-const FEW_HZ_MAX: f32 = 8.0;
-const OSC_MIN_PEAK_TO_PEAK: f32 = 0.3;
-const OSC_DEADBAND: f32 = 0.1;
 const SINGLE_PAD_SPIKE_RATIO_PERMILLE: i16 = 70; // 周辺の何%以上の強度があれば、単発パルスと見なすか
 const SINGLE_PAD_SPIKE_NEIGHBOR_DIV: i16 = 4; // 周辺の最大強度が中心の何分の1以下なら、単発パルスと見なすか
 
-const NEW_NOTE: u8 = 0xff;
-const TOUCH_POINT_ERROR: u8 = 0xfe;
+/// 電極の並び: 数と、リングかどうか（doc/touch_analysis.md §6.1 の 3・4）
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Layout {
+    pub(crate) pads: u16,
+    pub(crate) ring: bool,
+}
+impl Layout {
+    /// a − b。リングでは近い向きに測る（−pads/2 〜 pads/2）
+    pub(crate) fn diff(self, a: f32, b: f32) -> f32 {
+        let d = a - b;
+        if self.ring {
+            let n = self.pads as f32;
+            let d = wrap(d, n);
+            if d > n / 2.0 { d - n } else { d }
+        } else {
+            d
+        }
+    }
+    /// 2 つの position の距離。リングでは近い向きに測る（例: 96 電極で 95.8 と 0.1 は 0.3）
+    pub(crate) fn distance(self, a: f32, b: f32) -> f32 {
+        let d = self.diff(a, b);
+        if d < 0.0 { -d } else { d }
+    }
+    /// position を有効な範囲に収める。リングでは 0 以上 pads 未満に巡回させ、
+    /// リングでなければ 0〜pads−1 に切り詰める
+    pub(crate) fn normalize(self, x: f32) -> f32 {
+        let n = self.pads as f32;
+        if self.ring {
+            wrap(x, n)
+        } else {
+            x.clamp(0.0, n - 1.0)
+        }
+    }
+}
+
+/// x を 0 以上 n 未満に巡回させる（no_std なので f32::rem_euclid の代わり）
+pub(crate) fn wrap(x: f32, n: f32) -> f32 {
+    let mut r = x % n;
+    if r < 0.0 {
+        r += n;
+    }
+    // −0.000001 % 96 + 96 が丸めで 96.0 になることがある
+    if r >= n { r - n } else { r }
+}
 
 // =========================================================
-//      TouchPoint Class
+//      TouchPoint: 追跡している指 1 本
 // =========================================================
-// センサーの生値から、実際にどのあたりをタッチしているかを判断し、保持する
+/// この周期の追跡の結果。`playinfo` が読んで、Note On/Off などを決める
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Track {
+    None,     // 変化なし（触れていない、または離れるのを待っている）
+    Started,  // 新しいタッチが始まった
+    Followed, // 同じ指が続いている（動いたかもしれない）
+    Released, // 離れた
+}
+
+/// 追跡している指 1 本。depth・position と継続時間を持つ
 #[derive(Clone, Copy, Debug)]
-pub struct TouchPoint<F>
-where
-    F: Fn(u8, u8, u8, f32) + Clone, // status, note, velocity, location
-{
-    id: usize,
-    center_location: f32,
+pub struct TouchPoint {
+    center_location: f32, // 離れた後も、最後の position を残す（Note Off で使う）
     intensity: i16,
-    real_crnt_note: u8, // MIDI Note number
     is_updated: bool,
     is_touched: bool,
     touching_time: u32,
     no_update_time: u32,
-    offset_note: u8, // MIDI Note offset
-    new_location: NewLocationFn,
-    midi_callback: Option<F>,              // MIDI callback function
-    history_idx: usize,                    // Store the last index for each touch point
-    location_history: [f32; HISTORY_SIZE], // Store past locations for each possible note
+    track: Track,
 }
-impl<F> TouchPoint<F>
-where
-    F: Fn(u8, u8, u8, f32) + Clone,
-{
-    /// Constructor は起動時に最大数分呼ばれる
-    fn new(id: usize) -> Self {
-        TouchPoint {
-            id,
-            center_location: INIT_VAL, // Invalid location initially
-            intensity: 0,
-            real_crnt_note: 0, // Initialize to 0, will be set when a touch is detected
-            is_updated: false,
-            is_touched: false,
-            touching_time: 0,
-            no_update_time: 0,
-            offset_note: PIANO_OFFSET,
-            new_location: Self::new_location_piano,
-            midi_callback: None,
-            history_idx: 0,
-            location_history: [0f32; HISTORY_SIZE], // Store past locations for each possible note
-        }
-    }
 
-    /// 新しいタッチポイントを作成する
-    fn new_touch(
-        &mut self,
-        location: f32,
-        intensity: i16,
-        max_pads: u16,
-        callback: F,
-        work_mode: WorkMode,
-        velocity_query: impl Fn(u8, i16) -> u8,
-    ) {
-        if work_mode == WorkMode::Violin {
-            self.new_location = Self::new_location_violin;
-            self.offset_note = VIOLIN_OFFSET;
-        } else {
-            self.new_location = Self::new_location_piano;
-            self.offset_note = PIANO_OFFSET;
-        }
-        let new_note = (self.new_location)(NEW_NOTE, location, max_pads);
-        if let Ok(crnt_note) = new_note {
-            self.center_location = location;
-            self.location_history[self.history_idx] = location; // Store the initial location in history
-            self.history_idx = (self.history_idx + 1) % HISTORY_SIZE; // Update the history index
-            self.real_crnt_note = crnt_note; // Set the current note
-            self.intensity = intensity;
-            self.is_updated = true;
-            self.is_touched = true;
-            self.touching_time = 0; // Reset the touching time
-            self.midi_callback = Some(callback);
-            // MIDI Note On
-            if let Some(ref midi_callback) = self.midi_callback {
-                let note = self.real_crnt_note.saturating_add(self.offset_note);
-                let note_on_velocity = velocity_query(note, self.intensity);
-                midi_callback(
-                    STATUS_NOTE_ON | self.id as u8,
-                    note,
-                    note_on_velocity,
-                    self.center_location,
-                );
-            }
-        }
+impl TouchPoint {
+    const INITIAL: Self = TouchPoint {
+        center_location: INIT_VAL, // Invalid location initially
+        intensity: 0,
+        is_updated: false,
+        is_touched: false,
+        touching_time: 0,
+        no_update_time: 0,
+        track: Track::None,
+    };
+    /// 新しいタッチを始める
+    fn start(&mut self, location: f32, intensity: i16) {
+        self.center_location = location;
+        self.intensity = intensity;
+        self.is_updated = true;
+        self.is_touched = true;
+        self.touching_time = 0; // Reset the touching time
+        self.track = Track::Started;
     }
-    /// タッチポイントが近いかどうかを判断する
-    fn is_near_here(&self, location: f32) -> bool {
+    /// タッチポイントが近いかどうかを判断する。リングでは距離を近い向きに測る
+    fn is_near_here(&self, location: f32, layout: Layout) -> bool {
         if !self.is_touched {
             return false;
         }
-        (self.center_location >= location - CLOSE_RANGE)
-            && (self.center_location <= location + CLOSE_RANGE)
+        layout.distance(self.center_location, location) <= CLOSE_RANGE
     }
-    /// タッチポイントを更新する
-    fn update_touch(
-        &mut self,
-        location: f32,
-        intensity: u16,
-        max_pads: u16,
-        velocity_query: impl Fn(u8, i16) -> u8,
-    ) {
+    /// 同じ指が続いている: depth・position を更新する
+    fn follow(&mut self, location: f32, intensity: i16) {
         self.center_location = location;
-        self.intensity = intensity as i16;
+        self.intensity = intensity;
         self.is_updated = true;
         self.is_touched = true;
-        self.location_history[self.history_idx] = location; // Store the updated location in history
-        self.history_idx = (self.history_idx + 1) % HISTORY_SIZE; // Update the history index
-        if let Ok(updated_note) = (self.new_location)(self.real_crnt_note, location, max_pads) {
-            // MIDI Note On & Off
-            if let Some(ref midi_callback) = self.midi_callback
-                && updated_note != self.real_crnt_note
-            {
-                let note = updated_note.saturating_add(self.offset_note);
-                let note_on_velocity = velocity_query(note, self.intensity);
-                midi_callback(
-                    STATUS_NOTE_ON | self.id as u8,
-                    note,
-                    note_on_velocity,
-                    self.center_location,
-                );
-                midi_callback(
-                    STATUS_NOTE_MOVED | self.id as u8, // Note Off と同じ
-                    self.real_crnt_note + self.offset_note,
-                    0x40,
-                    self.center_location,
-                );
-                self.real_crnt_note = updated_note; // Update the current note
-            }
-        }
+        self.track = Track::Followed;
     }
-    /// タッチポイントが離れたときの処理
+    /// この周期に更新が無かった: RELEASE_WAITING_TIME 回続いたら離れたとみなす
     fn maybe_released(&mut self) {
         if self.no_update_time + RELEASE_WAITING_TIME > self.touching_time {
             // RELEASE_WAITING_TIME 回まで、更新のないタッチポイントは、まだ離れたと見なさない
             self.touching_time = self.touching_time.wrapping_add(1);
             return;
         }
-        // MIDI Note Off
-        if let Some(ref midi_callback) = self.midi_callback {
-            midi_callback(
-                STATUS_NOTE_OFF | self.id as u8,
-                self.real_crnt_note + self.offset_note,
-                0x40,
-                self.center_location,
-            );
-        }
         self.is_touched = false;
-        self.center_location = INIT_VAL;
         self.intensity = 0;
-    }
-    /// 触れているか（離れるのを待っている間も true）
-    pub fn is_touched(&self) -> bool {
-        self.is_touched
-    }
-    fn is_updated(&self) -> bool {
-        self.is_updated
-    }
-    /// position（電極番号を単位とする実数）。触れていないときは 100.0
-    pub fn get_location(&self) -> f32 {
-        self.center_location
-    }
-    /// depth（doc/touch_analysis.md §3.2）
-    pub fn get_intensity(&self) -> i16 {
-        self.intensity
+        self.track = Track::Released;
     }
     /// タッチされたタッチポイントの処理が終了したので、時間更新して更新フラグを下ろす
     fn clear_updated_flag(&mut self) {
@@ -247,239 +150,66 @@ where
         self.no_update_time = self.touching_time;
         self.is_updated = false;
     }
-    /// location_history(128サンプル)から往復(半周期ごとの符号反転)を検出し、数Hzなら周波数を返す
-    fn detect_few_hz_round_trip_hz(&self) -> Option<f32> {
-        // 新規起動直後の0埋めや静止状態を除外
-        let mut min_v = f32::INFINITY;
-        let mut max_v = f32::NEG_INFINITY;
-        let mut sum = 0.0;
-        // location_history全体を走査して、最小値・最大値・平均値を計算する
-        for i in 0..HISTORY_SIZE {
-            let idx = (self.history_idx + i) % HISTORY_SIZE;
-            let v = self.location_history[idx];
-            min_v = min_v.min(v);
-            max_v = max_v.max(v);
-            sum += v;
-        }
-
-        let peak_to_peak = max_v - min_v;
-        if !peak_to_peak.is_finite() || peak_to_peak < OSC_MIN_PEAK_TO_PEAK {
-            return None;
-        }
-
-        let mean = sum / HISTORY_SIZE as f32;
-        let deadband = OSC_DEADBAND.max(peak_to_peak * 0.08);
-        let mut state: i8 = 0; // -1: below mean, +1: above mean
-        let mut crossings: u16 = 0;
-
-        for i in 0..HISTORY_SIZE {
-            let idx = (self.history_idx + i) % HISTORY_SIZE;
-            let centered = self.location_history[idx] - mean;
-            let next_state = if centered > deadband {
-                1
-            } else if centered < -deadband {
-                -1
-            } else {
-                state
-            };
-
-            // state が0から非0に、あるいは非0から反転する crossing を数える
-            if state != 0 && next_state != state {
-                crossings = crossings.saturating_add(1);
-            }
-            state = next_state;
-        }
-
-        if crossings < 2 {
-            return None;
-        }
-
-        let duration_sec = (HISTORY_SIZE as f32 - 1.0) * TOUCH_SAMPLE_PERIOD_SEC;
-        if duration_sec <= 0.0 {
-            return None;
-        }
-        let freq_hz = crossings as f32 / (2.0 * duration_sec);
-        if (FEW_HZ_MIN..=FEW_HZ_MAX).contains(&freq_hz) {
-            Some(freq_hz)
+    fn is_updated(&self) -> bool {
+        self.is_updated
+    }
+    /// 触れているか（離れるのを待っている間も true）
+    pub fn is_touched(&self) -> bool {
+        self.is_touched
+    }
+    /// position（電極番号を単位とする実数、§3.3）。触れていないときは 100.0
+    pub fn get_location(&self) -> f32 {
+        if self.is_touched {
+            self.center_location
         } else {
-            None
+            INIT_VAL
         }
     }
-    //private:
-    /// crnt_note : 0-(max_pads-1) 現在の位置、NEW_NOTE は新規ノート
-    fn new_location_piano(crnt_note: u8, location: f32, max_pads: u16) -> Result<u8, u8> {
-        // Manual round implementation for no_std
-        fn round(x: f32) -> f32 {
-            if x >= 0.0 {
-                (x + 0.5) as i32 as f32
-            } else {
-                (x - 0.5) as i32 as f32
-            }
-        }
-
-        let location = location.clamp(0.0, (max_pads - 1) as f32); // Clamp location to valid range
-        if crnt_note == NEW_NOTE {
-            Ok(round(location) as u8) // Round to nearest integer for MIDI note
-        } else if crnt_note < max_pads as u8 {
-            if (location > (crnt_note as f32 + HISTERESIS))
-                || (location < (crnt_note as f32 - HISTERESIS))
-            {
-                // histeresis
-                Ok(round(location) as u8)
-            } else {
-                Ok(crnt_note) // No change in note
-            }
-        } else {
-            // Invalid note number, return TOUCH_POINT_ERROR
-            Err(TOUCH_POINT_ERROR)
-        }
+    /// 最後の position。離れた後も残る（離れた周期の Note Off で使う）
+    pub fn last_location(&self) -> f32 {
+        self.center_location
     }
-    /// crnt_note : 0-(max_pads-1) 現在の位置、NEW_NOTE は新規ノート
-    fn new_location_violin(crnt_note: u8, location: f32, max_pads: u16) -> Result<u8, u8> {
-        // Manual round implementation for no_std
-        fn round(x: f32) -> u8 {
-            (x + 0.5) as u8
-        }
-
-        let location = location.clamp(0.0, (max_pads - 1) as f32) / 2.0;
-        if crnt_note == NEW_NOTE {
-            Ok(round(location)) // Round to nearest integer for MIDI note
-        } else if (0..(max_pads as u8 / 2)).contains(&crnt_note) {
-            if (location > (crnt_note as f32 + HISTERESIS))
-                || (location < (crnt_note as f32 - HISTERESIS))
-            {
-                // histeresis
-                Ok(round(location))
-            } else {
-                Ok(crnt_note) // No change in note
-            }
-        } else {
-            // Invalid note number, return TOUCH_POINT_ERROR
-            Err(TOUCH_POINT_ERROR)
-        }
+    /// depth（§3.2）
+    pub fn get_intensity(&self) -> i16 {
+        self.intensity
+    }
+    /// この周期の追跡の結果
+    pub fn track(&self) -> Track {
+        self.track
+    }
+    /// 触れ始めてからの周期数（離れるのを待っている間も数える）
+    pub fn touching_time(&self) -> u32 {
+        self.touching_time
     }
 }
+
 // =========================================================
-//      QubitTouch Class
+//      TouchTracker: 電極の output から指を求めて追跡する
 // =========================================================
-// Qubit 全体のタッチを管理するクラス。P は電極毎の output の置き場所（`[u16; N]` や `Vec<u16>`）
+/// P は電極毎の output の置き場所（`[u16; N]` や `Vec<u16>`）
 #[derive(Clone, Copy, Debug)]
-pub struct QubitTouch<F, P>
-where
-    F: Fn(u8, u8, u8, f32) + Clone,
-{
-    pads: P,                                         // 電極毎の output
-    touch_points: [TouchPoint<F>; MAX_TOUCH_POINTS], // Store detected touch points
-    midi_callback: F,                                // MIDI callback function
-    touch_count: usize,                              // Current number of touch points
-    last_note: u8,                                   // 最後に送信したMIDIノート番号
-    on_time: u32,                                    // 最後のタッチが開始してから離されるまでの時間
-    // タッチ中の TouchPoint は、最後の TouchPoint の touching_time
-    off_time: u32,     // 最後のタッチが離されてからの時間
-    vibrato: u8,       // ビブラートの強さ (0-127)
+pub struct TouchTracker<P> {
+    pads: P,                                      // 電極毎の output
+    touch_points: [TouchPoint; MAX_TOUCH_POINTS], // 追跡している指
+    touch_count: usize,                           // Current number of touch points
     any_touched: bool, // 最後の解析で、どれかのタッチポイントが触れていたか
+    ring: bool,        // 電極がリングに並んでいるか（最後の電極と電極 0 が隣り合う）
 }
-impl<F, P> QubitTouch<F, P>
+
+impl<P> TouchTracker<P>
 where
-    F: Fn(u8, u8, u8, f32) + Clone,
     P: AsRef<[u16]> + AsMut<[u16]>,
 {
-    //　タッチポイントの状況から、Note On のベロシティを決定する
-    fn note_on_velocity_from_context(
-        work_mode: WorkMode,
-        last_note: u8,
-        on_time: u32,
-        off_time: u32,
-        note: u8,
-        intensity: i16,
-    ) -> u8 {
-        if work_mode == WorkMode::Violin {
-            Self::calc_violin_note_on_velocity_from(last_note, on_time, off_time, note)
-        } else {
-            Self::default_note_on_velocity(intensity)
-        }
-    }
-    // Violin モードの Note On ベロシティ計算:
-    fn calc_violin_note_on_velocity_from(
-        last_note: u8,
-        on_time: u32,
-        off_time: u32,
-        note: u8,
-    ) -> u8 {
-        // 10ms tick前提
-        const BASE_VELOCITY: i16 = 64;
-        const SMALLER_SEC: u32 = 50; // 500ms
-        const MAX_SEC: u32 = 300; // 3秒
-
-        // on_time補正:
-        // - SMALLER_SEC未満: 0..+56 を線形加算（速いほど大きい）
-        // - SMALLER_SEC超〜MAX_SEC: 0..-32 を線形減算（遅いほど小さい）
-        let on_adjust = if on_time < SMALLER_SEC {
-            ((SMALLER_SEC - on_time) * 56 / SMALLER_SEC) as i16
-        } else {
-            let over = (on_time - SMALLER_SEC).min(MAX_SEC - SMALLER_SEC);
-            -((over * 32 / (MAX_SEC - SMALLER_SEC)) as i16)
-        };
-
-        // off_time(staccato)補正:
-        // - 0: 補正なし
-        // - 0超〜SMALLER_SEC未満: +24..0 を線形加算
-        // - SMALLER_SEC以上: 補正なし
-        let off_adjust = if off_time == 0 {
-            0
-        } else if off_time < SMALLER_SEC {
-            (((SMALLER_SEC - off_time) as i16) * 24 / (SMALLER_SEC as i16 - 1)).max(0)
-        } else {
-            0
-        };
-
-        // 音程距離補正:
-        // - distance <= 3: 最大-12 (distance=3で0、distance=0で-12)
-        // - distance > 3 : distance=12まで最大+12 を線形加算
-        let note_distance = note.abs_diff(last_note) as i16;
-        let distance_adjust = if note_distance <= 3 {
-            -((3 - note_distance) * 12 / 3)
-        } else {
-            let d = (note_distance - 3).min(9);
-            d * 12 / 9
-        };
-
-        let mut velocity = BASE_VELOCITY + on_adjust + off_adjust + distance_adjust;
-        velocity = velocity.clamp(32, 112);
-        velocity as u8
-    }
-    // デフォルトの Note On ベロシティ計算: 強度に基づいて 100..255 の範囲で線形に決め、
-    // それを半分にして 127 で頭打ちにする（MIDI のデータバイトは 0..127。doc/touch_analysis.md §6.3）。
-    // Pad の移動平均（4 サンプルの合計）を外して強度が 1/4 になったので、
-    // 半分にする前の値が以前（> 255 で上限、>> 4）と同じになるよう、> 63 と >> 2 にしている
-    fn default_note_on_velocity(intensity: i16) -> u8 {
-        let velocity: u16 = if intensity < 0 {
-            0
-        } else if intensity > 63 {
-            255
-        } else {
-            100 + (intensity as u16 >> 2)
-        };
-        (velocity / 2).min(127) as u8
-    }
-
-    /// pads は全電極分を 0 で埋めて渡す
-    pub fn new(cb: F, pads: P) -> Self {
-        QubitTouch {
+    /// pads は全電極分を 0 で埋めて渡す。ring は電極がリングに並んでいるか（96 電極の本番の基板）。
+    /// false（etude・no_pca9544 の試験用の構成）では、両端の外側を output 0 の電極として扱う
+    pub fn new(pads: P, ring: bool) -> Self {
+        TouchTracker {
             pads,
-            touch_points: core::array::from_fn(|i| TouchPoint::<F>::new(i)),
-            midi_callback: cb,
+            touch_points: [TouchPoint::INITIAL; MAX_TOUCH_POINTS],
             touch_count: 0,
-            last_note: 0,
-            on_time: 0,
-            off_time: 0,
-            vibrato: 0,
             any_touched: false,
+            ring,
         }
-    }
-    /// 電極数
-    fn max_pads(&self) -> u16 {
-        self.pads.as_ref().len() as u16
     }
     /// 電極の output を設定する
     pub fn set_value(&mut self, pad_num: usize, value: u16) {
@@ -496,25 +226,67 @@ where
         self.touch_count
     }
     /// タッチポイントの参照を取得する（id は 0〜MAX_TOUCH_POINTS-1）
-    pub fn touch_point(&self, index: usize) -> Option<&TouchPoint<F>> {
+    pub fn touch_point(&self, index: usize) -> Option<&TouchPoint> {
         self.touch_points.get(index)
+    }
+    /// すべてのタッチポイント（添字が id）
+    pub fn touch_points(&self) -> &[TouchPoint; MAX_TOUCH_POINTS] {
+        &self.touch_points
     }
     /// 最後の解析で、どれかのタッチポイントが触れていたか（離れるのを待っている間も含む）
     pub fn is_any_touched(&self) -> bool {
         self.any_touched
     }
-    /// ビブラートの強さ（0-127）。最後に検出した値で、触れていないときも残る
-    pub fn vibrato(&self) -> u8 {
-        self.vibrato
+    /// 電極数
+    fn max_pads(&self) -> u16 {
+        self.pads.as_ref().len() as u16
     }
-    /// 指定された電極の output を取得する(マイナス値からMAX_PADSを超えた値を考慮)
+    /// 電極の並び
+    pub(crate) fn layout(&self) -> Layout {
+        Layout {
+            pads: self.max_pads(),
+            ring: self.ring,
+        }
+    }
+    /// 電極 center からの相対位置 lo..=hi の電極の output から、(position, depth) を求める。
+    /// 重心は center からの相対位置で計算し、リングでは 0 以上電極数未満に巡回させる。
+    /// リングでなければ範囲外の電極は 0 なので、重心に効かない（doc/touch_analysis.md §6.1 の 3）。
+    /// output がすべて 0 なら None
+    fn window_centroid(&self, center: i32, lo: i32, hi: i32) -> Option<(f32, i16)> {
+        let mut sum: i32 = 0;
+        let mut moment: i32 = 0;
+        for j in lo..=hi {
+            let v = self.pad(center + j) as i32;
+            sum += v;
+            moment += j * v;
+        }
+        if sum <= 0 {
+            return None;
+        }
+        let position = self
+            .layout()
+            .normalize(center as f32 + moment as f32 / sum as f32);
+        Some((position, sum.min(i16::MAX as i32) as i16))
+    }
+    /// 指定された電極の output を取得する（範囲外の番号も受け付ける）。
+    /// リングでは番号を巡回させ、リングでなければ範囲外は 0
     fn pad(&self, pad_num: i32) -> u16 {
         let pads = self.pads.as_ref();
-        let index = pad_num.rem_euclid(pads.len() as i32) as usize;
-        pads[index]
+        if self.ring {
+            pads[pad_num.rem_euclid(pads.len() as i32) as usize]
+        } else {
+            usize::try_from(pad_num)
+                .ok()
+                .and_then(|i| pads.get(i))
+                .copied()
+                .unwrap_or(0)
+        }
     }
-    /// 差分の符号が変化した時、その位置の値がある一定の値以上なら、そこをタッチポイントとする
-    pub fn seek_and_update_touch_point(&mut self, work_mode: WorkMode) {
+    /// 1 周期分の解析。10ms 毎に呼ぶ。指を求めて追跡し、結果を各 TouchPoint の `track()` に残す
+    pub fn update(&mut self) {
+        for tp in self.touch_points.iter_mut() {
+            tp.track = Track::None;
+        }
         if self.pads.as_ref().is_empty() {
             return;
         }
@@ -522,46 +294,66 @@ where
             [(INIT_VAL, INIT_VAL, 0); MAX_TOUCH_POINTS];
         let mut temp_index = 0;
 
-        // 1: 全パッドを走査し、差分の符号が変化した箇所をタッチポイントとみなし、temp_touch_point に保存
+        // 1: 全パッドを走査し、山をタッチの候補として temp_touch_point に保存
         self.scan_pads(&mut temp_touch_point, &mut temp_index);
 
-        // 2: タッチポイントの前後のパッドの値を足し、平均をとってパッドの位置と強度を確定する
+        // 2: 候補の前後のパッドから、position と depth を求める
         self.decide_touch_point(&mut temp_touch_point, &mut temp_index);
 
         // 2.5: 同一周期内の近接候補を統合し、1つのタッチ候補として扱う
         self.merge_close_candidates(&mut temp_touch_point, &mut temp_index);
 
-        // 3: 前回値と比較し、近いものを紐付け、タッチポイントを更新または追加する
-        self.collate_touch_point(&temp_touch_point, temp_index, work_mode);
+        // 3: 前回の指と比較し、近いものを紐付けて更新、無ければ新しい指にする
+        self.track_touch_points(&temp_touch_point, temp_index);
 
-        // 4: 更新のなかったタッチポイントを削除する
-        self.erase_touch_point();
+        // 4: 更新のなかった指が離れたかを判断する
+        self.release_touch_points();
 
-        // 5: 時間計測とビブラート捕捉
-        self.update_durations_and_vibrato(work_mode);
+        self.any_touched = self.touch_points.iter().any(|tp| tp.is_touched());
     }
+    /// 山（両隣より output が大きい電極、またはその平らな頂上）を探し、TOUCH_THRESHOLD を超えたものを候補にする。
+    /// 傾きが 0 の所（同じ値が続く所）では、直前の 0 でない傾きを引き継ぐので、
+    /// 頂上が平らな山（例: 3, 10, 10, 2）も 1 つの山になる（doc/touch_analysis.md §6.1 の 1）。
+    /// 候補の電極は平らな頂上の中央（偶数個なら番号の小さい側）
     fn scan_pads(
         &mut self,
         temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
         temp_index: &mut usize,
     ) {
-        let max_pads = self.max_pads();
-        let mut diff_before: i16 = 0;
-        for i in 0..=max_pads {
-            // Get previous pad value first
-            let prev_value = self.pad(i as i32 - 1);
-            // Now get current pad and set diff
-            let diff_after = prev_value as i16 - self.pad(i as i32) as i16;
-            if (diff_after > 0) && (diff_before < 0) {
-                // - -> + 変化時
-                let value = prev_value; // Note the top flag
+        let max_pads = self.max_pads() as i32;
+        // 傾き: 電極 i-1 → i で下がれば正、上がれば負（slope(i) = pad(i-1) - pad(i)）
+        let slope = |i: i32| self.pad(i - 1) as i16 - self.pad(i) as i16;
+        // 調べる傾きの範囲。リングでは 0..max_pads で 1 周（電極 max_pads-1 → 0 の傾きも含む）。
+        // リングでなければ、外側の 0 との傾きも含めて 0..=max_pads
+        let (end, mut diff_before) = if self.ring {
+            // 1 周目の始めの傾きは、つなぎ目の手前の最後の 0 でない傾きから引き継ぐ
+            let init = (1..max_pads)
+                .rev()
+                .map(slope)
+                .find(|&d| d != 0)
+                .unwrap_or(0);
+            (max_pads, init)
+        } else {
+            (max_pads + 1, 0)
+        };
+        for i in 0..end {
+            let diff_after = slope(i);
+            if diff_after == 0 {
+                continue; // 平らな所は、直前の傾きを引き継ぐ
+            }
+            if diff_after > 0 && diff_before < 0 {
+                // 上り → 下り。電極 i-1 が頂上の右端
+                let top = i - 1;
+                let value = self.pad(top);
                 if value > TOUCH_THRESHOLD {
-                    // Example threshold for touch point
-                    temp_touch_point[*temp_index] = (
-                        (if i >= 1 { i - 1 } else { i - 1 + max_pads }) as f32,
-                        INIT_VAL,
-                        0,
-                    );
+                    // 平らな頂上の左端まで戻り、中央を候補にする
+                    let mut width = 1;
+                    while width < max_pads && self.pad(top - width) == value {
+                        width += 1;
+                    }
+                    let left = top - width + 1;
+                    let center = (left + (width - 1) / 2).rem_euclid(max_pads);
+                    temp_touch_point[*temp_index] = (center as f32, INIT_VAL, 0);
                     *temp_index += 1;
                     if *temp_index >= MAX_TOUCH_POINTS {
                         break; // Prevent overflow of touch points
@@ -577,87 +369,110 @@ where
         temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
         temp_index: &mut usize,
     ) {
+        let fr = FINGER_RANGE as i32;
         for tp in temp_touch_point.iter_mut().take(*temp_index) {
-            let tp_idx = tp.0 as i32;
-            let mut sum: i16 = 0;
-            let mut locate: f32 = 0.0;
-            let mut center_value: i16 = 0;
-            let mut max_neighbor_value: i16 = 0;
+            let center = tp.0 as i32;
+            let center_value = self.pad(center) as i32;
+            let max_neighbor_value = (-fr..=fr)
+                .filter(|&j| j != 0)
+                .map(|j| self.pad(center + j) as i32)
+                .max()
+                .unwrap_or(0);
 
-            for j in 0..(FINGER_RANGE * 2 + 1) {
-                let window_idx = j as i32 - FINGER_RANGE as i32;
-                let tp_value = self.pad(tp_idx + window_idx) as i16;
-                sum += tp_value;
-                locate += (tp_idx + window_idx) as f32 * tp_value as f32; // Wrap around to ensure valid index
-                if window_idx == 0 {
-                    center_value = tp_value;
-                } else if tp_value > max_neighbor_value {
-                    max_neighbor_value = tp_value;
-                }
-            }
-
-            if sum > 0 {
-                // 単発パルス対策: 中心1電極が過度に支配的で近傍が弱い候補は無効化する
-                let center_dominant = center_value * 100 >= sum * SINGLE_PAD_SPIKE_RATIO_PERMILLE;
-                let weak_neighbors =
-                    max_neighbor_value * SINGLE_PAD_SPIKE_NEIGHBOR_DIV <= center_value;
-                if center_dominant && weak_neighbors {
-                    *tp = (tp.0, INIT_VAL, 0);
-                    continue;
-                }
-
-                locate /= sum as f32; // Calculate the average location based on intensity
-                *tp = (tp.0, locate, sum);
-            } else {
+            let Some((position, depth)) = self.window_centroid(center, -fr, fr) else {
                 // 無効なタッチポイント（sum=0だった場合）は初期値のままにする
                 *tp = (tp.0, INIT_VAL, 0);
+                continue;
+            };
+            // 単発パルス対策: 中心1電極が過度に支配的で近傍が弱い候補は無効化する
+            let center_dominant =
+                center_value * 100 >= depth as i32 * SINGLE_PAD_SPIKE_RATIO_PERMILLE as i32;
+            let weak_neighbors =
+                max_neighbor_value * SINGLE_PAD_SPIKE_NEIGHBOR_DIV as i32 <= center_value;
+            if center_dominant && weak_neighbors {
+                *tp = (tp.0, INIT_VAL, 0);
+                continue;
             }
+            *tp = (tp.0, position, depth);
         }
     }
-    /// 同一周期内で近接した候補を1つに統合する
+    /// 同一周期内で近接した候補を1つに統合する（doc/touch_analysis.md §6.1 の 7）。
+    /// まとまりのどれかの候補から CANDIDATE_MERGE_RANGE 以内の候補を、加わらなくなるまで加える。
+    /// 2 つ以上まとめたときは、まとめた候補の窓を合わせた範囲（一番左の山 − FINGER_RANGE 〜
+    /// 一番右の山 + FINGER_RANGE）で position と depth を計算し直す
     fn merge_close_candidates(
         &mut self,
         temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
         temp_index: &mut usize,
     ) {
+        let layout = self.layout();
+        let n = *temp_index;
         let mut merged: [(f32, f32, i16); MAX_TOUCH_POINTS] =
             [(INIT_VAL, INIT_VAL, 0); MAX_TOUCH_POINTS];
         let mut merged_count = 0usize;
         let mut used = [false; MAX_TOUCH_POINTS];
 
-        for i in 0..*temp_index {
+        for i in 0..n {
             if used[i] {
                 continue;
             }
+            used[i] = true;
             let seed = temp_touch_point[i];
             if seed.1 == INIT_VAL {
-                used[i] = true;
                 continue;
             }
-            used[i] = true;
 
-            // 同一クラスタ内は「最も強い候補」を代表として残す
-            let mut best = seed;
-            let seed_loc = seed.1;
-            for j in (i + 1)..*temp_index {
-                if used[j] {
-                    continue;
-                }
-                let cand = temp_touch_point[j];
-                if cand.1 == INIT_VAL {
-                    used[j] = true;
-                    continue;
-                }
-                if (cand.1 - seed_loc).abs() <= CANDIDATE_MERGE_RANGE {
-                    used[j] = true;
-                    if cand.2 > best.2 {
-                        best = cand;
+            // まとまりを広げる
+            let mut member = [false; MAX_TOUCH_POINTS];
+            member[i] = true;
+            loop {
+                let mut added = false;
+                for j in 0..n {
+                    if used[j] {
+                        continue;
                     }
+                    let cand = temp_touch_point[j];
+                    if cand.1 == INIT_VAL {
+                        used[j] = true;
+                        continue;
+                    }
+                    let near = (0..n).any(|k| {
+                        member[k]
+                            && layout.distance(temp_touch_point[k].1, cand.1)
+                                <= CANDIDATE_MERGE_RANGE
+                    });
+                    if near {
+                        used[j] = true;
+                        member[j] = true;
+                        added = true;
+                    }
+                }
+                if !added {
+                    break;
                 }
             }
 
+            let result = if member.iter().filter(|&&m| m).count() == 1 {
+                seed
+            } else {
+                // 山の電極の、seed の山からの相対位置（リングでは近い向き）で範囲を決める
+                let (mut lo, mut hi) = (0i32, 0i32);
+                for k in (0..n).filter(|&k| member[k]) {
+                    let d = layout.diff(temp_touch_point[k].0, seed.0) as i32;
+                    lo = lo.min(d);
+                    hi = hi.max(d);
+                }
+                let fr = FINGER_RANGE as i32;
+                lo -= fr;
+                // 同じ電極を 2 回数えないよう、範囲は電極数までにする
+                hi = (hi + fr).min(lo + layout.pads as i32 - 1);
+                match self.window_centroid(seed.0 as i32, lo, hi) {
+                    Some((position, depth)) => (seed.0, position, depth),
+                    None => seed,
+                }
+            };
             if merged_count < MAX_TOUCH_POINTS {
-                merged[merged_count] = best;
+                merged[merged_count] = result;
                 merged_count += 1;
             }
         }
@@ -669,69 +484,57 @@ where
         *temp_index = merged_count;
         self.touch_count = merged_count;
     }
-    fn collate_touch_point(
+    /// 候補を、前の周期の指（TouchPoint）に結び付ける。近いものが無ければ新しい指にする。
+    /// TouchPoint が空いていなければ、その候補は捨てる
+    fn track_touch_points(
         &mut self,
         temp_touch_point: &[(f32, f32, i16); MAX_TOUCH_POINTS],
         temp_index: usize,
-        work_mode: WorkMode,
     ) {
-        let max_pads = self.max_pads();
-        let mut latest_note: Option<u8> = None;
-        let velocity_ctx = (work_mode, self.last_note, self.on_time, self.off_time);
-        for tp in temp_touch_point.iter().take(temp_index) {
-            let location = tp.1;
-            let intensity = tp.2;
+        let layout = self.layout();
+        for cand in temp_touch_point.iter().take(temp_index) {
+            let (location, intensity) = (cand.1, cand.2);
             // 無効なタッチポイント（sum=0だった場合）はスキップ
             if location == INIT_VAL {
                 continue;
             }
 
             // 現在のタッチポイントで近いものがあれば、タッチポイントがそこから移動したとみなす
-            let mut nearest = max_pads as f32;
-            let mut nearest_tp: Option<&mut TouchPoint<F>> = None;
-
+            let mut nearest = layout.pads as f32;
+            let mut nearest_tp: Option<&mut TouchPoint> = None;
             for tp in self.touch_points.iter_mut() {
                 if !tp.is_touched() || tp.is_updated() {
                     continue; // Skip if the touch point is not touched
                 }
-                let diff = (tp.get_location() - location).abs();
+                let diff = layout.distance(tp.get_location(), location);
                 if diff < nearest {
-                    // 近いものがあれば、タッチポイントを更新する
                     nearest = diff;
                     nearest_tp = Some(tp);
                 }
             }
-
-            if let Some(nearest_tp) = nearest_tp
-                && nearest_tp.is_near_here(location)
+            if let Some(tp) = nearest_tp
+                && tp.is_near_here(location, layout)
             {
-                // 一番近いタッチポイントが、現在のタッチポイントに近い場合
-                let before_note = nearest_tp.real_crnt_note;
-                nearest_tp.update_touch(location, intensity as u16, max_pads, |note, intensity| {
-                    Self::note_on_velocity_from_context(
-                        velocity_ctx.0,
-                        velocity_ctx.1,
-                        velocity_ctx.2,
-                        velocity_ctx.3,
-                        note,
-                        intensity,
-                    )
-                });
-                if nearest_tp.real_crnt_note != before_note {
-                    latest_note = Some(
-                        nearest_tp
-                            .real_crnt_note
-                            .saturating_add(nearest_tp.offset_note),
-                    );
-                }
-                continue; // Move to the next temp touch point
+                tp.follow(location, intensity);
+                continue;
             }
-            // 近いタッチポイントがない場合は、新しいタッチポイントを作成する
-            let _ = self.new_touch_point(location, intensity as u16, work_mode);
+            // 近いタッチポイントがない場合は、空いているタッチポイントで新しいタッチを始める
+            if let Some(tp) = self.touch_points.iter_mut().find(|tp| !tp.is_touched()) {
+                tp.start(location, intensity);
+            }
         }
-
-        if let Some(note) = latest_note {
-            self.last_note = note;
+    }
+    /// この周期に更新されなかった指が、離れたかを判断する
+    fn release_touch_points(&mut self) {
+        for tp in self.touch_points.iter_mut() {
+            // タッチされていないポイントは処理不要
+            if tp.is_touched() {
+                if !tp.is_updated() {
+                    tp.maybe_released();
+                } else {
+                    tp.clear_updated_flag(); // Clear the updated flag for the next cycle
+                }
+            }
         }
     }
     /// LEDを点灯させるためのコールバック関数をコールする
@@ -753,213 +556,171 @@ where
             led_callback(-1.0, 0);
         }
     }
-    fn new_touch_point(
-        &mut self,
-        location: f32,
-        intensity: u16,
-        work_mode: WorkMode,
-    ) -> Option<u8> {
-        let max_pads = self.max_pads();
-        let velocity_ctx = (work_mode, self.last_note, self.on_time, self.off_time);
-
-        let touched = self
-            .touch_points
-            .iter_mut()
-            .find(|tp| !tp.is_touched())
-            .map(|tp| {
-                tp.new_touch(
-                    location,
-                    intensity as i16,
-                    max_pads,
-                    self.midi_callback.clone(),
-                    work_mode,
-                    |note, intensity| {
-                        Self::note_on_velocity_from_context(
-                            velocity_ctx.0,
-                            velocity_ctx.1,
-                            velocity_ctx.2,
-                            velocity_ctx.3,
-                            note,
-                            intensity,
-                        )
-                    },
-                );
-                tp.real_crnt_note.saturating_add(tp.offset_note)
-            });
-        if let Some(note) = touched {
-            self.last_note = note;
-            Some(note)
-        } else {
-            None
-        }
-    }
-    fn erase_touch_point(&mut self) {
-        let mut released_note: Option<u8> = None;
-        let mut released_on_time: Option<u32> = None;
-
-        for tp in self.touch_points.iter_mut() {
-            // タッチされていないポイントは処理不要
-            if tp.is_touched() {
-                if !tp.is_updated() {
-                    let current_note = tp.real_crnt_note.saturating_add(tp.offset_note);
-                    let current_on_time = tp.touching_time;
-                    tp.maybe_released();
-                    if !tp.is_touched() {
-                        released_note = Some(current_note);
-                        released_on_time = Some(current_on_time);
-                    }
-                } else {
-                    tp.clear_updated_flag(); // Clear the updated flag for the next cycle
-                }
-            }
-        }
-
-        if let Some(note) = released_note {
-            self.last_note = note;
-        }
-        if let Some(on_time) = released_on_time {
-            self.on_time = on_time;
-        }
-    }
-
-    fn update_durations_and_vibrato(&mut self, work_mode: WorkMode) {
-        let mut touched = false;
-        let mut latest_on_time = self.on_time;
-        let mut few_hz_detected: Option<f32> = None;
-
-        for tp in self.touch_points.iter() {
-            if tp.is_touched() {
-                touched = true;
-                latest_on_time = tp.touching_time;
-                if work_mode == WorkMode::Violin && few_hz_detected.is_none() {
-                    few_hz_detected = tp.detect_few_hz_round_trip_hz();
-                }
-            }
-        }
-
-        self.any_touched = touched;
-        if touched {
-            self.on_time = latest_on_time;
-            self.off_time = 0;
-            let vib = few_hz_detected.map_or(0, |hz| (hz * 10.0) as u32).min(127) as u8;
-            if vib != self.vibrato {
-                let dpt = (vib * 2).min(48);
-                (self.midi_callback)(
-                    STATUS_CC, 1,   // CC number for vibrato
-                    dpt, // CC value for pitch bend (centered at 64)
-                    0.0, // location is not relevant for vibrato command
-                );
-                (self.midi_callback)(
-                    STATUS_CC, 19, // CC number for vibrato
-                    vib, 0.0, // location is not relevant for vibrato command
-                );
-                self.vibrato = vib;
-            }
-        } else {
-            self.off_time = self.off_time.wrapping_add(1);
-        }
-    }
-
-    /// Violinモード向けのMIDI NoteOn velocity算出
-    ///
-    /// 算出に使用する値:
-    /// - last_note: 直前に送信したノート
-    /// - on_time:   最後のタッチ継続時間(10ms単位)
-    /// - off_time:  最後に離してからの経過時間(10ms単位)
-    pub fn calc_violin_note_on_velocity(&self, note: u8) -> u8 {
-        Self::calc_violin_note_on_velocity_from(self.last_note, self.on_time, self.off_time, note)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
-    use core::cell::RefCell;
     use std::vec::Vec;
 
-    type Log = RefCell<Vec<(u8, u8, u8)>>; // (status, note, velocity)
+    /// 1 周期分の output を置いて解析する
+    pub(crate) fn put_values<P: AsRef<[u16]> + AsMut<[u16]>>(
+        tracker: &mut TouchTracker<P>,
+        values: &[(usize, u16)],
+    ) {
+        for k in 0..tracker.max_pads() as usize {
+            tracker.set_value(k, 0);
+        }
+        for &(k, v) in values {
+            tracker.set_value(k, v);
+        }
+        tracker.update();
+    }
 
-    /// 電極 4〜6 に 1 本の指を置くと、電極 5 の Note On が出て、離すと Note Off が出る
+    /// 候補（山の電極）を返す
+    fn candidates<const N: usize>(values: [u16; N], ring: bool) -> Vec<f32> {
+        let mut tracker = TouchTracker::new(values, ring);
+        let mut temp = [(INIT_VAL, INIT_VAL, 0); MAX_TOUCH_POINTS];
+        let mut n = 0;
+        tracker.scan_pads(&mut temp, &mut n);
+        temp[..n].iter().map(|t| t.0).collect()
+    }
+
+    /// 電極 4〜6 に 1 本の指を置くと、depth・position が出て Started になり、
+    /// 続けると Followed、離すと RELEASE_WAITING_TIME の後に Released になる
     #[test]
-    fn one_finger_note_on_off() {
-        let log: Log = RefCell::new(Vec::new());
-        let mut qt = QubitTouch::new(
-            |status, note, velocity, _location| log.borrow_mut().push((status, note, velocity)),
-            [0u16; 12],
-        );
-        qt.set_value(4, 10);
-        qt.set_value(5, 30);
-        qt.set_value(6, 10);
-        qt.seek_and_update_touch_point(WorkMode::Piano);
-
+    fn one_finger_is_tracked() {
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        put_values(&mut tracker, &[(4, 10), (5, 30), (6, 10)]);
         // depth = 50、position = (4×10 + 5×30 + 6×10) / 50 = 5.0
-        let tp = qt.touch_point(0).unwrap();
+        let tp = tracker.touch_point(0).unwrap();
         assert!(tp.is_touched());
         assert_eq!(tp.get_intensity(), 50);
         assert_eq!(tp.get_location(), 5.0);
-        assert!(qt.is_any_touched());
-        // ノート = 5 + PIANO_OFFSET、ベロシティ = (100 + 50 / 4) / 2
-        assert_eq!(
-            log.borrow().as_slice(),
-            &[(STATUS_NOTE_ON, 5 + PIANO_OFFSET, 56)]
-        );
+        assert_eq!(tp.track(), Track::Started);
+        assert!(tracker.is_any_touched());
 
-        // 離すと、RELEASE_WAITING_TIME の後に Note Off が 1 回だけ出る
-        for k in 4..=6 {
-            qt.set_value(k, 0);
-        }
+        put_values(&mut tracker, &[(4, 10), (5, 30), (6, 10)]);
+        assert_eq!(tracker.touch_point(0).unwrap().track(), Track::Followed);
+
+        let mut tracks = Vec::new();
         for _ in 0..10 {
-            qt.seek_and_update_touch_point(WorkMode::Piano);
+            put_values(&mut tracker, &[]);
+            tracks.push(tracker.touch_point(0).unwrap().track());
         }
-        assert_eq!(
-            log.borrow().as_slice(),
-            &[
-                (STATUS_NOTE_ON, 5 + PIANO_OFFSET, 56),
-                (STATUS_NOTE_OFF, 5 + PIANO_OFFSET, 0x40)
-            ]
-        );
-        assert!(!qt.touch_point(0).unwrap().is_touched());
-        assert!(!qt.is_any_touched());
+        assert_eq!(tracks.iter().filter(|&&t| t == Track::Released).count(), 1);
+        let tp = tracker.touch_point(0).unwrap();
+        assert!(!tp.is_touched());
+        assert_eq!(tp.get_location(), INIT_VAL);
+        assert_eq!(tp.last_location(), 5.0);
+        assert!(!tracker.is_any_touched());
     }
 
-    /// 指を動かして position がヒステリシスを越えると、新しいノートの Note On と古いノートの MOVED が出る
+    /// 頂上が平らな山も 1 つの山になる（§6.1 の 1）。候補は頂上の中央（偶数個なら小さい側）
     #[test]
-    fn moving_finger_changes_note() {
-        let log: Log = RefCell::new(Vec::new());
-        let mut qt = QubitTouch::new(
-            |status, note, velocity, _location| log.borrow_mut().push((status, note, velocity)),
-            [0u16; 12],
+    fn plateau_peak_is_found() {
+        assert_eq!(
+            candidates([0, 3, 10, 10, 2, 0, 0, 0, 0, 0, 0, 0], false),
+            [2.0]
         );
-        let put = |qt: &mut QubitTouch<_, [u16; 12]>, center: usize| {
-            for k in 0..12 {
-                qt.set_value(k, 0);
+        assert_eq!(
+            candidates([0, 3, 10, 10, 10, 2, 0, 0, 0, 0, 0, 0], false),
+            [3.0]
+        );
+        // 山の途中の平らな所（上りの途中）は山ではない
+        assert_eq!(
+            candidates([0, 3, 9, 9, 20, 2, 0, 0, 0, 0, 0, 0], false),
+            [4.0]
+        );
+        // 平らな頂上の山でも、タッチになる
+        let mut tracker = TouchTracker::new([0, 3, 20, 20, 3, 0, 0, 0, 0, 0, 0, 0u16], false);
+        tracker.update();
+        let tp = tracker.touch_point(0).unwrap();
+        assert!(tp.is_touched());
+        assert_eq!(tp.get_location(), 2.5);
+    }
+
+    /// リングでない構成では、両端の電極は隣り合わない（§6.1 の 4）
+    #[test]
+    fn edges_are_not_neighbors_without_ring() {
+        // 電極 0 の山。反対の端（電極 11）の output は窓に入らない
+        let mut tracker = TouchTracker::new([30, 10, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5u16], false);
+        tracker.update();
+        let tp = tracker.touch_point(0).unwrap();
+        assert!(tp.is_touched());
+        assert_eq!(tp.get_intensity(), 40);
+        assert_eq!(tp.get_location(), 0.25);
+        // 最後の電極の山も候補になる
+        assert_eq!(
+            candidates([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 30], false),
+            [11.0]
+        );
+    }
+
+    /// リングでは、つなぎ目をまたぐ山も 1 回だけ見つかる
+    #[test]
+    fn ring_finds_peak_at_seam_once() {
+        assert_eq!(
+            candidates([10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 20], true),
+            [11.0]
+        );
+        assert_eq!(
+            candidates([20, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10], true),
+            [0.0]
+        );
+        // 平らな頂上がつなぎ目をまたぐ（電極 11 と 0）: 中央の小さい側は電極 11
+        assert_eq!(
+            candidates([20, 3, 0, 0, 0, 0, 0, 0, 0, 0, 3, 20], true),
+            [11.0]
+        );
+    }
+
+    /// リングでは、つなぎ目の近くの position も 0 以上電極数未満になる（§6.1 の 3）
+    #[test]
+    fn ring_position_wraps_at_seam() {
+        let mut tracker = TouchTracker::new([0u16; 12], true);
+        let mut position = |values: &[(usize, u16)]| {
+            put_values(&mut tracker, values);
+            let p = tracker.touch_point(0).unwrap().get_location();
+            // 次のために離す
+            for _ in 0..10 {
+                put_values(&mut tracker, &[]);
             }
-            qt.set_value(center - 1, 10);
-            qt.set_value(center, 30);
-            qt.set_value(center + 1, 10);
-            qt.seek_and_update_touch_point(WorkMode::Piano);
+            p
         };
-        put(&mut qt, 5);
-        put(&mut qt, 6);
-        assert_eq!(
-            log.borrow().as_slice(),
-            &[
-                (STATUS_NOTE_ON, 5 + PIANO_OFFSET, 56),
-                (STATUS_NOTE_ON, 6 + PIANO_OFFSET, 56),
-                (STATUS_NOTE_MOVED, 5 + PIANO_OFFSET, 0x40)
-            ]
-        );
+        assert_eq!(position(&[(11, 30), (0, 30)]), 11.5);
+        assert_eq!(position(&[(10, 10), (11, 30), (0, 10)]), 11.0);
+        assert_eq!(position(&[(11, 10), (0, 30), (1, 10)]), 0.0);
+        // 0 − 10/60 → 11.833…
+        let p = position(&[(11, 20), (0, 30), (1, 10)]);
+        assert!((p - (12.0 - 10.0 / 60.0)).abs() < 1e-4, "{p}");
     }
 
-    /// Piano のベロシティは半分にして 127 で頭打ち（MIDI のデータバイトの範囲に収める）
+    /// リングでは、指がつなぎ目を越えても同じ指として追跡する
     #[test]
-    fn piano_velocity_is_within_midi_range() {
-        type Qt = QubitTouch<fn(u8, u8, u8, f32), [u16; 1]>;
-        assert_eq!(Qt::default_note_on_velocity(0), 50);
-        assert_eq!(Qt::default_note_on_velocity(63), 57);
-        assert_eq!(Qt::default_note_on_velocity(64), 127);
-        assert_eq!(Qt::default_note_on_velocity(i16::MAX), 127);
-        assert_eq!(Qt::default_note_on_velocity(-1), 0);
+    fn ring_finger_crosses_seam_as_same_touch() {
+        let mut tracker = TouchTracker::new([0u16; 12], true);
+        put_values(&mut tracker, &[(10, 10), (11, 30), (0, 10)]);
+        put_values(&mut tracker, &[(11, 10), (0, 30), (1, 10)]);
+        let tp = tracker.touch_point(0).unwrap();
+        assert_eq!(tp.track(), Track::Followed);
+        assert_eq!(tp.get_location(), 0.0);
+        assert!(!tracker.touch_point(1).unwrap().is_touched());
+    }
+
+    /// まとめた候補は、窓を合わせた範囲で計算し直す（§6.1 の 7）
+    #[test]
+    fn merged_candidates_are_recomputed() {
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        // 山は電極 3 と 5（電極 1 と 8 の 8 はしきい値以下なので山にならない）。
+        // 窓の重心は 3.55 と 4.60 で、1.6 以内なのでまとめる
+        put_values(&mut tracker, &[(1, 8), (3, 20), (4, 5), (5, 20), (8, 8)]);
+        let tp = tracker.touch_point(0).unwrap();
+        // 電極 0〜8 の output: 合計 61、重心 = 3 + (−2×8 + 1×5 + 2×20 + 5×8) / 61
+        assert_eq!(tp.get_intensity(), 61);
+        let expected = 3.0 + 69.0 / 61.0;
+        assert!((tp.get_location() - expected).abs() < 1e-4);
+        assert!(!tracker.touch_point(1).unwrap().is_touched());
     }
 }
