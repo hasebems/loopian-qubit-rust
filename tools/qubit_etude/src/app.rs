@@ -1154,7 +1154,20 @@ impl EtudeApp {
             }
             _ => Vec::new(),
         };
-        bar_plot(ui, "output", bars, keys, &mut self.bars_scale);
+        bar_plot(ui, "output", bars, keys.clone(), &mut self.bars_scale);
+
+        // タッチ（touch_algo::touch）の position・depth。表示範囲の最後の値（一時停止中は範囲の終わり）
+        let snapshot = match self.window_us() {
+            Some((t0, t1)) if algo_on => {
+                let r = self.algo.range(t0, t1);
+                r.end
+                    .checked_sub(1)
+                    .and_then(|i| self.algo.touches.get(i))
+                    .copied()
+            }
+            _ => None,
+        };
+        touch_plot(ui, snapshot.as_ref(), keys);
     }
 }
 
@@ -1263,12 +1276,76 @@ fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>, keys: Range<usize>, s
             .allow_zoom(false)
             .allow_scroll(false)
             .x_axis_label("キー")
+            .y_axis_min_width(BAR_Y_AXIS_WIDTH)
             .show(ui, |plot_ui| {
                 plot_ui
                     .set_plot_bounds(PlotBounds::from_min_max([x0 - 0.5, 0.0], [x1 - 0.5, y_max]));
                 plot_ui.set_auto_bounds([false, false]);
                 plot_ui.bar_chart(BarChart::new(name, bars).width(0.8))
             });
+    });
+}
+
+/// バー表示とタッチの表示の縦軸の幅。2 つのグラフの横軸（キー）の位置をそろえるため、同じにする
+const BAR_Y_AXIS_WIDTH: f32 = 40.0;
+/// タッチの表示の高さ
+const TOUCH_PLOT_HEIGHT: f32 = 110.0;
+/// この depth で、円の半径をグラフの高さの TOUCH_FULL_RADIUS 倍にする（面積は depth に比例）
+const TOUCH_FULL_DEPTH: f64 = 200.0;
+const TOUCH_FULL_RADIUS: f32 = 0.45;
+/// 円を周縁ほど薄く描くための、重ねる円の数と 1 枚の不透明度
+const TOUCH_FADE_STEPS: usize = 16;
+const TOUCH_FADE_ALPHA: f32 = 0.15;
+
+/// タッチの position・depth を、バー表示と同じ横軸（キー）の上に円で描く。
+/// 円の中心が position、面積が depth に比例する。円は周縁ほど薄い（同じ中心の円を外から順に重ねる）
+fn touch_plot(ui: &mut egui::Ui, snapshot: Option<&algo::TouchSnapshot>, keys: Range<usize>) {
+    let (x0, x1) = (keys.start as f64, keys.end.max(keys.start + 1) as f64);
+    ui.horizontal(|ui| {
+        // バー表示の左の［+］［−］と同じ幅をあける
+        ui.allocate_space(egui::vec2(40.0, TOUCH_PLOT_HEIGHT));
+        let plot = Plot::new("touch_circles")
+            .height(TOUCH_PLOT_HEIGHT)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .show_grid([true, false])
+            .x_axis_label("タッチ（中心: position、面積: depth）")
+            .y_axis_min_width(BAR_Y_AXIS_WIDTH)
+            .y_axis_formatter(|_, _| String::new())
+            .show(ui, |plot_ui| {
+                plot_ui.set_plot_bounds(PlotBounds::from_min_max([x0 - 0.5, 0.0], [x1 - 0.5, 1.0]));
+                plot_ui.set_auto_bounds([false, false]);
+            });
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        let transform = plot.transform;
+        let frame = *transform.frame();
+        let painter = ui.painter().with_clip_rect(frame);
+        let full_radius = frame.height() * TOUCH_FULL_RADIUS;
+        for (id, touch) in snapshot.iter().enumerate() {
+            let Some((position, depth)) = *touch else {
+                continue;
+            };
+            let center =
+                transform.position_from_point(&egui_plot::PlotPoint::new(position as f64, 0.5));
+            let radius =
+                (full_radius * (depth.max(0) as f64 / TOUCH_FULL_DEPTH).sqrt() as f32).max(3.0);
+            let [r, g, b, _] = key_color(id).to_array();
+            let layer = Color32::from_rgba_unmultiplied(r, g, b, (TOUCH_FADE_ALPHA * 255.0) as u8);
+            for step in 0..TOUCH_FADE_STEPS {
+                let k = 1.0 - step as f32 / TOUCH_FADE_STEPS as f32;
+                painter.circle_filled(center, radius * k, layer);
+            }
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                format!("{}", id + 1),
+                egui::FontId::proportional(12.0),
+                Color32::WHITE,
+            );
+        }
     });
 }
 
