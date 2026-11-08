@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{Bar, BarChart, HLine, Legend, Line, LineStyle, Plot, PlotBounds, PlotPoints};
-use touch_algo::{Params, State};
+use touch_algo::electrode::{Params, State};
+use touch_algo::touch::MAX_TOUCH_POINTS;
 
 use qubit_etude::algo::{self, AlgoRunner};
 use qubit_etude::csv_export;
@@ -38,6 +39,9 @@ const LOWER_NEGATIVE_RATIO: f64 = 0.2;
 const KEYS_PER_CHIP: usize = 6;
 /// 「起動時に自動計測」を入れたときの計測時間（doc/touch_baseline.md §3.12 の案）
 const AUTO_CALIB_MS: u32 = 3000;
+
+/// タッチのタブに出す、PC の解析のイベントの行数
+const TOUCH_EVENT_ROWS: usize = 10;
 
 /// 時系列グラフに出すキーの組（チップ 1 個分）
 #[derive(Clone, Copy, PartialEq)]
@@ -71,6 +75,14 @@ impl BarKeys {
             Self::All => 0..2 * KEYS_PER_CHIP,
         }
     }
+}
+
+/// 右ペインのタブ
+#[derive(Clone, Copy, PartialEq)]
+enum RightTab {
+    Electrode, // アルゴリズム（touch_algo::electrode）の設定とキー毎の値
+    Stats,     // 統計（表示している時間の範囲）とファームからのイベント・メッセージ
+    Touch,     // タッチの解析（touch_algo::touch）
 }
 
 /// キーの範囲を、データにあるキー（0..nkeys）に収める
@@ -116,6 +128,7 @@ pub struct EtudeApp {
     paused: bool,
     view_us: Option<(u64, u64)>, // 前回描いたグラフの時間の範囲（一時停止中の統計・描画に使う）
     stats_key: usize,            // 値の更新間隔を調べるキー
+    right_tab: RightTab,
 
     // アルゴリズム（touch_algo、doc/debug_env.md §4.6）
     algo: AlgoRunner,
@@ -151,6 +164,7 @@ impl EtudeApp {
             paused: false,
             view_us: None,
             stats_key: 0,
+            right_tab: RightTab::Electrode,
             algo: AlgoRunner::new(),
             algo_enabled: true,
             show_filtered: true,
@@ -797,237 +811,312 @@ impl EtudeApp {
     //  右: アルゴリズム（touch_algo）の設定
     // ------------------------------------------------------------------
     fn algo_panel(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new(RichText::new("アルゴリズム（touch_algo）").heading())
-            .default_open(true)
-            .show(ui, |ui| {
-                if ui
-                    .checkbox(&mut self.algo_enabled, "アルゴリズムを通す")
-                    .changed()
-                {
-                    self.algo.invalidate();
+        ui.heading("アルゴリズム（touch_algo）");
+        if ui
+            .checkbox(&mut self.algo_enabled, "アルゴリズムを通す")
+            .changed()
+        {
+            self.algo.invalidate();
+        }
+        if !self.algo_enabled {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label("間引き:");
+            let label = |us: u32| {
+                if us == 0 {
+                    "間引かない".to_string()
+                } else {
+                    format!("{}ms", us / 1000)
                 }
-                if !self.algo_enabled {
-                    return;
-                }
-                ui.horizontal(|ui| {
-                    ui.label("間引き:");
-                    let label = |us: u32| {
-                        if us == 0 {
-                            "間引かない".to_string()
-                        } else {
-                            format!("{}ms", us / 1000)
+            };
+            egui::ComboBox::from_id_salt("decimation")
+                .width(90.0)
+                .selected_text(label(self.algo.decimation_us))
+                .show_ui(ui, |ui| {
+                    for us in algo::DECIMATIONS_US {
+                        if ui
+                            .selectable_label(self.algo.decimation_us == us, label(us))
+                            .clicked()
+                            && self.algo.decimation_us != us
+                        {
+                            self.algo.decimation_us = us;
+                            self.algo.invalidate();
                         }
-                    };
-                    egui::ComboBox::from_id_salt("decimation")
-                        .width(90.0)
-                        .selected_text(label(self.algo.decimation_us))
-                        .show_ui(ui, |ui| {
-                            for us in algo::DECIMATIONS_US {
-                                if ui
-                                    .selectable_label(self.algo.decimation_us == us, label(us))
-                                    .clicked()
-                                    && self.algo.decimation_us != us
-                                {
-                                    self.algo.decimation_us = us;
-                                    self.algo.invalidate();
-                                }
-                            }
-                        });
-                });
-                ui.horizontal(|ui| {
-                    let mut on = self.algo.calibrating;
-                    if ui.toggle_value(&mut on, "設定画面（校正）").changed() {
-                        self.algo.set_calibrating(on, &self.store);
                     }
-                    let state = match self.algo.state() {
-                        Some(State::Acquiring) => "初期取得中",
-                        Some(State::Running) => "通常",
-                        Some(State::Calibrating) => "校正中",
-                        Some(State::AutoCalibrating) => "自動計測中",
-                        None => "-",
-                    };
-                    ui.label(format!("状態: {state}"));
                 });
-                ui.label("校正は PC のアルゴリズムだけのもの（実機の設定画面とは連動しない）");
+        });
+        ui.horizontal(|ui| {
+            let mut on = self.algo.calibrating;
+            if ui.toggle_value(&mut on, "設定画面（校正）").changed() {
+                self.algo.set_calibrating(on, &self.store);
+            }
+            let state = match self.algo.state() {
+                Some(State::Acquiring) => "初期取得中",
+                Some(State::Running) => "通常",
+                Some(State::Calibrating) => "校正中",
+                Some(State::AutoCalibrating) => "自動計測中",
+                None => "-",
+            };
+            ui.label(format!("状態: {state}"));
+        });
+        ui.label("校正は PC のアルゴリズムだけのもの（実機の設定画面とは連動しない）");
 
-                // キー毎の最後の値
-                if let Some(last) = self.algo.time_us.len().checked_sub(1) {
-                    egui::Grid::new("algo_keys").striped(true).show(ui, |ui| {
-                        for h in ["キー", "baseline", "delta", "output", "noise"] {
-                            ui.label(RichText::new(h).strong());
-                        }
-                        ui.end_row();
-                        for k in 0..self.algo.baseline.len() {
-                            ui.label(RichText::new(format!("{k}")).color(key_color(k)));
-                            ui.label(format!("{}", self.algo.baseline[k][last]));
-                            ui.label(format!("{}", self.algo.delta[k][last]));
-                            ui.label(format!("{}", self.algo.output[k][last]));
-                            ui.label(format!("{}", self.algo.noise_floor[k]));
-                            ui.end_row();
-                        }
-                    });
+        // キー毎の最後の値
+        if let Some(last) = self.algo.time_us.len().checked_sub(1) {
+            egui::Grid::new("algo_keys").striped(true).show(ui, |ui| {
+                for h in ["キー", "baseline", "delta", "output", "noise"] {
+                    ui.label(RichText::new(h).strong());
                 }
-
-                ui.collapsing("パラメータ（doc/touch_baseline.md §3.11）", |ui| {
-                    let mut p = self.algo.params;
-                    egui::Grid::new("params").show(ui, |ui| {
-                        param(
-                            ui,
-                            "SMOOTH_SAMPLES",
-                            &mut p.smooth_samples,
-                            1..=touch_algo::MAX_SMOOTH_SAMPLES as u8,
-                        );
-                        param(
-                            ui,
-                            "BASELINE_UPDATE_INTERVAL_MS",
-                            &mut p.baseline_update_interval_ms,
-                            1..=1000,
-                        );
-                        param(ui, "ACQUIRE_MS", &mut p.acquire_ms, 0..=5000);
-                        param(ui, "NEIGHBOR_RANGE", &mut p.neighbor_range, 0..=8);
-                        param(ui, "QUIET_THRESHOLD", &mut p.quiet_threshold, 0..=200);
-                        param(ui, "QUIET_HOLD_MS", &mut p.quiet_hold_ms, 0..=10_000);
-                        param(ui, "RISE_SHIFT", &mut p.rise_shift, 0..=16);
-                        param(ui, "RISE_MAX_STEP_Q", &mut p.rise_max_step_q, 0..=4096);
-                        param(ui, "FALL_SHIFT", &mut p.fall_shift, 0..=16);
-                        param(
-                            ui,
-                            "NEG_RECAL_THRESHOLD",
-                            &mut p.neg_recal_threshold,
-                            0..=200,
-                        );
-                        param(ui, "NEG_RECAL_MS", &mut p.neg_recal_ms, 0..=5000);
-                        param(ui, "STUCK_TIME_MS", &mut p.stuck_time_ms, 0..=300_000);
-                        param(ui, "STUCK_VARIATION", &mut p.stuck_variation, 0..=200);
-                        param(ui, "STUCK_RECOVER_RATE", &mut p.stuck_recover_rate, 0..=100);
-                        param(ui, "CALIB_SHIFT", &mut p.calib_shift, 0..=16);
-                        param(ui, "CALIB_SETTLE_MS", &mut p.calib_settle_ms, 0..=10_000);
-                        param(
-                            ui,
-                            "NOISE_FLOOR_DEFAULT",
-                            &mut p.noise_floor_default,
-                            0..=200,
-                        );
-                        param(ui, "NOISE_FLOOR_MAX", &mut p.noise_floor_max, 0..=500);
-                    });
-                    if ui.button("既定値に戻す").clicked() {
-                        p = Params::DEFAULT;
-                    }
-                    if p != self.algo.params {
-                        // 変えたら、読み込んでいるデータの先頭から通し直す
-                        self.algo.params = p;
-                        self.algo.invalidate();
-                    }
-                });
+                ui.end_row();
+                for k in 0..self.algo.baseline.len() {
+                    ui.label(RichText::new(format!("{k}")).color(key_color(k)));
+                    ui.label(format!("{}", self.algo.baseline[k][last]));
+                    ui.label(format!("{}", self.algo.delta[k][last]));
+                    ui.label(format!("{}", self.algo.output[k][last]));
+                    ui.label(format!("{}", self.algo.noise_floor[k]));
+                    ui.end_row();
+                }
             });
+        }
+
+        ui.collapsing("パラメータ（doc/touch_baseline.md §3.11）", |ui| {
+            let mut p = self.algo.params;
+            egui::Grid::new("params").show(ui, |ui| {
+                param(
+                    ui,
+                    "SMOOTH_SAMPLES",
+                    &mut p.smooth_samples,
+                    1..=touch_algo::electrode::MAX_SMOOTH_SAMPLES as u8,
+                );
+                param(
+                    ui,
+                    "BASELINE_UPDATE_INTERVAL_MS",
+                    &mut p.baseline_update_interval_ms,
+                    1..=1000,
+                );
+                param(ui, "ACQUIRE_MS", &mut p.acquire_ms, 0..=5000);
+                param(ui, "NEIGHBOR_RANGE", &mut p.neighbor_range, 0..=8);
+                param(ui, "QUIET_THRESHOLD", &mut p.quiet_threshold, 0..=200);
+                param(ui, "QUIET_HOLD_MS", &mut p.quiet_hold_ms, 0..=10_000);
+                param(ui, "RISE_SHIFT", &mut p.rise_shift, 0..=16);
+                param(ui, "RISE_MAX_STEP_Q", &mut p.rise_max_step_q, 0..=4096);
+                param(ui, "FALL_SHIFT", &mut p.fall_shift, 0..=16);
+                param(
+                    ui,
+                    "NEG_RECAL_THRESHOLD",
+                    &mut p.neg_recal_threshold,
+                    0..=200,
+                );
+                param(ui, "NEG_RECAL_MS", &mut p.neg_recal_ms, 0..=5000);
+                param(ui, "STUCK_TIME_MS", &mut p.stuck_time_ms, 0..=300_000);
+                param(ui, "STUCK_VARIATION", &mut p.stuck_variation, 0..=200);
+                param(ui, "STUCK_RECOVER_RATE", &mut p.stuck_recover_rate, 0..=100);
+                param(ui, "CALIB_SHIFT", &mut p.calib_shift, 0..=16);
+                param(ui, "CALIB_SETTLE_MS", &mut p.calib_settle_ms, 0..=10_000);
+                param(
+                    ui,
+                    "NOISE_FLOOR_DEFAULT",
+                    &mut p.noise_floor_default,
+                    0..=200,
+                );
+                param(ui, "NOISE_FLOOR_MAX", &mut p.noise_floor_max, 0..=500);
+            });
+            if ui.button("既定値に戻す").clicked() {
+                p = Params::DEFAULT;
+            }
+            if p != self.algo.params {
+                // 変えたら、読み込んでいるデータの先頭から通し直す
+                self.algo.params = p;
+                self.algo.invalidate();
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    //  右: タッチの解析（touch_algo::touch、doc/touch_analysis.md）。OLED の Touch ページと同じ表示
+    // ------------------------------------------------------------------
+    fn touch_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("タッチ（touch_algo::touch）");
+        if !self.algo_enabled {
+            ui.label("「電極」タブで「アルゴリズムを通す」を入れると表示する");
+            return;
+        }
+        if self.algo.decimation_us != 10_000 {
+            ui.label(
+                RichText::new("ファームと同じ条件にするには、間引きを 10ms にする")
+                    .color(Color32::YELLOW),
+            );
+        }
+        let Some((t0, t1)) = self.window_us() else {
+            return;
+        };
+        // 表示範囲の最後の結果（一時停止中は範囲の終わり）
+        let r = self.algo.range(t0, t1);
+        let snapshot = r.end.checked_sub(1).and_then(|i| self.algo.touches.get(i));
+        egui::Grid::new("touch_points")
+            .striped(true)
+            .show(ui, |ui| {
+                for h in ["", "position", "depth"] {
+                    ui.label(RichText::new(h).strong());
+                }
+                ui.end_row();
+                for id in 0..MAX_TOUCH_POINTS {
+                    ui.label(format!("Touch{}", id + 1));
+                    match snapshot.and_then(|s| s[id]) {
+                        Some((position, depth)) => {
+                            ui.label(format!("{position:.2}"));
+                            ui.label(format!("{depth}"));
+                        }
+                        None => {
+                            ui.label("---");
+                            ui.label("");
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+        ui.label(RichText::new("イベント（PC の解析、表示範囲、新しい順）").strong());
+        let events: Vec<_> = self
+            .algo
+            .touch_events
+            .iter()
+            .rev()
+            .filter(|e| (t0..=t1).contains(&e.time_us))
+            .take(TOUCH_EVENT_ROWS)
+            .collect();
+        // イベントが増えても表示の高さが変わらないよう、行数を固定する
+        for i in 0..TOUCH_EVENT_ROWS {
+            match events.get(i) {
+                Some(event) => ui.label(format!(
+                    "{:.3}s  {}",
+                    event.time_us as f64 / 1e6,
+                    event.describe()
+                )),
+                None => ui.label(""),
+            };
+        }
     }
 
     // ------------------------------------------------------------------
     //  右: 統計（表示している時間の範囲）
     // ------------------------------------------------------------------
-    fn stats_panel(&mut self, ui: &mut egui::Ui) {
-        self.algo_panel(ui);
+    fn right_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.right_tab, RightTab::Electrode, "電極");
+            ui.selectable_value(&mut self.right_tab, RightTab::Stats, "統計");
+            ui.selectable_value(&mut self.right_tab, RightTab::Touch, "タッチ");
+        });
         ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt(self.right_tab as u8)
+            .auto_shrink(false)
+            .show(ui, |ui| match self.right_tab {
+                RightTab::Electrode => self.algo_panel(ui),
+                RightTab::Stats => self.stats_panel(ui),
+                RightTab::Touch => self.touch_panel(ui),
+            });
+    }
+
+    fn stats_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("統計");
         let Some((t0, t1)) = self.window_us() else {
             return;
         };
         let stats = self.store.stats(t0, t1);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.label(format!(
-                "範囲 {:.2} 秒  {} フレーム  欠け {}",
-                (t1 - t0) as f64 / 1e6,
-                stats.frames,
-                stats.lost_frames
-            ));
-            ui.label("ノイズを見るときは、触れていない区間を表示してください");
-            // filtered の p-p は、固着判定の STUCK_VARIATION と比べるためのもの
-            let algo_on = self.algo_enabled && self.algo.filtered.len() == self.store.nkeys;
-            egui::Grid::new("key_stats").striped(true).show(ui, |ui| {
-                for h in ["キー", "raw 平均", "raw σ", "raw p-p", "filtered p-p"] {
-                    ui.label(RichText::new(h).strong());
-                }
+        ui.label(format!(
+            "範囲 {:.2} 秒  {} フレーム  欠け {}",
+            (t1 - t0) as f64 / 1e6,
+            stats.frames,
+            stats.lost_frames
+        ));
+        ui.label("ノイズを見るときは、触れていない区間を表示してください");
+        // filtered の p-p は、固着判定の STUCK_VARIATION と比べるためのもの
+        let algo_on = self.algo_enabled && self.algo.filtered.len() == self.store.nkeys;
+        egui::Grid::new("key_stats").striped(true).show(ui, |ui| {
+            for h in ["キー", "raw 平均", "raw σ", "raw p-p", "filtered p-p"] {
+                ui.label(RichText::new(h).strong());
+            }
+            ui.end_row();
+            for (k, ks) in stats.keys.iter().enumerate() {
+                ui.label(RichText::new(format!("{k}")).color(key_color(k)));
+                ui.label(format!("{:.1}", ks.mean));
+                ui.label(format!("{:.2}", ks.std));
+                ui.label(format!("{}", ks.peak_to_peak));
+                let filtered_pp = algo_on
+                    .then(|| self.algo.filtered_peak_to_peak(t0, t1, k))
+                    .flatten();
+                ui.label(filtered_pp.map_or("-".into(), |pp| pp.to_string()));
                 ui.end_row();
-                for (k, ks) in stats.keys.iter().enumerate() {
-                    ui.label(RichText::new(format!("{k}")).color(key_color(k)));
-                    ui.label(format!("{:.1}", ks.mean));
-                    ui.label(format!("{:.2}", ks.std));
-                    ui.label(format!("{}", ks.peak_to_peak));
-                    let filtered_pp = algo_on
-                        .then(|| self.algo.filtered_peak_to_peak(t0, t1, k))
-                        .flatten();
-                    ui.label(filtered_pp.map_or("-".into(), |pp| pp.to_string()));
-                    ui.end_row();
-                }
-            });
-            ui.separator();
-
-            let iv = stats.interval_us;
-            ui.label(RichText::new("サンプル間隔").strong());
-            ui.label(format!(
-                "最小 {:.2} / 平均 {:.3} / 最大 {:.2} ms",
-                iv.min as f64 / 1000.0,
-                iv.mean / 1000.0,
-                iv.max as f64 / 1000.0
-            ));
-            histogram_plot(
-                ui,
-                "interval_hist",
-                &stats.interval_hist,
-                store::INTERVAL_BIN_US,
-            );
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("値の更新間隔").strong());
-                egui::ComboBox::from_id_salt("stats_key")
-                    .width(60.0)
-                    .selected_text(format!("key{}", self.stats_key))
-                    .show_ui(ui, |ui| {
-                        for k in 0..self.store.nkeys {
-                            ui.selectable_value(&mut self.stats_key, k, format!("key{k}"));
-                        }
-                    });
-            });
-            if self.stats_key < self.store.nkeys {
-                let changes = self.store.change_intervals(t0, t1, self.stats_key);
-                let summary = store::Summary::of(&changes);
-                ui.label("生値が変わるまでの時間（チップが値を更新する周期を見る）");
-                ui.label(format!(
-                    "{} 回  最小 {:.2} / 平均 {:.2} / 最大 {:.2} ms",
-                    summary.count,
-                    summary.min as f64 / 1000.0,
-                    summary.mean / 1000.0,
-                    summary.max as f64 / 1000.0
-                ));
-                const CHANGE_BIN_US: u64 = 1000;
-                histogram_plot(
-                    ui,
-                    "change_hist",
-                    &store::histogram(&changes, CHANGE_BIN_US),
-                    CHANGE_BIN_US,
-                );
-            }
-            ui.separator();
-
-            ui.label(RichText::new("イベント（表示範囲、新しい順）").strong());
-            let events: Vec<_> = self
-                .store
-                .events
-                .iter()
-                .rev()
-                .filter(|(t, _)| (t0..=t1).contains(t))
-                .take(30)
-                .collect();
-            for (t, event) in events {
-                ui.label(format!("{:.3}s  {}", *t as f64 / 1e6, event.describe()));
-            }
-            ui.separator();
-            ui.label(RichText::new("ファームからのメッセージ").strong());
-            for text in self.store.texts.iter().rev().take(10) {
-                ui.label(text);
             }
         });
+        ui.separator();
+
+        let iv = stats.interval_us;
+        ui.label(RichText::new("サンプル間隔").strong());
+        ui.label(format!(
+            "最小 {:.2} / 平均 {:.3} / 最大 {:.2} ms",
+            iv.min as f64 / 1000.0,
+            iv.mean / 1000.0,
+            iv.max as f64 / 1000.0
+        ));
+        histogram_plot(
+            ui,
+            "interval_hist",
+            &stats.interval_hist,
+            store::INTERVAL_BIN_US,
+        );
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("値の更新間隔").strong());
+            egui::ComboBox::from_id_salt("stats_key")
+                .width(60.0)
+                .selected_text(format!("key{}", self.stats_key))
+                .show_ui(ui, |ui| {
+                    for k in 0..self.store.nkeys {
+                        ui.selectable_value(&mut self.stats_key, k, format!("key{k}"));
+                    }
+                });
+        });
+        if self.stats_key < self.store.nkeys {
+            let changes = self.store.change_intervals(t0, t1, self.stats_key);
+            let summary = store::Summary::of(&changes);
+            ui.label("生値が変わるまでの時間（チップが値を更新する周期を見る）");
+            ui.label(format!(
+                "{} 回  最小 {:.2} / 平均 {:.2} / 最大 {:.2} ms",
+                summary.count,
+                summary.min as f64 / 1000.0,
+                summary.mean / 1000.0,
+                summary.max as f64 / 1000.0
+            ));
+            const CHANGE_BIN_US: u64 = 1000;
+            histogram_plot(
+                ui,
+                "change_hist",
+                &store::histogram(&changes, CHANGE_BIN_US),
+                CHANGE_BIN_US,
+            );
+        }
+        ui.separator();
+
+        ui.label(RichText::new("イベント（表示範囲、新しい順）").strong());
+        let events: Vec<_> = self
+            .store
+            .events
+            .iter()
+            .rev()
+            .filter(|(t, _)| (t0..=t1).contains(t))
+            .take(30)
+            .collect();
+        for (t, event) in events {
+            ui.label(format!("{:.3}s  {}", *t as f64 / 1e6, event.describe()));
+        }
+        ui.separator();
+        ui.label(RichText::new("ファームからのメッセージ").strong());
+        for text in self.store.texts.iter().rev().take(10) {
+            ui.label(text);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1085,7 +1174,7 @@ impl eframe::App for EtudeApp {
             .show(ui, |ui| self.view_panel(ui));
         egui::Panel::right("stats")
             .default_size(330.0)
-            .show(ui, |ui| self.stats_panel(ui));
+            .show(ui, |ui| self.right_panel(ui));
         egui::Panel::bottom("bars").show(ui, |ui| self.bars(ui));
         egui::CentralPanel::default().show(ui, |ui| self.plot(ui));
 

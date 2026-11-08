@@ -1,4 +1,6 @@
-//! 記録（.qlog）を touch_algo に通し、キー毎の結果をまとめて表示する（GUI を使わない）
+//! 記録（.qlog）を touch_algo に通し、キー毎の結果と、タッチの解析のイベントを表示する（GUI を使わない）
+//! 解析のイベントは、記録の中のファームのイベントと並べて出す（doc/touch_analysis.md §7.4）。
+//! ファームと同じ条件にするには、間引きを 10000 にする
 //!
 //! 実行: `cd tools/qubit_etude && cargo run --example replay_algo -- <記録.qlog> [間引き µs（既定 8000、0 で間引かない）]`
 //! PC アプリと同じ AlgoRunner を使う。パラメータは既定値（doc/touch_baseline.md §3.11）
@@ -61,5 +63,21 @@ fn main() {
             delta.iter().max().unwrap_or(&0),
             output_max
         );
+    }
+
+    // タッチの解析（touch_algo::touch）のイベントと、記録の中のファームのイベント
+    println!();
+    println!(
+        "イベント  PC の解析 {} 件 / 記録（ファーム）{} 件",
+        runner.touch_events.len(),
+        store.events.len()
+    );
+    println!("  PC の解析:");
+    for e in &runner.touch_events {
+        println!("    {:>8.3}s  {}", e.time_us as f64 / 1e6, e.describe());
+    }
+    println!("  記録（ファーム）:");
+    for (t, e) in &store.events {
+        println!("    {:>8.3}s  {}", *t as f64 / 1e6, e.describe());
     }
 }

@@ -1,12 +1,20 @@
-//! touch_algo（ノイズ除去・基準値）を、受信・再生したフレームに通す（doc/debug_env.md §4.6）
+//! touch_algo（ノイズ除去・基準値と、タッチの解析）を、受信・再生したフレームに通す（doc/debug_env.md §4.6）
 //!
-//! - Store のフレームを、間引いてから TouchSignal::process に 1 フレームずつ通し、結果を時刻と一緒にためる
+//! - Store のフレームを、間引いてから ElectrodeSignal::process に 1 フレームずつ通し、結果を時刻と一緒にためる
+//! - 同じフレームで、その output を QubitTouch（touch_algo::touch）に渡して解析し、タッチポイント毎の
+//!   position・depth と、出てきたイベント（Note On/Off/Moved）をためる（doc/touch_analysis.md §7.4）。
+//!   ファームは信号処理と解析を 10ms 毎に行うので、同じ条件にするには間引きを 10ms にする。動作モードは Piano
 //! - パラメータ・間引き・キー数が変わったら、Store の先頭から通し直す
 //! - 校正のスイッチは PC のアルゴリズムだけのもので、ファームの SETTING_MODE とは連動しない。
 //!   操作した時刻（そのとき最後に受け取ったフレームの時刻）を覚えておき、通し直すときも同じ時刻で切り替える
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
-use touch_algo::{KeyState, Params, State, TouchSignal};
+use touch_algo::electrode::{ElectrodeSignal, ElectrodeState, Params, State};
+use touch_algo::touch::{
+    MAX_TOUCH_POINTS, QubitTouch, STATUS_CC, STATUS_NOTE_MOVED, STATUS_NOTE_OFF, STATUS_NOTE_ON,
+    WorkMode,
+};
 
 use crate::store::{MAX_FRAMES, Store};
 
@@ -14,11 +22,58 @@ use crate::store::{MAX_FRAMES, Store};
 pub const DECIMATIONS_US: [u32; 3] = [0, 8_000, 10_000];
 /// 間引いた周期を前後このくらいずれても通す（2ms 周期のフレームの揺れを吸収する）
 const DECIMATION_TOLERANCE_US: u64 = 1_000;
+/// 解析のイベントをためる数の上限（古いものから捨てる）
+const MAX_TOUCH_EVENTS: usize = 10_000;
+
+/// 解析 1 回分の、タッチポイント毎の (position, depth)。触れていなければ None
+pub type TouchSnapshot = [Option<(f32, i16)>; MAX_TOUCH_POINTS];
+
+/// 解析（QubitTouch）が出したイベント
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TouchEvent {
+    pub time_us: u64,
+    pub status: u8, // 上位 4 ビットが STATUS_*、下位 4 ビットはタッチポイントの id
+    pub note: u8,
+    pub velocity: u8,
+    pub location: f32,
+}
+
+impl TouchEvent {
+    /// 表示用の短い説明（ファームの EVENT の `Event::describe` と同じ形）
+    pub fn describe(&self) -> String {
+        let note = |name: &str| {
+            format!(
+                "{name} note={} vel={} loc={:.2}",
+                self.note, self.velocity, self.location
+            )
+        };
+        match self.status & 0xf0 {
+            STATUS_NOTE_ON => note("note_on"),
+            STATUS_NOTE_OFF => note("note_off"),
+            STATUS_NOTE_MOVED => note("note_moved"),
+            STATUS_CC => format!("cc {}={}", self.note, self.velocity),
+            s => format!("status=0x{s:02x} {} {}", self.note, self.velocity),
+        }
+    }
+}
+
+/// QubitTouch のコールバック。コールバックは Clone できる型でないといけないので、
+/// 何も持たない fn にして、イベントはスレッドローカルに置き、解析の後に取り出す
+type TouchCallback = fn(u8, u8, u8, f32);
+
+thread_local! {
+    static PENDING_EVENTS: RefCell<Vec<(u8, u8, u8, f32)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn on_touch_event(status: u8, note: u8, velocity: u8, location: f32) {
+    PENDING_EVENTS.with_borrow_mut(|e| e.push((status, note, velocity, location)));
+}
 
 pub struct AlgoRunner {
     pub params: Params,
     pub decimation_us: u32,
-    signal: Option<TouchSignal<Vec<KeyState>>>,
+    signal: Option<ElectrodeSignal<Vec<ElectrodeState>>>,
+    touch: Option<QubitTouch<TouchCallback, Vec<u16>>>,
     nkeys: usize,
     next_abs: u64,            // 次に通すフレームの通し番号（Store に入った順の番号）
     next_due_us: Option<u64>, // 間引き: 次に通すフレームの時刻
@@ -32,6 +87,8 @@ pub struct AlgoRunner {
     pub delta: Vec<VecDeque<i32>>,
     pub output: Vec<VecDeque<u16>>,
     pub noise_floor: Vec<u16>, // 最後のフレームでのキー毎の noise_floor
+    pub touches: VecDeque<TouchSnapshot>, // 解析の結果（time_us と同じ添字）
+    pub touch_events: VecDeque<TouchEvent>, // 解析が出したイベント（時刻の順）
 }
 
 impl AlgoRunner {
@@ -40,6 +97,7 @@ impl AlgoRunner {
             params: Params::DEFAULT,
             decimation_us: 8_000,
             signal: None,
+            touch: None,
             nkeys: 0,
             next_abs: 0,
             next_due_us: None,
@@ -51,6 +109,8 @@ impl AlgoRunner {
             delta: Vec::new(),
             output: Vec::new(),
             noise_floor: Vec::new(),
+            touches: VecDeque::new(),
+            touch_events: VecDeque::new(),
         }
     }
 
@@ -115,6 +175,12 @@ impl AlgoRunner {
                 return;
             };
             signal.process(t as u32, &raw, store.valid[i], calibrating);
+            if let Some(touch) = self.touch.as_mut() {
+                for (k, key) in signal.keys().iter().enumerate() {
+                    touch.set_value(k, key.output());
+                }
+                touch.seek_and_update_touch_point(WorkMode::Piano);
+            }
             self.push_result(t);
         }
     }
@@ -145,10 +211,15 @@ impl AlgoRunner {
 
     fn restart(&mut self, nkeys: usize) {
         self.nkeys = nkeys;
-        self.signal = Some(TouchSignal::new(
-            vec![KeyState::INITIAL; nkeys],
+        self.signal = Some(ElectrodeSignal::new(
+            vec![ElectrodeState::INITIAL; nkeys],
             self.params,
         ));
+        self.touch = Some(QubitTouch::new(
+            on_touch_event as TouchCallback,
+            vec![0; nkeys],
+        ));
+        PENDING_EVENTS.with_borrow_mut(|e| e.clear());
         self.next_due_us = None;
         self.time_us.clear();
         self.filtered = vec![VecDeque::new(); nkeys];
@@ -156,6 +227,8 @@ impl AlgoRunner {
         self.delta = vec![VecDeque::new(); nkeys];
         self.output = vec![VecDeque::new(); nkeys];
         self.noise_floor = vec![0; nkeys];
+        self.touches.clear();
+        self.touch_events.clear();
     }
 
     fn push_result(&mut self, t: u64) {
@@ -170,6 +243,7 @@ impl AlgoRunner {
                 self.delta[k].pop_front();
                 self.output[k].pop_front();
             }
+            self.touches.pop_front();
         }
         self.time_us.push_back(t);
         for (k, key) in signal.keys().iter().enumerate() {
@@ -178,6 +252,29 @@ impl AlgoRunner {
             self.delta[k].push_back(key.delta());
             self.output[k].push_back(key.output());
             self.noise_floor[k] = key.noise_floor();
+        }
+
+        // 解析: タッチポイント毎の position・depth と、この解析で出たイベント
+        let snapshot: TouchSnapshot = core::array::from_fn(|id| {
+            self.touch
+                .as_ref()
+                .and_then(|touch| touch.touch_point(id))
+                .filter(|tp| tp.is_touched())
+                .map(|tp| (tp.get_location(), tp.get_intensity()))
+        });
+        self.touches.push_back(snapshot);
+        let pending = PENDING_EVENTS.with_borrow_mut(std::mem::take);
+        for (status, note, velocity, location) in pending {
+            if self.touch_events.len() >= MAX_TOUCH_EVENTS {
+                self.touch_events.pop_front();
+            }
+            self.touch_events.push_back(TouchEvent {
+                time_us: t,
+                status,
+                note,
+                velocity,
+                location,
+            });
         }
     }
 
@@ -271,6 +368,46 @@ mod tests {
         assert_eq!(runner.filtered_peak_to_peak(0, 800_000, 0), Some(6));
         assert_eq!(runner.filtered_peak_to_peak(0, 800_000, 5), None); // 無いキー
         assert_eq!(runner.filtered_peak_to_peak(900_000, 950_000, 0), None); // 範囲外
+    }
+
+    #[test]
+    fn touch_analysis_runs_on_output() {
+        // 起動直後（初期取得・自動計測の約 3.3 秒）は output が 0 なので、4 秒後から 3 キーに触れる
+        let mut store = Store::new();
+        for i in 0..800u32 {
+            let t = i * 10_000;
+            let touched = (400..450).contains(&i);
+            let raw = (0..12)
+                .map(|k| match (touched, k) {
+                    (true, 4 | 6) => 940,
+                    (true, 5) => 980,
+                    _ => 900,
+                })
+                .collect();
+            store.ingest(Packet::Frame(Frame {
+                seq: i,
+                time_us: t,
+                valid: (1 << 12) - 1,
+                raw,
+            }));
+        }
+        let mut runner = AlgoRunner::new();
+        runner.decimation_us = 10_000;
+        runner.update(&store);
+        assert_eq!(runner.touches.len(), runner.time_us.len());
+        let kinds: Vec<u8> = runner
+            .touch_events
+            .iter()
+            .map(|e| e.status & 0xf0)
+            .collect();
+        assert_eq!(kinds, vec![STATUS_NOTE_ON, STATUS_NOTE_OFF]);
+        let on = runner.touch_events[0];
+        assert_eq!(on.note, 5 + touch_algo::touch::PIANO_OFFSET);
+        assert!((on.location - 5.0).abs() < 0.5);
+        // 触れている間はタッチポイント 0 に position がある
+        let i = runner.time_us.partition_point(|&t| t < 4_200_000);
+        assert!(runner.touches[i][0].is_some());
+        assert!(runner.touches.back().unwrap()[0].is_none());
     }
 
     #[test]
