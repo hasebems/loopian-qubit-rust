@@ -4,7 +4,7 @@
 //  https://opensource.org/licenses/mit-license.php
 //
 
-// コア1のスタックサイズ。Core1 の touch_task は QubitTouch (約3.7KB)・TouchSignal (96 キーで数 KB)・ReadTouch を持ち、
+// コア1のスタックサイズ。Core1 の touch_task は QubitTouch (約3.7KB)・ElectrodeSignal (96 キーで数 KB)・ReadTouch を持ち、
 // 初期化時に一時的にスタックに置かれることがあるので、余裕を持たせる
 pub const CORE1_STACK_SIZE: usize = 16384;
 
@@ -33,14 +33,7 @@ pub const fn analysis_divider(scan_period_us: u32) -> u32 {
 // その前の値で touch_algo が基準値を初期取得しないようにする（doc/touch_baseline.md §4.4）
 pub const TOUCH_STARTUP_SETTLE_MS: u64 = 500;
 
-pub const MIDI_NOTE_ON: u8 = 0x90;
-pub const MIDI_NOTE_OFF: u8 = 0x80;
-pub const MIDI_CC: u8 = 0xb0;
-
 // Message for Ringled / touch callback status
-pub const RINGLED_CMD_TX_ON: u8 = MIDI_NOTE_ON; // 送信用Note Onコマンド
-pub const RINGLED_CMD_TX_OFF: u8 = MIDI_NOTE_OFF; // 送信用Note Offコマンド
-pub const RINGLED_CMD_TX_MOVED: u8 = 0xa0; // 送信用Note Moveコマンド(NoteOff)
 
 // キー数の構成: 本番 4ch×4台 (96キー)、etude 2ch×1台 (12キー)、no_pca9544 直結1個 (6キー)。
 // CI の clippy --all-features で両方が有効になるので、no_pca9544 を優先する
@@ -62,35 +55,15 @@ pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
 pub const RINGLED_RX_WORDS: usize = NUM_LEDS.div_ceil(32); // 受信ノート表示のビット列(1bit/LED)を格納する u32 の個数
 
-pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
+pub use touch_algo::touch::MAX_TOUCH_POINTS; // 追跡するタッチの最大数
 pub const MAX_ADC_CHANNELS: usize = 3; // ADCのチャンネル数
 
 // MIDI
-pub const KEYBD_LO: u8 = 21; // A0
 pub const _MIDI_CH_PIANO: u8 = 0; // ピアノ用MIDIチャンネル
 pub const MIDI_CH_VIOLIN: u8 = 1; // バイオリン用MIDIチャンネル
 pub const MIDI_CH_FLOW: u8 = 12;
-pub const PIANO_OFFSET: u8 = KEYBD_LO - 4;
-pub const VIOLIN_OFFSET: u8 = 55; // バイオリンモードのMIDIノートオフセット
 
 pub const MIDI_TX_TIMEOUT_MS: u64 = 20;
 
-// Work mode
-#[repr(u8)]
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum WorkMode {
-    Piano = 0,
-    Violin = 1,
-}
-// u8 から WorkMode への変換を定義
-impl TryFrom<u8> for WorkMode {
-    type Error = ();
-
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
-        match v {
-            0 => Ok(WorkMode::Piano),
-            1 => Ok(WorkMode::Violin),
-            _ => Err(()), // 定義外の数値の場合はエラー
-        }
-    }
-}
+// Work mode（ノートの決め方が変わるので、解析（touch_algo::touch）に置いている）
+pub use touch_algo::touch::WorkMode;

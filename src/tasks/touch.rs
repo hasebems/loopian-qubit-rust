@@ -7,11 +7,13 @@ use crate::constants::*;
 use crate::devices;
 use crate::error;
 use crate::shared::{
-    ANALYSIS_TIME, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4, POINT5, SCAN_TIME,
-    SETTING_MODE, TOUCH_CALIBRATING, WORK_MODE, scan_period_us,
+    ANALYSIS_TIME, ANY_TOUCH, DEBUG_VALUE, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4,
+    POINT5, SCAN_TIME, SETTING_MODE, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3, WORK_MODE,
+    scan_period_us,
 };
 use crate::tasks::midi::queue_midi;
 use crate::touch;
+use touch_algo::touch::STATUS_NOTE_MOVED;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      Touch Task (Core1): I2C1 を専有し、スキャン → 信号処理（touch_algo）→ 解析 →
@@ -20,8 +22,8 @@ use crate::touch;
 #[embassy_executor::task]
 pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     use core::cell::Cell;
-    use touch::qtouch::QubitTouch;
-    use touch_algo::{KeyState, Params, State, TouchSignal};
+    use touch_algo::electrode::{ElectrodeSignal, ElectrodeState, Params, State};
+    use touch_algo::touch::QubitTouch;
 
     // 初期化は失敗しても全チャネルを続けるので、すべての I2C がタイムアウト（3ms）しても終わる時間にする。
     // 96 キーで 16ch ×（切替＋初期化）＋ 4 台の切断 = 約 108ms
@@ -44,24 +46,27 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
     // コールバック内で使う動作モード（解析の直前に更新する）
     let current_mode = Cell::new(WorkMode::Piano);
-    let mut qt = QubitTouch::new(|status, note, velocity, _location| {
-        // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信キューに入れる
-        let status = status & 0xf0; // コマンド部分
-        // デバッグ用: PC に Note のイベントを送る
-        #[cfg(feature = "debug_stream")]
-        queue_note_event(status, note, velocity, _location);
-        let midi_channel = if current_mode.get() == WorkMode::Piano {
-            MIDI_CH_FLOW
-        } else {
-            MIDI_CH_VIOLIN
-        };
-        let status = if status == RINGLED_CMD_TX_MOVED {
-            0x80 | midi_channel // 移動イベントはNote Offとして扱う
-        } else {
-            status | midi_channel
-        };
-        queue_midi([status >> 4, status, note, velocity]);
-    });
+    let mut qt = QubitTouch::new(
+        |status, note, velocity, _location| {
+            // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信キューに入れる
+            let status = status & 0xf0; // コマンド部分
+            // デバッグ用: PC に Note のイベントを送る
+            #[cfg(feature = "debug_stream")]
+            queue_note_event(status, note, velocity, _location);
+            let midi_channel = if current_mode.get() == WorkMode::Piano {
+                MIDI_CH_FLOW
+            } else {
+                MIDI_CH_VIOLIN
+            };
+            let status = if status == STATUS_NOTE_MOVED {
+                0x80 | midi_channel // 移動イベントはNote Offとして扱う
+            } else {
+                status | midi_channel
+            };
+            queue_midi([status >> 4, status, note, velocity]);
+        },
+        [0u16; TOTAL_QT_KEYS],
+    );
 
     // スキャン周期。debug_stream では PC のコマンドで変わるので、毎周期確かめる
     let mut period_us = scan_period_us();
@@ -71,7 +76,8 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     let mut frame = 0u32;
     // 信号処理（ノイズ除去・基準値。doc/touch_baseline.md §3）。タスクの future は静的に確保されるので、
     // 96 キー分（数 KB）でもスタックは使わない
-    let mut signal = TouchSignal::new([KeyState::INITIAL; TOTAL_QT_KEYS], Params::DEFAULT);
+    let mut signal =
+        ElectrodeSignal::new([ElectrodeState::INITIAL; TOTAL_QT_KEYS], Params::DEFAULT);
     // 起動直後はチップが自身を校正しているので、この時刻までは信号処理にも解析にも渡さない
     let analysis_start_at = Instant::now() + Duration::from_millis(TOUCH_STARTUP_SETTLE_MS);
 
@@ -131,6 +137,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
                 point.store(key.output(), Ordering::Relaxed);
             }
             qt.seek_and_update_touch_point(work_mode);
+            publish_touch_state(&qt);
 
             qt.lighten_leds(|_location, _intensity| {
                 // LEDの明るさをタッチの強さに応じて変化させる
@@ -148,6 +155,25 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             ticker.reset();
         }
     }
+}
+
+/// 解析の結果を共有状態に書く: タッチ位置 ×100（未タッチは 10000）→ ringled_task・OLED、
+/// 触れているか → pressure_task、ビブラート → OLED（page 1。触れていないときは 0）
+fn publish_touch_state<F, P>(qt: &touch_algo::touch::QubitTouch<F, P>)
+where
+    F: Fn(u8, u8, u8, f32) + Clone,
+    P: AsRef<[u16]> + AsMut<[u16]>,
+{
+    for (id, slot) in [&TOUCH0, &TOUCH1, &TOUCH2, &TOUCH3].into_iter().enumerate() {
+        if let Some(tp) = qt.touch_point(id) {
+            // 触れていないときの位置は 100.0 なので 10000 になる
+            slot.store((tp.get_location() * 100.0) as i32, Ordering::Relaxed);
+        }
+    }
+    let touched = qt.is_any_touched();
+    ANY_TOUCH.store(touched, Ordering::Relaxed);
+    let vibrato = if touched { qt.vibrato() } else { 0 };
+    DEBUG_VALUE.store(vibrato as u32, Ordering::Relaxed);
 }
 
 /// 最後のスキャンの生値を DEBUG_FRAMES に入れる（待たない）。あふれたら捨てて数える
@@ -171,17 +197,18 @@ fn queue_debug_frame(read_touch: &touch::read_touch::ReadTouch, seq: u32, scan_s
 }
 
 /// Note On/Off/Moved を DEBUG_EVENTS に入れる（PC がポートを開いている間だけ。待たない）
-/// status は RINGLED_CMD_TX_ON / OFF / MOVED、location はキー位置
+/// status は STATUS_NOTE_ON / OFF / MOVED、location はキー位置
 #[cfg(feature = "debug_stream")]
 fn queue_note_event(status: u8, note: u8, velocity: u8, location: f32) {
     use crate::tasks::debug_stream::{
         EVENT_NOTE_MOVED, EVENT_NOTE_OFF, EVENT_NOTE_ON, queue_event,
     };
+    use touch_algo::touch::{STATUS_NOTE_OFF, STATUS_NOTE_ON};
 
     let kind = match status {
-        RINGLED_CMD_TX_ON => EVENT_NOTE_ON,
-        RINGLED_CMD_TX_OFF => EVENT_NOTE_OFF,
-        RINGLED_CMD_TX_MOVED => EVENT_NOTE_MOVED,
+        STATUS_NOTE_ON => EVENT_NOTE_ON,
+        STATUS_NOTE_OFF => EVENT_NOTE_OFF,
+        STATUS_NOTE_MOVED => EVENT_NOTE_MOVED,
         _ => return,
     };
     let location = (location * 100.0) as u16; // TOUCH0-3 と同じ ×100 の単位
