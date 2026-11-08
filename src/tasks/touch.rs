@@ -13,7 +13,7 @@ use crate::shared::{
 };
 use crate::tasks::midi::queue_midi;
 use crate::touch;
-use touch_algo::touch::STATUS_NOTE_MOVED;
+use touch_algo::playinfo::STATUS_NOTE_MOVED;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      Touch Task (Core1): I2C1 を専有し、スキャン → 信号処理（touch_algo）→ 解析 →
@@ -23,7 +23,8 @@ use touch_algo::touch::STATUS_NOTE_MOVED;
 pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     use core::cell::Cell;
     use touch_algo::electrode::{ElectrodeSignal, ElectrodeState, Params, State};
-    use touch_algo::touch::QubitTouch;
+    use touch_algo::playinfo::PlayInfo;
+    use touch_algo::touch::TouchTracker;
 
     // 初期化は失敗しても全チャネルを続けるので、すべての I2C がタイムアウト（3ms）しても終わる時間にする。
     // 96 キーで 16ch ×（切替＋初期化）＋ 4 台の切断 = 約 108ms
@@ -46,27 +47,26 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
     // コールバック内で使う動作モード（解析の直前に更新する）
     let current_mode = Cell::new(WorkMode::Piano);
-    let mut qt = QubitTouch::new(
-        |status, note, velocity, _location| {
-            // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信キューに入れる
-            let status = status & 0xf0; // コマンド部分
-            // デバッグ用: PC に Note のイベントを送る
-            #[cfg(feature = "debug_stream")]
-            queue_note_event(status, note, velocity, _location);
-            let midi_channel = if current_mode.get() == WorkMode::Piano {
-                MIDI_CH_FLOW
-            } else {
-                MIDI_CH_VIOLIN
-            };
-            let status = if status == STATUS_NOTE_MOVED {
-                0x80 | midi_channel // 移動イベントはNote Offとして扱う
-            } else {
-                status | midi_channel
-            };
-            queue_midi([status >> 4, status, note, velocity]);
-        },
-        [0u16; TOTAL_QT_KEYS],
-    );
+    // タッチの解析は 2 つの層: depth・position（TouchTracker）→ 演奏情報（PlayInfo）。doc/touch_analysis.md §5.6
+    let mut tracker = TouchTracker::new([0u16; TOTAL_QT_KEYS], TOUCH_RING);
+    let mut play = PlayInfo::new(|status, note, velocity, _location| {
+        // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信キューに入れる
+        let status = status & 0xf0; // コマンド部分
+        // デバッグ用: PC に Note のイベントを送る
+        #[cfg(feature = "debug_stream")]
+        queue_note_event(status, note, velocity, _location);
+        let midi_channel = if current_mode.get() == WorkMode::Piano {
+            MIDI_CH_FLOW
+        } else {
+            MIDI_CH_VIOLIN
+        };
+        let status = if status == STATUS_NOTE_MOVED {
+            0x80 | midi_channel // 移動イベントはNote Offとして扱う
+        } else {
+            status | midi_channel
+        };
+        queue_midi([status >> 4, status, note, velocity]);
+    });
 
     // スキャン周期。debug_stream では PC のコマンドで変わるので、毎周期確かめる
     let mut period_us = scan_period_us();
@@ -103,7 +103,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         #[cfg(feature = "debug_stream")]
         queue_debug_frame(&read_touch, frame, cycle_start);
 
-        // 信号処理と解析: QubitTouch と touch_algo のパラメータは 10ms 毎（8〜10ms）に呼ばれる前提なので、
+        // 信号処理と解析: TouchTracker・PlayInfo と touch_algo のパラメータは 10ms 毎（8〜10ms）に呼ばれる前提なので、
         // divider フレームに 1 回行う（20ms 周期では毎回）。起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わない
         if cycle_start >= analysis_start_at && frame.is_multiple_of(divider) {
             let analysis_start = Instant::now();
@@ -127,7 +127,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             }
             let keys = signal.keys();
             for (ch, key) in keys.iter().enumerate() {
-                qt.set_value(ch, key.output());
+                tracker.set_value(ch, key.output());
             }
             // OLED の表示用: キー 0〜5 の output
             for (point, key) in [&POINT0, &POINT1, &POINT2, &POINT3, &POINT4, &POINT5]
@@ -136,10 +136,11 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             {
                 point.store(key.output(), Ordering::Relaxed);
             }
-            qt.seek_and_update_touch_point(work_mode);
-            publish_touch_state(&qt);
+            tracker.update();
+            play.update(&tracker, work_mode);
+            publish_touch_state(&tracker, &play);
 
-            qt.lighten_leds(|_location, _intensity| {
+            tracker.lighten_leds(|_location, _intensity| {
                 // LEDの明るさをタッチの強さに応じて変化させる
                 //WHITE_LEVEL.store(intensity as u8, Ordering::Relaxed);
             });
@@ -149,7 +150,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
         // 周期を超えたときは、遅れた周期を取り戻さずに捨てる。
         // Ticker は期限を過ぎていると待たずに連続して完了するため、そのままだと
-        // QubitTouch がほぼ 0ms 間隔で呼ばれ、時間の計算が狂う
+        // タッチの解析がほぼ 0ms 間隔で呼ばれ、時間の計算が狂う
         if cycle_start.elapsed() > period {
             PERIOD_OVERRUN.fetch_add(1, Ordering::Relaxed);
             ticker.reset();
@@ -159,20 +160,22 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
 /// 解析の結果を共有状態に書く: タッチ位置 ×100（未タッチは 10000）→ ringled_task・OLED、
 /// 触れているか → pressure_task、ビブラート → OLED（page 1。触れていないときは 0）
-fn publish_touch_state<F, P>(qt: &touch_algo::touch::QubitTouch<F, P>)
-where
-    F: Fn(u8, u8, u8, f32) + Clone,
+fn publish_touch_state<F, P>(
+    tracker: &touch_algo::touch::TouchTracker<P>,
+    play: &touch_algo::playinfo::PlayInfo<F>,
+) where
+    F: Fn(u8, u8, u8, f32),
     P: AsRef<[u16]> + AsMut<[u16]>,
 {
     for (id, slot) in [&TOUCH0, &TOUCH1, &TOUCH2, &TOUCH3].into_iter().enumerate() {
-        if let Some(tp) = qt.touch_point(id) {
+        if let Some(tp) = tracker.touch_point(id) {
             // 触れていないときの位置は 100.0 なので 10000 になる
             slot.store((tp.get_location() * 100.0) as i32, Ordering::Relaxed);
         }
     }
-    let touched = qt.is_any_touched();
+    let touched = tracker.is_any_touched();
     ANY_TOUCH.store(touched, Ordering::Relaxed);
-    let vibrato = if touched { qt.vibrato() } else { 0 };
+    let vibrato = if touched { play.vibrato() } else { 0 };
     DEBUG_VALUE.store(vibrato as u32, Ordering::Relaxed);
 }
 
@@ -203,7 +206,7 @@ fn queue_note_event(status: u8, note: u8, velocity: u8, location: f32) {
     use crate::tasks::debug_stream::{
         EVENT_NOTE_MOVED, EVENT_NOTE_OFF, EVENT_NOTE_ON, queue_event,
     };
-    use touch_algo::touch::{STATUS_NOTE_OFF, STATUS_NOTE_ON};
+    use touch_algo::playinfo::{STATUS_NOTE_OFF, STATUS_NOTE_ON};
 
     let kind = match status {
         STATUS_NOTE_ON => EVENT_NOTE_ON,

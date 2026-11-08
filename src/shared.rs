@@ -30,7 +30,7 @@ pub static POINT2: AtomicU16 = AtomicU16::new(0);
 pub static POINT3: AtomicU16 = AtomicU16::new(0);
 pub static POINT4: AtomicU16 = AtomicU16::new(0);
 pub static POINT5: AtomicU16 = AtomicU16::new(0);
-// タッチ位置 ×100（0–9999）、10000 は未タッチ: touch_task (QubitTouch) → ringled_task, OLED (page 3)
+// タッチ位置 ×100（0–9999）、10000 は未タッチ: touch_task (TouchTracker) → ringled_task, OLED (page 3)
 pub static TOUCH0: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH1: AtomicI32 = AtomicI32::new(10000);
 pub static TOUCH2: AtomicI32 = AtomicI32::new(10000);
@@ -50,8 +50,8 @@ pub static WORK_MODE: AtomicU8 = AtomicU8::new(0);
 // 設定画面にいる（タッチ・圧力の基準値を補正中。センサーに触れない前提）
 // ui_task → touch_task (touch_algo の校正), pressure_task, ringled
 pub static SETTING_MODE: AtomicBool = AtomicBool::new(false);
-pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用: touch_task (QubitTouch のビブラート) → OLED (page 1)
-pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false); // touch_task (QubitTouch) → pressure_task
+pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用: touch_task (PlayInfo のビブラート) → OLED (page 1)
+pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false); // touch_task (TouchTracker) → pressure_task
 // 起動時の校正中（チップの起動待ち・touch_algo の初期取得と noise_floor の自動計測。doc/touch_baseline.md §3.12）。
 // 起動時は true で、一度 false にしたら戻さない: touch_task → OLED (page 0)
 pub static TOUCH_CALIBRATING: AtomicBool = AtomicBool::new(true);
@@ -105,7 +105,7 @@ impl TimeStat {
 }
 
 pub static SCAN_TIME: TimeStat = TimeStat::new(); // タッチのスキャン時間: touch_task
-pub static ANALYSIS_TIME: TimeStat = TimeStat::new(); // 信号処理（touch_algo）と QubitTouch の解析の時間: touch_task
+pub static ANALYSIS_TIME: TimeStat = TimeStat::new(); // 信号処理（touch_algo::electrode）とタッチの解析（touch・playinfo）の時間: touch_task
 pub static UI_DRAW_TIME: TimeStat = TimeStat::new(); // OLED の描画で 1 回に Core0 を止めた最長の時間（転送を除く）: ui_task
 // スキャン＋信号処理＋解析が周期 (scan_period_us()) を超えた回数: touch_task
 pub static PERIOD_OVERRUN: AtomicU32 = AtomicU32::new(0);

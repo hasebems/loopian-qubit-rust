@@ -4,12 +4,12 @@
 //  https://opensource.org/licenses/mit-license.php
 //
 
-// コア1のスタックサイズ。Core1 の touch_task は QubitTouch (約3.7KB)・ElectrodeSignal (96 キーで数 KB)・ReadTouch を持ち、
+// コア1のスタックサイズ。Core1 の touch_task は TouchTracker・PlayInfo（合わせて約 3.7KB）・ElectrodeSignal (96 キーで数 KB)・ReadTouch を持ち、
 // 初期化時に一時的にスタックに置かれることがあるので、余裕を持たせる
 pub const CORE1_STACK_SIZE: usize = 16384;
 
 // タッチのスキャン周期と解析周期
-// QubitTouch の時間に関する定数は 10ms 毎に呼ばれる前提なので、解析は 10ms 毎に行う。
+// TouchTracker・PlayInfo の時間に関する定数は 10ms 毎に呼ばれる前提なので、解析は 10ms 毎に行う。
 // スキャン周期を短くする場合は、analysis_divider() フレームに 1 回解析する
 // debug_stream では、チップの更新（8ms 周期）より速く読んで観察するため既定を 2ms にし、
 // PC からのコマンドで SCAN_PERIODS_US のどれかに変えられる（doc/debug_env.md §3.3）
@@ -23,7 +23,7 @@ pub const ANALYSIS_PERIOD_US: u32 = 10_000;
 const _: () = assert!(ANALYSIS_PERIOD_US.is_multiple_of(SCAN_PERIOD_US));
 
 /// 解析の間引き（何フレームに 1 回解析するか）。
-/// 周期が 10ms より長い（20ms）ときは毎フレーム解析する。このとき QubitTouch の時間の計算はずれる
+/// 周期が 10ms より長い（20ms）ときは毎フレーム解析する。このとき TouchTracker・PlayInfo の時間の計算はずれる
 pub const fn analysis_divider(scan_period_us: u32) -> u32 {
     let divider = ANALYSIS_PERIOD_US / scan_period_us;
     if divider == 0 { 1 } else { divider }
@@ -53,6 +53,8 @@ pub const AT42QT_KEYS_PER_DEVICE: usize = 6; // AT42QT1070
 pub const TOTAL_CH: usize = (PCA9544_NUM_CHANNELS * PCA9544_NUM_DEVICES) as usize;
 pub const TOTAL_QT_KEYS: usize = TOTAL_CH * AT42QT_KEYS_PER_DEVICE;
 pub const NUM_LEDS: usize = TOTAL_QT_KEYS;
+// 電極がリングに並んでいるか（最後の電極と電極 0 が隣り合う）。etude・no_pca9544 の試験用の基板は一列
+pub const TOUCH_RING: bool = !cfg!(any(feature = "etude", feature = "no_pca9544"));
 pub const RINGLED_RX_WORDS: usize = NUM_LEDS.div_ceil(32); // 受信ノート表示のビット列(1bit/LED)を格納する u32 の個数
 
 pub use touch_algo::touch::MAX_TOUCH_POINTS; // 追跡するタッチの最大数
@@ -65,5 +67,5 @@ pub const MIDI_CH_FLOW: u8 = 12;
 
 pub const MIDI_TX_TIMEOUT_MS: u64 = 20;
 
-// Work mode（ノートの決め方が変わるので、解析（touch_algo::touch）に置いている）
-pub use touch_algo::touch::WorkMode;
+// Work mode（ノートの決め方が変わるので、演奏情報の層（touch_algo::playinfo）に置いている）
+pub use touch_algo::playinfo::WorkMode;
