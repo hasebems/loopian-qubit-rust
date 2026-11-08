@@ -6,7 +6,7 @@
 
 2026-10-01 時点（`doc/task_architecture.md` のコア・タスク構成の改修の後）。本書を書いた当初（改修前）の状態は §1.2 (c) の前提として残している。
 
-> **（2026-10-03 追記）** 以下は `touch_algo` への置き換え（`doc/debug_env.md` の段階 4）の前の状態。置き換えで、チップの基準値（`set_reference()`）・`reference_adjust`・`Pad` の移動平均は無くなった。今は `read_touch` が生値と読み取り成功フラグ（`valid`）を返し、`touch_task` が `touch_algo` の `TouchSignal` で output を作って `QubitTouch` に渡す（§4）。12 スキャンに 1 回の読み直しによるスキャン時間の延びも無くなった
+> **（2026-10-03 追記）** 以下は `touch_algo` への置き換え（`doc/debug_env.md` の段階 4）の前の状態。置き換えで、チップの基準値（`set_reference()`）・`reference_adjust`・`Pad` の移動平均は無くなった。今は `read_touch` が生値と読み取り成功フラグ（`valid`）を返し、`touch_task` が `touch_algo` の `ElectrodeSignal` で output を作って `QubitTouch` に渡す（§4）。12 スキャンに 1 回の読み直しによるスキャン時間の延びも無くなった
 
 - `src/touch/read_touch.rs` は AT42QT1070 から次の 2 種類を読み、その差を入力値としている
     - Key Signal（レジスタ 4–15）: 生値
@@ -155,9 +155,9 @@
 | `stuck_min` / `stuck_max` | `u16` | 固着検出区間の filtered の最小・最大 |
 | `recovering` | `bool` | 固着からの回復中か |
 
-フィルタの履歴（キーあたり数サンプル）を合わせても、96 キーで数 KB に収まる。`TouchSignal` は Core1 の `touch_task`（静的に確保される future）の中に置くため、スタックへの影響は小さい（§4.4）。
+フィルタの履歴（キーあたり数サンプル）を合わせても、96 キーで数 KB に収まる。`ElectrodeSignal` は Core1 の `touch_task`（静的に確保される future）の中に置くため、スタックへの影響は小さい（§4.4）。
 
-実装（`crates/touch_algo` の `KeyState`）では、時刻を `Instant` ではなく u32 の µs で持ち（`Option<u32>`）、`quiet_since` も `Option<u32>` にした。ほかに初期取得の積算（`acquire_sum` / `acquire_count`）や、noise_floor を計り始めたか（`noise_measured`）を持つ（`doc/debug_env.md` §4.6）。
+実装（`crates/touch_algo` の `ElectrodeState`）では、時刻を `Instant` ではなく u32 の µs で持ち（`Option<u32>`）、`quiet_since` も `Option<u32>` にした。ほかに初期取得の積算（`acquire_sum` / `acquire_count`）や、noise_floor を計り始めたか（`noise_measured`）を持つ（`doc/debug_env.md` §4.6）。
 
 全体の状態として、次を持つ。
 
@@ -256,7 +256,8 @@ CLAUDE.md にある「設定画面ではセンサーに触れない」という�
 
 信号処理と解析は、どちらも Core1 の `touch_task` の中にある（`doc/task_architecture.md` §4.1）。受け渡しはコアをまたがず、関数呼び出しで行う。
 
-- `TouchSignal::process()` が返す `output` を、従来どおり `QubitTouch::set_value()` で渡す
+- `ElectrodeSignal::process()` が返す `output` を、従来どおり `QubitTouch::set_value()` で渡す
+- 受け取った後の解析（複数のキーから 1 つのタッチを求め、演奏情報を取り出す処理）は `doc/touch_analysis.md` で扱う
 - PC に送るデバッグ用のフレームは raw だけで、`doc/debug_env.md` の `DEBUG_FRAMES` で Core0 の送信タスクに渡す。filtered・baseline・output は PC 側で同じ `touch_algo` に通して求める（ファームの計算結果を送る PROC は見送った。`doc/debug_env.md` §6）
 
 ### 3.10 デバッグ表示
@@ -429,20 +430,22 @@ R3 の不感帯は、校正で測った noise_floor が無いと効かない（�
 | `Cargo.toml` | 依存に `touch_algo` を path で追加する |
 | `src/touch/read_touch.rs` | チップの基準値を読む処理と `reference_adjust` を削除する。全キーの raw と読み取り成功フラグ（`valid`）を返すだけにする |
 | `src/devices/at42qt.rs` | `read_6key` と `read_1key` の `reference` 引数を削除し、Key Signal（レジスタ 4〜）だけを読む |
-| `src/tasks/touch.rs` | `TouchSignal` を持ち、解析と同じ周期で `process()` を呼んで、output を `QubitTouch` に渡す。`POINT0`–`POINT5` に output を出す |
+| `src/tasks/touch.rs` | `ElectrodeSignal` を持ち、解析と同じ周期で `process()` を呼んで、output を `QubitTouch` に渡す。`POINT0`–`POINT5` に output を出す |
 | `src/touch/qtouch.rs` | `Pad` の移動平均を外す（`MAX_MOVING_AVERAGE` = 1）。`TOUCH_THRESHOLD` は実際に演奏して必要なら調整する |
 | `CLAUDE.md` | `read_touch.rs` の説明、設定画面での校正、`touch_algo` の使われ方を新方式に合わせて更新する |
 
-### 4.2 `TouchSignal`（`crates/touch_algo`）
+### 4.2 `ElectrodeSignal`（`crates/touch_algo`）
+
+（2026-11-08）`TouchSignal` を `ElectrodeSignal`、`KeyState` を `ElectrodeState` に名前を変え、`touch_algo::electrode`（`src/electrode.rs`）に移した。`QubitTouch` が同じクレートの `touch_algo::touch` に入ったため（`doc/touch_analysis.md` §7）。本書の名前も新しい名前に置き換えてある
 
 ノイズ除去・基準値の計算を I2C の読み取りから切り離した、純粋な計算のクレート（no_std）。PC アプリとファームで同じコードを使う。API は次のとおり（実装済み）。
 
 ```rust
-// K はキー毎の状態の置き場所。ファームは [KeyState; TOTAL_QT_KEYS]、PC は Vec<KeyState>
-pub struct TouchSignal<K> { pub params: Params, /* ... */ }
+// K はキー毎の状態の置き場所。ファームは [ElectrodeState; TOTAL_QT_KEYS]、PC は Vec<ElectrodeState>
+pub struct ElectrodeSignal<K> { pub params: Params, /* ... */ }
 
-impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
-    /// keys は全キー分の KeyState::INITIAL で埋めて渡す
+impl<K: AsRef<[ElectrodeState]> + AsMut<[ElectrodeState]>> ElectrodeSignal<K> {
+    /// keys は全キー分の ElectrodeState::INITIAL で埋めて渡す
     pub fn new(keys: K, params: Params) -> Self;
 
     /// 1 回分を処理する
@@ -453,7 +456,7 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
     pub fn process(&mut self, now_us: u32, raw: &[u16], valid: u128, calibrating: bool);
 
     pub fn state(&self) -> State;          // Acquiring / Running / Calibrating
-    pub fn keys(&self) -> &[KeyState];      // 結果: output()・filtered()・baseline()・delta()・noise_floor()
+    pub fn keys(&self) -> &[ElectrodeState];      // 結果: output()・filtered()・baseline()・delta()・noise_floor()
 }
 ```
 
@@ -490,7 +493,7 @@ impl<K: AsRef<[KeyState]> + AsMut<[KeyState]>> TouchSignal<K> {
 
 ### 4.4 `touch_task`
 
-- `TouchSignal<[KeyState; TOTAL_QT_KEYS]>` を `touch_task` の中に持つ（タスクの future は静的に確保されるので、スタックは使わない。96 キーで数 KB）
+- `ElectrodeSignal<[ElectrodeState; TOTAL_QT_KEYS]>` を `touch_task` の中に持つ（タスクの future は静的に確保されるので、スタックは使わない。96 キーで数 KB）
 - **`process()` を呼ぶ周期**: 解析（`QubitTouch`）と同じ、`analysis_divider()` フレームに 1 回（約 10ms 毎）とする（2026-10-03 決定）。§3.11 のパラメータ（移動平均のサンプル数など）は 8〜10ms 周期を前提にしているため。通常の構成ではスキャンが 10ms なので毎スキャンになる。`debug_stream`（スキャン 2ms）では 5 スキャンに 1 回になり、PC で間引いて見ていたのと同じ扱いになる
 - **起動直後**: `TOUCH_STARTUP_SETTLE_MS`（500ms）の間は `process()` も呼ばない（2026-10-03 決定）。チップ自身の起動時の校正（230ms 未満）が終わる前の値で初期取得しないため。500ms の後、`ACQUIRE_MS` の初期取得が終わるまで output は 0
 - `calibrating` には `SETTING_MODE` を渡す

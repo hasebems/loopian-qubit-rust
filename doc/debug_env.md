@@ -164,7 +164,7 @@ loop {
 
 最大の理由は、**アルゴリズムのコードをファームと PC で共有できる** こと。
 
-- `touch_baseline.md` §4.2 の `TouchSignal` は、I2C に触れない純粋な計算として設計している
+- `touch_baseline.md` §4.2 の `ElectrodeSignal` は、I2C に触れない純粋な計算として設計している
 - これを `no_std` の小さなクレート（`touch_algo`）に切り出し、ファームと PC アプリの両方から使う
 - PC で調整したアルゴリズムが、そのままファームで動く。移植の手間も、移植時のずれも無い
 - 固定小数点・飽和演算・整数の桁あふれなど、ファーム特有の振る舞いも PC 上で同じように再現できる
@@ -231,7 +231,7 @@ egui はフレーム毎に全体を描き直す方式（immediate mode）で、�
 
 ### 4.4 PC 側のアルゴリズム実行
 
-- 受信した（または再生した）フレームを、`touch_algo` の `TouchSignal::process()` に 1 フレームずつ通し、その結果を表示する
+- 受信した（または再生した）フレームを、`touch_algo` の `ElectrodeSignal::process()` に 1 フレームずつ通し、その結果を表示する
 - **間引き**: 2ms 周期のデータを 8ms / 10ms 周期に間引いてからアルゴリズムに通せるようにする。最終構成（96 キー）のサンプル周期で、アルゴリズムがどう振る舞うかを評価するため
 - **比較表示**: パラメータの組を 2 つ持ち、同じデータに通した結果を重ねて表示する（A/B 比較）
 
@@ -241,7 +241,7 @@ egui はフレーム毎に全体を描き直す方式（immediate mode）で、�
 loopian_qubit/
 ├── Cargo.toml              # ファーム（依存に touch_algo を path で追加）
 ├── crates/
-│   └── touch_algo/         # no_std。TouchSignal などの純粋な計算
+│   └── touch_algo/         # no_std。ElectrodeSignal などの純粋な計算
 └── tools/
     └── qubit_etude/      # PC アプリ（依存に touch_algo を path で追加）
         └── .cargo/config.toml
@@ -541,9 +541,9 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 
 **PC アプリ（段階 3 の最初の版）**（2026-10-01）
 
-- **`crates/touch_algo`**（no_std、依存なし）: `TouchSignal<K>` と `Params`・`KeyState`・`State`
-    - キー毎の状態は呼び出し側が `K: AsRef<[KeyState]> + AsMut<[KeyState]>` で渡す（ファームは `[KeyState; N]`、PC は `Vec<KeyState>`）。PC はキー数を実行時に知るため
-    - `process(now_us, raw, valid, calibrating)` を 1 スキャン毎に呼ぶ。結果は `keys()` の各 `KeyState` から `filtered()`・`baseline()`・`delta()`・`output()`・`noise_floor()`・`onset_us()` で読む
+- **`crates/touch_algo`**（no_std、依存なし）: `ElectrodeSignal<K>` と `Params`・`ElectrodeState`・`State`
+    - キー毎の状態は呼び出し側が `K: AsRef<[ElectrodeState]> + AsMut<[ElectrodeState]>` で渡す（ファームは `[ElectrodeState; N]`、PC は `Vec<ElectrodeState>`）。PC はキー数を実行時に知るため
+    - `process(now_us, raw, valid, calibrating)` を 1 スキャン毎に呼ぶ。結果は `keys()` の各 `ElectrodeState` から `filtered()`・`baseline()`・`delta()`・`output()`・`noise_floor()`・`onset_us()` で読む
     - `Params::DEFAULT` は `touch_baseline.md` §3.11 の値。hi/lo ずれの増加量（200）も `hi_lo_jump` としてパラメータにしていたが、ファームの読み直しに替えたので外した（2026-10-02）
     - 設計書から補ったこと
         - メディアンは 3 サンプルそろうまで最新の値を使う。移動平均もそろうまではある分で平均する
@@ -553,14 +553,15 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
         - output・onset は校正中も計算する
         - 6 キーでは近傍の片側は `min(NEIGHBOR_RANGE, キー数/2)` にする（リングの折り返しで同じキーを 2 度数えないため）
     - 確認: `crates/touch_algo` で `cargo build`（直下の設定で thumbv8m になり、no_std でビルドできることを確かめる）と `cargo test --target host-tuple`（テスト 9 件）
-- **`tools/qubit_etude/src/algo.rs`**（`AlgoRunner`）: Store のフレームを間引いて `TouchSignal` に通し、結果（filtered・baseline・delta・output・onset）を時刻と一緒にためる
+- **`tools/qubit_etude/src/algo.rs`**（`AlgoRunner`）: Store のフレームを間引いて `ElectrodeSignal` に通し、結果（filtered・baseline・delta・output・onset）を時刻と一緒にためる
     - Store のフレームの通し番号（`frames_total` から数える）で、どこまで通したかを覚える。Store が作り直された・キー数が変わった・パラメータや間引きを変えたときは、Store の先頭から通し直す
     - 間引き: 前に通したフレームから選んだ周期がたったフレームを通す。2ms 周期のフレームの揺れを吸収するため、±1ms の幅を持たせる
     - 校正のスイッチは、操作した時刻（そのとき最後に受け取ったフレームの時刻）を覚え、それより後のフレームから切り替える。通し直しても同じ時刻で切り替わる。接続・記録を開いたときに記録を消す。再生の「最初から」では残す
 - **画面**
     - 上段のグラフに filtered（太線）と baseline（太い点線）を重ねる
     - 下段のグラフに delta（実線）と output（破線）。`QUIET_THRESHOLD`・`ACTIVE_THRESHOLD`・onset のしきい値（noise_floor の既定値 + `ONSET_MARGIN`）を横線で、onset を菱形の印で示す。上段と時間軸・カーソルを連動させる
-    - 右側に「アルゴリズム（touch_algo）」の欄: 有効化、間引き（間引かない / 8ms / 10ms、既定 8ms）、校正のスイッチと状態、キー毎の最後の baseline・delta・output・noise_floor、パラメータ（初期値は §3.11、「既定値に戻す」）
+    - 右側の欄は「電極」「統計」「タッチ」のタブで切り替える（2026-11-08。それまでは縦に並べていて、イベントが出るたびに表示が動き見づらかった）
+    - 「電極」タブに「アルゴリズム（touch_algo）」の欄: 有効化、間引き（間引かない / 8ms / 10ms、既定 8ms）、校正のスイッチと状態、キー毎の最後の baseline・delta・output・noise_floor、パラメータ（初期値は §3.11、「既定値に戻す」）
     - 下のバー表示に output を出す（2026-10-03 から常に output）
 - **確認用のプログラム** `examples/replay_algo.rs`（`cargo run --example replay_algo -- <記録.qlog> [間引き µs]`）: 記録をアルゴリズムに通し、キー毎の baseline・filtered の p-p・delta の範囲・output の最大・onset の回数を表示する
 - **実データでの確認**（段階 2 の確認で記録した約 5.6 秒、触れていない状態、既定のパラメータ）: 8ms に間引いても間引かなくても、初期取得の後の delta は −2〜+5、output は最大 1、onset の誤記録は無し、baseline の変化は 0〜2
@@ -584,7 +585,7 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 
 - `read_touch`: チップの基準値の読み取り（`set_reference()`、`reference_adjust`、12 スキャン毎の読み直し）を削除し、生値と読み取り成功フラグを `raw()` で返すだけにした。`valid` は `debug_stream` のときだけでなく常に持つ。段階 1 の `debug_raw()`・`debug_valid` は `raw()`・`valid` にまとめた。hi/lo ずれの読み直しは今までどおり
 - `at42qt`: `read_6key`・`read_1key` の `reference` 引数を削除し、Key Signal だけを読む
-- `touch_task`: `TouchSignal<[KeyState; TOTAL_QT_KEYS]>` を持ち、起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）の後から、解析と同じ周期（`analysis_divider()` フレームに 1 回）で `process()` を呼ぶ。`calibrating` には `SETTING_MODE` を渡す。output を `QubitTouch::set_value()` と `POINT0`〜`POINT5` に渡す。`ANALYSIS_TIME` は信号処理と解析を合わせた時間になった
+- `touch_task`: `ElectrodeSignal<[ElectrodeState; TOTAL_QT_KEYS]>` を持ち、起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）の後から、解析と同じ周期（`analysis_divider()` フレームに 1 回）で `process()` を呼ぶ。`calibrating` には `SETTING_MODE` を渡す。output を `QubitTouch::set_value()` と `POINT0`〜`POINT5` に渡す。`ANALYSIS_TIME` は信号処理と解析を合わせた時間になった
 - `qtouch`: `Pad` の移動平均を外した（`MAX_MOVING_AVERAGE` = 1）。移動平均は 4 サンプルの合計で割っていなかったので、同じ感度になるよう `TOUCH_THRESHOLD` を 32 → 8 にし、`default_note_on_velocity()` も合わせた（`touch_baseline.md` §4.6）
 - `debug_stream` で送る FRAME の形式は変わらない
 - まだしていないこと: 実機での確認（`touch_baseline.md` §6.2 の F1〜F6）。96 キーの新しいハードウェアができてから行う（`hw96_check.md`）。2ms 周期での間隔の確認（§8）は行わない

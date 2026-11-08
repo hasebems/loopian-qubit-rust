@@ -5,7 +5,7 @@
 > - エラー 25（予約）は `SPAWN_DEBUG_STREAM` として使っている（`debug_stream` feature のときだけ）
 > - `task_architecture` ブランチは、そこから分けた `debug_env` ブランチにすべて含まれているので削除した（2026-10-01）。その後の改修（§4.4.1 の描画の分割など）も `debug_env` で行う
 - OLED の描画を分割した（2026-10-01、§4.4.1）。診断ページの `Drw`（`UI_DRAW_TIME`）は「描画 1 回の時間」から「1 回に Core0 を止めた最長の時間」に変わった
-- タッチの基準値をチップの基準値から `touch_algo`（`crates/touch_algo` の `TouchSignal`）に置き換えた（2026-10-03、`doc/debug_env.md` の段階 4、`doc/touch_baseline.md` §4）。`read_touch` はチップの基準値と `reference_adjust` を使わず、生値と読み取り成功フラグ（`valid`）を返すだけになった。`touch_task` はスキャンと解析の間で `TouchSignal::process()` を呼び、その output を `QubitTouch` に渡す。`POINT0`–`POINT5` はキー 0〜5 の output を出す
+- タッチの基準値をチップの基準値から `touch_algo`（`crates/touch_algo` の `ElectrodeSignal`）に置き換えた（2026-10-03、`doc/debug_env.md` の段階 4、`doc/touch_baseline.md` §4）。`read_touch` はチップの基準値と `reference_adjust` を使わず、生値と読み取り成功フラグ（`valid`）を返すだけになった。`touch_task` はスキャンと解析の間で `ElectrodeSignal::process()` を呼び、その output を `QubitTouch` に渡す。`POINT0`–`POINT5` はキー 0〜5 の output を出す
 
 
 ## 1. 目的と位置づけ
@@ -82,7 +82,7 @@ Core0 (Executor)                              Core1 (Executor)
 | 割り込み | I2C0, USB, ADC, PIO0, DMA | **I2C1**（Core1 で `new_async` を呼ぶ） |
 
 - Core1 にはタッチの処理だけを置く。スキャンした直後に同じコアで解析するので、2 つの周期のずれ（P4）が無くなり、Core0 の処理に待たされること（P6）も無くなる
-- 信号処理（`touch_algo` の `TouchSignal`。`touch_baseline.md`）も Core1 の `touch_task` の中で、スキャンと解析の間に行う（2026-10-03 実装）
+- 信号処理（`touch_algo` の `ElectrodeSignal`。`touch_baseline.md`）も Core1 の `touch_task` の中で、スキャンと解析の間に行う（2026-10-03 実装）
 - RP2350 の 2 つのコア（Cortex-M33）はどちらも FPU を持つので、`qtouch.rs` の f32 の計算を Core1 に移しても問題ない
 
 ### 3.2 タスク一覧
@@ -144,10 +144,10 @@ loop {
 - `SCAN_PERIOD_MS` の初期値は **10ms**。`QubitTouch` の中の時間の定数（`TOUCH_SAMPLE_PERIOD_SEC` = 0.01、`RELEASE_WAITING_TIME`、ベロシティ計算の 10ms tick など）は「10ms 毎に呼ばれる」ことを前提にしているため。これで改修前と同じ振る舞いになる
 - **解析する周期**: `SCAN_PERIOD_MS` を 10ms より短くする場合（デバッグ環境での 2ms など）でも、解析は 10ms 毎に行う。`ANALYSIS_DIVIDER = ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS` フレームに 1 回解析する（`ANALYSIS_PERIOD_MS` = 10）。そのため `SCAN_PERIOD_MS` は 10 の約数（1, 2, 5, 10）に限り、倍数であることをコンパイル時に確認する。3 つの定数は `constants.rs` に置く
 - **起動直後の `TOUCH_STARTUP_SETTLE_MS`（500ms）の間は、スキャンだけを行い解析しない**。改修の時点では、`read_touch` がチップの基準値を最初のスキャンの後に初めて読むので、最初のフレームは基準値 0 で引かれて全キーが大きな値になり、スキャンの直後に必ず解析する構成ではこれを確実に拾って誤ったノートを出していた（§6.1「動作チェック後の修正」）。チップ自身の校正（電源投入から 230ms 未満）と、基準値の読み直し（120ms 毎）が何度か行われるまで待つ、という理由だった
-    - （2026-10-03 追記）`touch_algo` への置き換えの後は、チップの基準値は読まない。待つ理由は、チップ自身の校正が終わる前の値で `touch_algo` が基準値を初期取得しないようにするため。この間は信号処理（`TouchSignal::process()`）も呼ばない。500ms の後、`touch_algo` の初期取得（`ACQUIRE_MS` = 300ms）が終わるまで output は 0 になる（`touch_baseline.md` §4.4）
+    - （2026-10-03 追記）`touch_algo` への置き換えの後は、チップの基準値は読まない。待つ理由は、チップ自身の校正が終わる前の値で `touch_algo` が基準値を初期取得しないようにするため。この間は信号処理（`ElectrodeSignal::process()`）も呼ばない。500ms の後、`touch_algo` の初期取得（`ACQUIRE_MS` = 300ms）が終わるまで output は 0 になる（`touch_baseline.md` §4.4）
 - 毎フレームの解析（フレーム駆動）と、`QubitTouch` の時間基準化は、`touch_baseline.md`（速さ検出）の段階で行う
 - `ReadTouch` と `QubitTouch` は同じタスクの中の構造体で、値は関数呼び出しで渡す。今の `TOUCH_RAW_DATA`（Mutex）は不要になる
-- `SETTING_MODE`（§4.5）を参照して基準値を補正する。改修の時点では `read_touch` の `reference_adjust` で従来どおり行っていた。2026-10-03 からは `TouchSignal::process()` の `calibrating` に渡し、`touch_algo` が校正（基準値の速い追従と noise_floor の計測）を行う（`touch_baseline.md` §3.7）
+- `SETTING_MODE`（§4.5）を参照して基準値を補正する。改修の時点では `read_touch` の `reference_adjust` で従来どおり行っていた。2026-10-03 からは `ElectrodeSignal::process()` の `calibrating` に渡し、`touch_algo` が校正（基準値の速い追従と noise_floor の計測）を行う（`touch_baseline.md` §3.7）
 
 **周期を超えたときの扱い**
 
@@ -296,7 +296,7 @@ src/
 ├── constants.rs       変更なし（SCAN_PERIOD_MS などを追加）
 ├── tasks/             タスク本体（1 タスク 1 ファイルを基本とする）
 │   ├── mod.rs
-│   ├── touch.rs       touch_task (Core1)。ロジックは touch/read_touch.rs, touch/qtouch.rs
+│   ├── touch.rs       touch_task (Core1)。ロジックは touch/read_touch.rs と crates/touch_algo
 │   ├── midi.rs        midi_tx_task, midi_rx_task
 │   ├── pressure.rs    pressure_task（ロジックは touch/pressure.rs）
 │   ├── ringled.rs     ringled_task（ロジックは ui/ringled.rs）
@@ -429,7 +429,7 @@ OLED を I2C0（D6 = GP0 = SDA、D7 = GP1 = SCL）に移す。詳細は `doc/hw_
     - スキャン周期を 2ms にしても、解析は 10ms 毎（`ANALYSIS_DIVIDER`）なので、`QubitTouch` の振る舞いは変わらない
 - `doc/touch_baseline.md`
     - OLED 転送の分割は不要になる
-    - 信号処理（`TouchSignal`）は `touch_task` の中で、スキャンと解析の間に入る。結果はコアをまたがず、関数呼び出しで `QubitTouch` に渡す
+    - 信号処理（`ElectrodeSignal`）は `touch_task` の中で、スキャンと解析の間に入る。結果はコアをまたがず、関数呼び出しで `QubitTouch` に渡す
     - 毎フレームの解析（フレーム駆動）と `QubitTouch` の時間基準化は、`touch_baseline.md`（速さ検出）の段階で扱う
 
 ## 8. 未決事項

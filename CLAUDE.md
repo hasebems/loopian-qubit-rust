@@ -22,10 +22,10 @@ cargo clippy --all-features -- --deny=warnings   # CI と同じ条件。push 前
 cd tools/qubit_etude && cargo run --release       # GUI
 cd tools/qubit_etude && cargo run --example probe # GUI 無しでファームとの通信を確かめる
 cd tools/qubit_etude && cargo run --example replay_algo -- 記録.qlog   # 記録を touch_algo に通して結果を表示
-cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号処理（no_std のビルドと、ホストでのテスト）
+cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号処理とタッチの解析（no_std のビルドと、ホストでのテスト）
 ```
 
-- ユニットテストは無い（no_std・実機依存）。確認は `cargo check` / clippy と実機動作で行う。PC アプリ（`tools/qubit_etude`）と `crates/touch_algo` には `cargo test` がある（プロトコルの解釈・記録ファイル・統計・信号処理）
+- ユニットテストは無い（no_std・実機依存）。確認は `cargo check` / clippy と実機動作で行う。PC アプリ（`tools/qubit_etude`）と `crates/touch_algo` には `cargo test` がある（プロトコルの解釈・記録ファイル・統計・信号処理・タッチの解析）
 - `build.rs` が `memory.x` を OUT_DIR にコピーし、`BUILD_DATE` と `BUILD_VERSION`（`Cargo.toml` の version）を環境変数として埋め込む。起動画面（OLED page 0）に表示される
 - リンカの引数（`--nmagic`・`-Tlink.x`・`-Map=output.map`）も `build.rs` から渡す（`cargo:rustc-link-arg-bins`）。`.cargo/config.toml` の rustflags には `target-cpu` だけを置く。rustflags で渡すと、新しい cargo（nightly）でリンカに届かずリンクに失敗したため
 - リンク時に `output.map` を生成する（git 管理外）
@@ -51,7 +51,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 デュアルコアで、各コアが独立した Embassy `Executor` を持つ。Core1 はタッチの処理だけ、Core0 は入出力を受け持つ（設計は `doc/task_architecture.md`）。タスクの本体は `src/tasks/`、一覧は `src/tasks/mod.rs`。
 
 **Core1**
-- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ 信号処理（`touch_algo` の `TouchSignal`。ノイズ除去・基準値）→ `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。信号処理と解析は `analysis_divider()` フレームに 1 回（`QubitTouch` と `touch_algo` の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）はチップが自身を校正しているので、信号処理にも解析にも渡さない。その後 `touch_algo` が基準値を初期取得し（300ms）、続けてキー毎のノイズ幅（noise_floor）を自動で測る間（3 秒、`doc/touch_baseline.md` §3.12）は output が 0。この間はセンサーに触れないこと（触れていたキーの noise_floor は既定値になる）。終わるまで `TOUCH_CALIBRATING` が true で、OLED の起動画面（page 0）に `Calibrating...` が点滅する。OLED の POINT 表示（キー 0〜5）は output
+- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ 信号処理（`touch_algo::electrode` の `ElectrodeSignal`。ノイズ除去・基準値）→ `touch_algo::touch` の `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。信号処理と解析は `analysis_divider()` フレームに 1 回（`QubitTouch` と `touch_algo` の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）はチップが自身を校正しているので、信号処理にも解析にも渡さない。その後 `touch_algo` が基準値を初期取得し（300ms）、続けてキー毎のノイズ幅（noise_floor）を自動で測る間（3 秒、`doc/touch_baseline.md` §3.12）は output が 0。この間はセンサーに触れないこと（触れていたキーの noise_floor は既定値になる）。終わるまで `TOUCH_CALIBRATING` が true で、OLED の起動画面（page 0）に `Calibrating...` が点滅する。OLED の POINT 表示（キー 0〜5）は output
 - I2C1 は Core1 の中で `I2c::new_async` する。embassy-rp は呼び出したコアの NVIC で割り込みを有効にするので、こうすると I2C1 の割り込みも Core1 で処理される
 
 **Core0**
@@ -81,13 +81,14 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `src/constants.rs`: キー数・MIDI チャンネル・`WorkMode`・スキャン周期など。`etude`（12 キー）・`no_pca9544`（6 キー）feature でキー数が変わる
 - `src/devices/`: I2C デバイスの最小ドライバ（`at42qt`, `pca9544`, `ssd1306`）。I2C を所有せず、呼び出し毎に `&mut I2C` を借用する
 - `src/touch/read_touch.rs`: PCA9544 の ch 切替と AT42QT の生値（Key Signal）の読み込み、hi/lo ずれの読み直し。チップの基準値は使わない。ch 順は `CH_CONVERSION`（`[0, 1, 2, 3]`、そのまま）で決まり、キー番号は読み取り順のまま（回転しない）
-- `src/touch/qtouch.rs`: タッチ位置検出・追跡（最大 4 点）、ノート変換、ベロシティ、ビブラート検出。MIDI 出力はコールバック経由
 - `src/touch/pressure.rs`: ADC の移動平均基準値（上昇 / 下降で追従率を変える）と CC11 変換テーブル。送る CC はパケットとして返し、送信はタスク側が行う
 - `src/ui/oled_display.rs`: OLED ページ描画（page 0–3 と 5（診断）を左右スイッチで巡回、4 は設定画面、10 以降はデモ）
 - `src/ui/ringled.rs`: NeoPixel の描画ロジック
 - `src/debug_protocol.rs`: `debug_stream` のパケットの組み立て。PC 側の解釈は `tools/qubit_etude/src/protocol.rs` で、形式を変えるときは両方を直す
 - `tools/qubit_etude/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
-- `crates/touch_algo/`: タッチの信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。no_std で、ファーム（`touch_task`）と PC アプリが同じコードを使う。パラメータは `Params::DEFAULT`
+- `crates/touch_algo/`: タッチの計算。no_std で、ファーム（`touch_task`）と PC アプリが同じコードを使う。電極 1 つの単位は electrode、指 1 本の単位は touch と呼ぶ（`doc/touch_analysis.md` §7.2）
+    - `electrode.rs`: 電極毎の信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。`ElectrodeSignal`、パラメータは `Params::DEFAULT`
+    - `touch.rs`: タッチ位置検出・追跡（最大 4 点）、ノート変換、ベロシティ、ビブラート検出（`doc/touch_analysis.md`）。`QubitTouch`。MIDI 出力はコールバック経由で、共有状態（`TOUCH0-3`・`ANY_TOUCH`・`DEBUG_VALUE`）は `touch_task` が結果を読んで書く。`WorkMode`・`MAX_TOUCH_POINTS` もここにあり、`constants.rs` が再公開する
 
 ## 動作モードと MIDI
 
@@ -107,6 +108,6 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - ヒープ無し。配列は固定長、static は `StaticCell`（`make_static!` マクロ）で確保する
 - Core1 のスタックは `CORE1_STACK_SIZE` = 16KB（`QubitTouch` が約 3.7KB あるため）、Core0 は `memory.x` の `_stack_size` = 8KB。大きな配列をタスク内のローカル変数に置くときはスタック量に注意する
 - 処理時間や周期超過は OLED の診断ページ（page 5）で確認できる。計測値は `shared.rs` の `SCAN_TIME` / `ANALYSIS_TIME` / `UI_DRAW_TIME`（`TimeStat`）、`PERIOD_OVERRUN`、`MIDI_TX_MAX_USED` / `MIDI_TX_OVERFLOW`
-- 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`qtouch.rs`, `pressure.rs`, `read_touch.rs`）と `touch_algo` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
+- 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
-- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）
+- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）
