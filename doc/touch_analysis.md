@@ -149,7 +149,7 @@ Note On/Off と CC は、`QubitTouch::new()` に渡したコールバックで `
     - depth = 7 電極の output の合計（§3.2）
     - position = 7 電極の重心（§3.3）。電極番号は巡回させずに `山 − 3 〜 山 + 3` のまま掛ける
         - 2026-11-08 変更: 山からの相対位置（−3〜+3）で重心を取り、山の番号に足す。リングでは 0 以上電極数未満に巡回させる（§6.1 の 3）
-    - 単発のノイズを捨てる: 山の電極が depth の 70% 以上（`SINGLE_PAD_SPIKE_RATIO_PERMILLE`）で、かつ周りの最大が山の 1/4 以下（`SINGLE_PAD_SPIKE_NEIGHBOR_DIV`）なら、候補を無効にする
+    - ~~単発のノイズを捨てる: 山の電極が depth の 70% 以上（`SINGLE_PAD_SPIKE_RATIO_PERMILLE`）で、かつ周りの最大が山の 1/4 以下（`SINGLE_PAD_SPIKE_NEIGHBOR_DIV`）なら、候補を無効にする~~（2026-11-08 に外した。§6.1 の 10）
 3. **近い候補をまとめる（`merge_close_candidates`）**: position の差が `CANDIDATE_MERGE_RANGE`（1.6 電極）以内の候補は、depth の大きい方 1 つだけを残す（position・depth は計算し直さない）
     - 2026-11-08 変更: まとめた候補の窓を合わせた範囲で計算し直す（§6.1 の 7）
 4. **前の周期のタッチと結び付ける（`collate_touch_point`）**: 候補を順に、まだこの周期で更新していない TouchPoint のうち position の最も近いものと比べ、`CLOSE_RANGE`（3 電極）以内なら同じ指が動いたとして更新する。無ければ空いている TouchPoint で新しいタッチを始め、Note On を送る
@@ -172,8 +172,8 @@ Note On/Off と CC は、`QubitTouch::new()` に渡したコールバックで `
 |---|---|---|
 | `TOUCH_THRESHOLD` | 8 | 山の output がこれより大きければ候補にする |
 | `FINGER_RANGE` | 3 | depth・position を求める片側の電極数（計 7 電極） |
-| `SINGLE_PAD_SPIKE_RATIO_PERMILLE` | 70 | 山の電極が depth のこの % 以上なら単発のノイズの候補（名前は ‰ だが % として使っている） |
-| `SINGLE_PAD_SPIKE_NEIGHBOR_DIV` | 4 | 周りの最大が山の 1/4 以下なら単発のノイズの候補 |
+| `SINGLE_PAD_SPIKE_RATIO_PERMILLE` | 70 | 山の電極が depth のこの % 以上なら単発のノイズの候補（名前は ‰ だが % として使っている）。2026-11-08 に削除（§6.1 の 10） |
+| `SINGLE_PAD_SPIKE_NEIGHBOR_DIV` | 4 | 周りの最大が山の 1/4 以下なら単発のノイズの候補。2026-11-08 に削除（§6.1 の 10） |
 | `CANDIDATE_MERGE_RANGE` | 1.6 | 同じ周期の候補をまとめる距離（電極） |
 | `CLOSE_RANGE` | 3.0 | 前の周期のタッチと同じ指とみなす距離（電極 / 10ms） |
 | `HISTERESIS` | 0.7 | ノートを切り替える position のヒステリシス（電極） |
@@ -190,7 +190,7 @@ Note On/Off と CC は、`QubitTouch::new()` に渡したコールバックで `
 | depth・position（§3） | `touch.rs` の `TouchTracker` | 1. 山を探す（`scan_pads`）→ 2. depth・position（`decide_touch_point`）→ 2.5. 候補をまとめる（`merge_close_candidates`）→ 3. 前の周期の指と結び付ける（`track_touch_points`）→ 4. 離れたかの判断（`release_touch_points`） | 電極の output、`TouchPoint`（指毎）: position・depth・継続時間と、この周期の追跡の結果 `Track`（`Started`・`Followed`・`Released`・`None`） |
 | 演奏情報（§4） | `playinfo.rs` の `PlayInfo` | 5. `Track` から Note On/Off（`perform_notes`: `note_start`・`note_follow`（→ `move_note` / `cross_seam`）・`note_release`）→ 6. 継続時間とビブラート（`update_durations_and_vibrato`） | コールバック、`Voice`（指毎）: 鳴らしているノート・offset・ノートの数・ノートの決め方（Piano / Violin）・位置の履歴（ビブラート用）。直前のノート・継続時間・離していた時間（Violin のベロシティ用） |
 
-- 定数も層で分けた。`touch.rs`: `MAX_TOUCH_POINTS`・`TOUCH_THRESHOLD`・`CLOSE_RANGE`・`FINGER_RANGE`・`RELEASE_WAITING_TIME`・`CANDIDATE_MERGE_RANGE`・`SINGLE_PAD_SPIKE_*`。`playinfo.rs`: `HISTERESIS`・`PIANO_OFFSET`・`VIOLIN_OFFSET`・`STATUS_*`・`WorkMode`・ビブラートの定数
+- 定数も層で分けた。`touch.rs`: `MAX_TOUCH_POINTS`・`TOUCH_THRESHOLD`・`CLOSE_RANGE`・`FINGER_RANGE`・`RELEASE_WAITING_TIME`・`CANDIDATE_MERGE_RANGE`（`SINGLE_PAD_SPIKE_*` は後で削除。§6.1 の 10）。`playinfo.rs`: `HISTERESIS`・`PIANO_OFFSET`・`VIOLIN_OFFSET`・`STATUS_*`・`WorkMode`・ビブラートの定数
 - `PlayInfo` が `TouchTracker` から読むのは、指毎の `track()`・`get_location()`・`last_location()`・`get_intensity()`・`touching_time()` と、電極の並び（電極数・リングか）だけ
 - 位置の履歴は演奏情報の層に移した（ビブラートを見るためのもので、depth・position には要らない）。新しいタッチ（`Started`）で今の position で埋め、`Followed` で足す
 - 5 は、始まり・動き（`Started`・`Followed`）を先に、離れた（`Released`）を後に処理する。今までの順番（結び付けで Note On・Move、その後に Note Off）と同じ
@@ -232,6 +232,15 @@ Note On/Off と CC は、`QubitTouch::new()` に渡したコールバックで `
 8. **電極による感度の違い（おそれ）**: noise_floor の他に、電極の大きさ・配線の長さ・チップ毎の違いで、同じ触れ方でも delta の大きさが電極で違う可能性がある。position の偏りになる。96 電極の基板で確かめる
 9. **depth の型（おそれ）**: depth を `i16` で足しているので、output が 7 電極平均で 4681 を超えると桁あふれする。dev ビルドでは overflow-checks で panic（エラー 55）になる。今の output（数十〜数百）では起きない
     - 2026-11-08: 6.1 の 3・7 の修正で、合計は `i32` で取り、`i16::MAX` で頭打ちにして返すようにした。桁あふれは起きないが、depth の型は `i16` のまま
+10. ~~**1 つの電極を強く触れるとタッチが消える（確実。2026-11-08 に qubit_etude のタッチのグラフで見つけた）**: `decide_touch_point` の単発のノイズを捨てる判定（§5.3 の 2）が、本当のタッチを捨てている~~
+    - 判定: 山の電極の output が窓（7 電極）の合計の 70% 以上（`SINGLE_PAD_SPIKE_RATIO_PERMILLE`）で、かつ周りの最大が山の 1/4 以下（`SINGLE_PAD_SPIKE_NEIGHBOR_DIV`）なら、候補を無効にする
+    - 指が 1 つの電極の真上にあると、山だけが大きく、隣は小さい。強く触れるほど山が伸びて、この判定に当たりやすい。output は `delta − noise_floor` なので、隣の電極は noise_floor の分だけさらに小さくなる（6.1 の 5）
+    - 候補が消えると、その周期はタッチが無いことになる。50ms（`RELEASE_WAITING_TIME`）を超えて続くと Note Off になり、判定から外れたところで Note On が出直す。ときどき出る余計な Note On/Off の原因と考えられる
+    - 記録 `qubit_20261027_211117.qlog` にも、output が `[0, 0, 0, 0, 0, 18, 2, 0, …]`（山 18、隣 2）でタッチが無いフレームがある
+    - 単発のノイズ（1 周期だけ 1 つの電極が跳ねる）は、`electrode` の中央値フィルタ（`doc/touch_baseline.md` §3.3）で、すでに時間方向に取り除いている。この判定は Arduino 版（移動平均だけだった頃）から引き継いだもので、今は要らない可能性が高い
+    - 2026-11-08 修正: 判定を外した（`SINGLE_PAD_SPIKE_RATIO_PERMILLE`・`SINGLE_PAD_SPIKE_NEIGHBOR_DIV` も削除）。例えば output が 30, 200, 30（山が合計の 77%、隣が山の 1/4 以下）は、今までタッチにならなかったが、今は depth 260・position 5.0 のタッチになる
+    - 記録 `qubit_20261027_211117.qlog` を通すと、変わったのは 1 か所だけ: 238.4 秒の Note On が 1 周期（15ms）早くなった（output 17, 4 の周期が捨てられなくなったため。ベロシティは 110 → 102、位置は 6.31 → 6.00）。これに伴い、その Note Off の時刻も 239.717 → 239.750 秒に変わった
+    - 2026-11-08 確認: qubit_etude（etude の実機）で、電極の真上を強く押してもタッチが消えないことをユーザーが確かめた。ハードウェアが Arduino 版の頃と変わり、当時の対策が悪い方向に出ていたと考えられる
 
 ### 6.2 タッチの有無・追跡（§3.5 で扱う）
 
@@ -259,7 +268,7 @@ Note On/Off と CC は、`QubitTouch::new()` に渡したコールバックで `
 
 - `Pad` の移動平均の構造（`MAX_MOVING_AVERAGE` = 1）が残っている（`doc/touch_baseline.md` §4.6）
 - `touch_count` は 1 と 3 で上書きされるだけで、使われていない（`_get_touch_count` だけ）
-- `SINGLE_PAD_SPIKE_RATIO_PERMILLE` は ‰ ではなく % として使っている
+- ~~`SINGLE_PAD_SPIKE_RATIO_PERMILLE` は ‰ ではなく % として使っている~~（判定ごと削除。§6.1 の 10）
 - `scan_pads` の `i - 1 + MAX_PADS` は `i` = 0 のときに `u16` の桁あふれになる式だが、`i` = 0 では候補にならない（`diff_before` が 0）ので通らない
 - `proper_pad()` は読むだけでも `&mut` を取る
 
@@ -338,8 +347,11 @@ Note On/Off と CC は、`QubitTouch::new()` に渡したコールバックで `
 
 ### 7.6 qubit_etude での表示（2026-11-08、手順 3）
 
-- `algo.rs`（`AlgoRunner`）: 信号処理の後、同じフレームで output を `QubitTouch` に渡して解析する（動作モードは Piano）。タッチポイント毎の (position, depth) と、出てきたイベントを時刻と一緒にためる。ファームは信号処理と解析を 10ms 毎に行うので、同じ条件にするには間引きを 10ms にする
+- `algo.rs`（`AlgoRunner`）: 信号処理の後、同じフレームで output を `QubitTouch`（今は `TouchTracker` → `PlayInfo`）に渡して解析する（動作モードは Piano）。タッチポイント毎の (position, depth) と、出てきたイベントを時刻と一緒にためる。ファームは信号処理と解析を 10ms 毎に行うので、同じ条件にするには間引きを 10ms にする
 - GUI: 右の欄の「タッチ」タブ（2026-11-08 に右の欄を「電極」「統計」「タッチ」のタブに分けた。イベントが出るたびに欄の高さが変わり見づらかったため）。OLED の Touch ページと同じく Touch1〜4 の position（触れていなければ ---）を、depth と一緒に出す。表示範囲の最後の値（一時停止中は範囲の終わり）。その下に、PC の解析が出したイベント（表示範囲、新しい順に 10 件。行数は固定で、件数が少なくても高さは変わらない）
+- GUI（2026-11-08 追加）: 下のバー表示（output）のすぐ下に、タッチのグラフ（`touch_plot`）。横軸はバー表示と同じキーの範囲で、位置もそろえる（左の［+］［−］と同じ幅をあけ、縦軸の幅 `BAR_Y_AXIS_WIDTH` を両方で同じにする）。表示範囲の最後の値（一時停止中は範囲の終わり）
+    - 触れている指毎に、position の位置に円を描く。面積は depth に比例する（半径 ∝ √depth。depth が `TOUCH_FULL_DEPTH`（200）で半径がグラフの高さの 0.45 倍）。小さすぎて見えなくならないよう、半径は 3px 以上
+    - 円は周縁ほど薄い（同じ中心の円を 16 枚、不透明度 0.15 で外から順に重ねる）。色は指の番号毎で、中心に番号（1〜4）
 - `replay_algo`: PC の解析のイベントと、記録の中のファームのイベントを並べて出す
 
 **手順 2 についての注意**: 記録 `qubit_20261027_211117.qlog` は、記録したときのパラメータ（§3.12 の 3 つの対策を切る）で通しても、ファームのイベントと一致しなかった（PC 44 件・記録 121 件。ベロシティから見て output が違う）。記録を始める前からファームが動いていて、基準値・noise_floor が出来上がっていたのに対し、PC は記録の先頭から初期取得を始めるため。手順 2 には、今のファームで**電源を入れたところから**録った記録を使う
