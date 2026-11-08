@@ -51,7 +51,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 デュアルコアで、各コアが独立した Embassy `Executor` を持つ。Core1 はタッチの処理だけ、Core0 は入出力を受け持つ（設計は `doc/task_architecture.md`）。タスクの本体は `src/tasks/`、一覧は `src/tasks/mod.rs`。
 
 **Core1**
-- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ 信号処理（`touch_algo::electrode` の `ElectrodeSignal`。ノイズ除去・基準値）→ `touch_algo::touch` の `QubitTouch` で解析 → Note On/Off を `MIDI_TX` へ、をひと続きに行う。信号処理と解析は `analysis_divider()` フレームに 1 回（`QubitTouch` と `touch_algo` の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）はチップが自身を校正しているので、信号処理にも解析にも渡さない。その後 `touch_algo` が基準値を初期取得し（300ms）、続けてキー毎のノイズ幅（noise_floor）を自動で測る間（3 秒、`doc/touch_baseline.md` §3.12）は output が 0。この間はセンサーに触れないこと（触れていたキーの noise_floor は既定値になる）。終わるまで `TOUCH_CALIBRATING` が true で、OLED の起動画面（page 0）に `Calibrating...` が点滅する。OLED の POINT 表示（キー 0〜5）は output
+- `touch_task`: I2C1 を専有。`Ticker` で `scan_period_us()`（既定は `SCAN_PERIOD_US` = 10ms）毎に、スキャン（`read_touch`）→ 信号処理（`touch_algo::electrode` の `ElectrodeSignal`。ノイズ除去・基準値）→ `touch_algo::touch` の `TouchTracker` で depth・position を求めて追跡 → `touch_algo::playinfo` の `PlayInfo` で演奏情報（Note On/Off・ビブラート）にして `MIDI_TX` へ、をひと続きに行う。信号処理と解析は `analysis_divider()` フレームに 1 回（`touch_algo` の定数が 10ms 毎の呼び出しを前提としているため）。周期を超えたら `PERIOD_OVERRUN` を数えて `ticker.reset()` し、遅れた周期を取り戻さない。起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）はチップが自身を校正しているので、信号処理にも解析にも渡さない。その後 `touch_algo` が基準値を初期取得し（300ms）、続けてキー毎のノイズ幅（noise_floor）を自動で測る間（3 秒、`doc/touch_baseline.md` §3.12）は output が 0。この間はセンサーに触れないこと（触れていたキーの noise_floor は既定値になる）。終わるまで `TOUCH_CALIBRATING` が true で、OLED の起動画面（page 0）に `Calibrating...` が点滅する。OLED の POINT 表示（キー 0〜5）は output
 - I2C1 は Core1 の中で `I2c::new_async` する。embassy-rp は呼び出したコアの NVIC で割り込みを有効にするので、こうすると I2C1 の割り込みも Core1 で処理される
 
 **Core0**
@@ -88,7 +88,9 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `tools/qubit_etude/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
 - `crates/touch_algo/`: タッチの計算。no_std で、ファーム（`touch_task`）と PC アプリが同じコードを使う。電極 1 つの単位は electrode、指 1 本の単位は touch と呼ぶ（`doc/touch_analysis.md` §7.2）
     - `electrode.rs`: 電極毎の信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。`ElectrodeSignal`、パラメータは `Params::DEFAULT`
-    - `touch.rs`: タッチ位置検出・追跡（最大 4 点）、ノート変換、ベロシティ、ビブラート検出（`doc/touch_analysis.md`）。`QubitTouch`。MIDI 出力はコールバック経由で、共有状態（`TOUCH0-3`・`ANY_TOUCH`・`DEBUG_VALUE`）は `touch_task` が結果を読んで書く。`WorkMode`・`MAX_TOUCH_POINTS` もここにあり、`constants.rs` が再公開する
+    - `touch.rs`: depth・position の層。電極の output から指 1 本の depth（output の合計）と position（重心）を求め、追跡する（最大 4 点。`doc/touch_analysis.md` §3）。`TouchTracker`。ノートは知らない。`MAX_TOUCH_POINTS` もここにあり、`constants.rs` が再公開する
+    - `playinfo.rs`: 演奏情報の層。`TouchTracker` の結果（指毎の position・depth・`Track`）から、ノート変換・Note On/Off・Move・リングのつなぎ目の扱い・ベロシティ・ビブラートを決める（§4）。`PlayInfo`。電極の output は見ない。MIDI 出力はコールバック経由。`WorkMode` もここにあり、`constants.rs` が再公開する
+    - 共有状態（`TOUCH0-3`・`ANY_TOUCH`・`DEBUG_VALUE`）は `touch_task` が両方の結果を読んで書く（2 つの層の分け方は `doc/touch_analysis.md` §5.6）
 
 ## 動作モードと MIDI
 
@@ -106,8 +108,8 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 ## コーディング上の注意
 
 - ヒープ無し。配列は固定長、static は `StaticCell`（`make_static!` マクロ）で確保する
-- Core1 のスタックは `CORE1_STACK_SIZE` = 16KB（`QubitTouch` が約 3.7KB あるため）、Core0 は `memory.x` の `_stack_size` = 8KB。大きな配列をタスク内のローカル変数に置くときはスタック量に注意する
+- Core1 のスタックは `CORE1_STACK_SIZE` = 16KB（`TouchTracker`・`PlayInfo` が合わせて約 3.7KB あるため）、Core0 は `memory.x` の `_stack_size` = 8KB。大きな配列をタスク内のローカル変数に置くときはスタック量に注意する
 - 処理時間や周期超過は OLED の診断ページ（page 5）で確認できる。計測値は `shared.rs` の `SCAN_TIME` / `ANALYSIS_TIME` / `UI_DRAW_TIME`（`TimeStat`）、`PERIOD_OVERRUN`、`MIDI_TX_MAX_USED` / `MIDI_TX_OVERFLOW`
-- 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
+- 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`・`playinfo.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
 - 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）
