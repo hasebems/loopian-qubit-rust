@@ -27,8 +27,6 @@ pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
 const INIT_VAL: f32 = 100.0; // Invalid location initially
 const RELEASE_WAITING_TIME: u32 = 5; // Number of cycles to wait before considering a touch point released
 const CANDIDATE_MERGE_RANGE: f32 = 1.6; // Merge close candidates in the same cycle
-const SINGLE_PAD_SPIKE_RATIO_PERMILLE: i16 = 70; // 周辺の何%以上の強度があれば、単発パルスと見なすか
-const SINGLE_PAD_SPIKE_NEIGHBOR_DIV: i16 = 4; // 周辺の最大強度が中心の何分の1以下なら、単発パルスと見なすか
 
 /// 電極の並び: 数と、リングかどうか（doc/touch_analysis.md §6.1 の 3・4）
 #[derive(Clone, Copy, Debug)]
@@ -369,31 +367,16 @@ where
         temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
         temp_index: &mut usize,
     ) {
+        // 1 つの電極だけが突出した候補をノイズとして捨てる判定（SINGLE_PAD_SPIKE_*）は外した（2026-11-08、
+        // doc/touch_analysis.md §6.1 の 10）。指が電極の真上を強く押したときの本当のタッチまで捨てていたため。
+        // 1 周期だけ跳ねるノイズは、electrode の中央値フィルタで時間方向に取り除いている
         let fr = FINGER_RANGE as i32;
         for tp in temp_touch_point.iter_mut().take(*temp_index) {
-            let center = tp.0 as i32;
-            let center_value = self.pad(center) as i32;
-            let max_neighbor_value = (-fr..=fr)
-                .filter(|&j| j != 0)
-                .map(|j| self.pad(center + j) as i32)
-                .max()
-                .unwrap_or(0);
-
-            let Some((position, depth)) = self.window_centroid(center, -fr, fr) else {
+            *tp = match self.window_centroid(tp.0 as i32, -fr, fr) {
+                Some((position, depth)) => (tp.0, position, depth),
                 // 無効なタッチポイント（sum=0だった場合）は初期値のままにする
-                *tp = (tp.0, INIT_VAL, 0);
-                continue;
+                None => (tp.0, INIT_VAL, 0),
             };
-            // 単発パルス対策: 中心1電極が過度に支配的で近傍が弱い候補は無効化する
-            let center_dominant =
-                center_value * 100 >= depth as i32 * SINGLE_PAD_SPIKE_RATIO_PERMILLE as i32;
-            let weak_neighbors =
-                max_neighbor_value * SINGLE_PAD_SPIKE_NEIGHBOR_DIV as i32 <= center_value;
-            if center_dominant && weak_neighbors {
-                *tp = (tp.0, INIT_VAL, 0);
-                continue;
-            }
-            *tp = (tp.0, position, depth);
         }
     }
     /// 同一周期内で近接した候補を1つに統合する（doc/touch_analysis.md §6.1 の 7）。
@@ -615,6 +598,21 @@ mod tests {
         assert_eq!(tp.get_location(), INIT_VAL);
         assert_eq!(tp.last_location(), 5.0);
         assert!(!tracker.is_any_touched());
+    }
+
+    /// 1 つの電極だけが突出していても（指が電極の真上を強く押した）、タッチになる（§6.1 の 10）
+    #[test]
+    fn dominant_single_electrode_is_a_touch() {
+        let mut tracker = TouchTracker::new([0, 0, 0, 0, 30, 200, 30, 0, 0, 0, 0, 0u16], false);
+        tracker.update();
+        let tp = tracker.touch_point(0).unwrap();
+        assert!(tp.is_touched());
+        assert_eq!(tp.get_intensity(), 260);
+        assert_eq!(tp.get_location(), 5.0);
+        // 記録にあった形（山 18、隣 2）
+        let mut tracker = TouchTracker::new([0, 0, 0, 0, 0, 18, 2, 0, 0, 0, 0, 0u16], false);
+        tracker.update();
+        assert!(tracker.touch_point(0).unwrap().is_touched());
     }
 
     /// 頂上が平らな山も 1 つの山になる（§6.1 の 1）。候補は頂上の中央（偶数個なら小さい側）
