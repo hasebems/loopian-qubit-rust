@@ -53,6 +53,9 @@ pub struct Params {
     pub quiet_adapt: bool,
     /// 起動時に noise_floor を自動で測る時間（初期取得の後。0 なら測らない。§3.12）
     pub auto_calib_ms: u32,
+    /// Running の間の noise_floor の常時更新（§3.12）で、下げる判断をする窓の長さ。
+    /// 窓の中の |delta| の最大より大きければ、窓の終わりに 1 下げる
+    pub noise_track_window_ms: u32,
 }
 
 impl Params {
@@ -79,6 +82,8 @@ impl Params {
         fall_deadband: true,
         quiet_adapt: true,
         auto_calib_ms: 3000,
+        // 境目のノイズは数百 ms〜数秒の間隔でまとまって出るので、それを 1〜2 回は捉えられる長さ
+        noise_track_window_ms: 5000,
     };
 }
 
@@ -123,8 +128,9 @@ pub struct ElectrodeState {
     acquire_sum: u32,
     acquire_count: u32,
     noise_floor: u16,
-    noise_measured: bool, // 校正で noise_floor を計り始めたか
-    noise_over: bool,     // 校正で |delta| が noise_floor_max を超えたか（触れられていた）
+    noise_measured: bool,  // 校正で noise_floor を計り始めたか
+    noise_over: bool,      // 校正で |delta| が noise_floor_max を超えたか（触れられていた）
+    noise_window_max: u16, // 常時更新（§3.12）: 今の窓の中の |delta| の最大
     quiet_since: Option<u32>,
     neg_since: Option<u32>,
     stuck_since: Option<u32>, // 静かでなくなった時刻（固着検出用）
@@ -154,6 +160,7 @@ impl ElectrodeState {
         noise_floor: 0,
         noise_measured: false,
         noise_over: false,
+        noise_window_max: 0,
         quiet_since: None,
         neg_since: None,
         stuck_since: None,
@@ -254,8 +261,9 @@ pub struct ElectrodeSignal<K> {
     pub params: Params,
     state: State,
     started: bool,
-    state_since: u32, // 今の状態に入った時刻
-    last_update: u32, // 基準値を最後に更新した時刻
+    state_since: u32,        // 今の状態に入った時刻
+    last_update: u32,        // 基準値を最後に更新した時刻
+    noise_window_since: u32, // noise_floor の常時更新（§3.12）の今の窓が始まった時刻
     prev_calibrating: bool,
 }
 
@@ -269,6 +277,7 @@ impl<K: AsRef<[ElectrodeState]> + AsMut<[ElectrodeState]>> ElectrodeSignal<K> {
             started: false,
             state_since: 0,
             last_update: 0,
+            noise_window_since: 0,
             prev_calibrating: false,
         }
     }
@@ -351,6 +360,7 @@ impl<K: AsRef<[ElectrodeState]> + AsMut<[ElectrodeState]>> ElectrodeSignal<K> {
 
                 if self.state == State::Running {
                     self.track_running_conditions(now_us);
+                    self.track_noise_floor(now_us);
                 }
                 if elapsed_ms(self.last_update) >= params.baseline_update_interval_ms {
                     let interval_us = now_us.wrapping_sub(self.last_update);
@@ -373,6 +383,11 @@ impl<K: AsRef<[ElectrodeState]> + AsMut<[ElectrodeState]>> ElectrodeSignal<K> {
         self.state = state;
         self.state_since = now_us;
         self.last_update = now_us;
+        // noise_floor の常時更新の窓は、Running に入ったところから数え直す
+        self.noise_window_since = now_us;
+        for key in self.keys.as_mut().iter_mut() {
+            key.noise_window_max = 0;
+        }
     }
 
     /// 校正（設定画面 / 起動時の自動計測）に入る: noise_floor を測り直し、固着検出の追跡を解除する
@@ -476,6 +491,37 @@ impl<K: AsRef<[ElectrodeState]> + AsMut<[ElectrodeState]>> ElectrodeSignal<K> {
                 key.stuck_since = None;
                 key.recovering = false;
             }
+        }
+    }
+
+    /// noise_floor の常時更新（§3.12、2026-11-11）。Running の間、毎スキャン行う。
+    /// 指の有無は見ない（離した直後・R2 との関係も特に扱わない）
+    /// - 上げる: 負の側の振れ（−delta）が今の noise_floor を超えたら、すぐにその値にする（上限 `noise_floor_max`）。
+    ///   指が触れても delta は負にならないので、指で上がることは無い
+    /// - 下げる: 窓（`noise_track_window_ms`）の終わりに、窓の中の |delta| の最大より大きければ 1 下げる。
+    ///   負の側だけで下げると、基準値がノイズの真ん中より少し下に落ち着いたとき（例: delta が −5〜+7）、
+    ///   noise_floor が負の側の振れまで下がり、正の側の振れとの差が output に残るため、両側を見る。
+    ///   指が触れた窓は |delta| が大きいので下げない（下げるのが遅れるだけ）
+    fn track_noise_floor(&mut self, now_us: u32) {
+        let params = self.params;
+        let window_end = params.noise_track_window_ms > 0
+            && now_us.wrapping_sub(self.noise_window_since) / 1000 >= params.noise_track_window_ms;
+        for key in self.keys.as_mut().iter_mut() {
+            if key.valid && key.has_baseline {
+                let neg = (-key.delta).clamp(0, params.noise_floor_max as i32) as u16;
+                key.noise_floor = key.noise_floor.max(neg);
+                let abs = key.delta.unsigned_abs().min(u16::MAX as u32) as u16;
+                key.noise_window_max = key.noise_window_max.max(abs);
+            }
+            if window_end {
+                if key.noise_floor > key.noise_window_max {
+                    key.noise_floor -= 1;
+                }
+                key.noise_window_max = 0;
+            }
+        }
+        if window_end {
+            self.noise_window_since = now_us;
         }
     }
 
@@ -791,6 +837,47 @@ mod tests {
             sim.key(2).noise_floor(),
             Params::DEFAULT.noise_floor_default
         );
+    }
+
+    #[test]
+    fn noise_floor_follows_noise_while_running() {
+        // 起動時の計測の間は静かで、後からノイズが出始めた（3 秒の計測で捉えられなかった）
+        let mut sim = Sim::with_params(BOUNDARY);
+        sim.run([900; N], 4000, false);
+        assert_eq!(sim.signal.state(), State::Running);
+        assert!(sim.key(1).noise_floor() <= 1);
+        let mut max_output = 0;
+        for i in 0..300 {
+            sim.run(noisy(i), 64, false);
+            if i >= 50 {
+                max_output = max_output.max(sim.key(1).output());
+            }
+        }
+        // 常時の更新で noise_floor が上がり、output が 0 に戻る
+        let nf = sim.key(1).noise_floor();
+        assert!((5..=12).contains(&nf), "{nf}");
+        assert_eq!(max_output, 0);
+        assert!(sim.key(0).noise_floor() <= 1);
+
+        // ノイズが止むと、窓毎に 1 ずつ下がる
+        sim.run([900; N], 20_000, false);
+        let lowered = sim.key(1).noise_floor();
+        assert!(lowered < nf && lowered + 5 >= nf, "{nf} → {lowered}");
+        sim.run([900; N], 60_000, false);
+        assert!(sim.key(1).noise_floor() <= 1);
+    }
+
+    #[test]
+    fn touch_does_not_raise_noise_floor() {
+        let mut sim = Sim::with_params(BOUNDARY);
+        sim.run([900; N], 4000, false);
+        let before = sim.key(2).noise_floor();
+        let mut raw = [900; N];
+        raw[2] = 1000;
+        sim.run(raw, 3000, false);
+        // 触れている間は上がらず、下がりもしない（|delta| が大きい窓では下げない）
+        assert_eq!(sim.key(2).noise_floor(), before);
+        assert_eq!(sim.key(2).output(), 100 - before);
     }
 
     #[test]
