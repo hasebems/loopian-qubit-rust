@@ -202,6 +202,25 @@ qubit_etude で、1 本と 2 本の判断の境目で、派手に往復が起き
 - テスト: `close_segments_are_merged`・`one_finger_splits_only_beyond_split_distance`・`two_fingers_merge_only_within_merge_distance`・`close_fingers_do_not_flicker`（§3.7.1 の例）、`ring_segment_at_seam_is_one` につなぎ目の両側の区間を足した。`strongest_segment_is_kept_when_many` は、区間がまとまらない間隔に直した
 - 確認: §3.7.1 の例は、1 本（position 4.86）のまま Move も出なくなった。記録 3 本を `replay_algo` に通したイベントは、区間を入れた直後（§3.4・3.5 の実装）と同じ（どの記録にも、近い 2 本の指の場面が無いため）
 
+### 3.8 時間は実時間で数える（2026-11-13 決定）
+
+**タッチの層と演奏情報の層の時間は、解析の周期の数ではなく、実時間（µs）で数える。** 解析が 10ms 毎に呼ばれなくても（96 キーでスキャンが 10ms を超える、`hw96_check.md` §2.1）、時間の感覚がずれないようにする。変わるのは時間の分解能だけになる。
+
+- `TouchTracker::update` に今の時刻（µs）を渡す。`PlayInfo` は、`TouchTracker` が持つ最後の時刻を使う。時刻は u32 の µs（約 71 分で一周）で、差は `wrapping_sub` で求める
+- 実時間にするもの:
+    - `touch.rs`: 指を保持する時間（`RELEASE_WAITING_TIME` 5 周期 → `RELEASE_WAITING_US` 50ms。最後に見つけてから 50ms を超えたら離れたとする。10ms 毎なら今と同じ）
+    - `playinfo.rs`: Note On までの経過（周期の数 → µs）、上限の時間（`NOTE_ON_TIMEOUT_CYCLES` 30 → `NOTE_ON_TIMEOUT_US` 300ms）、ベロシティの補間（経過の µs で線形）。ビブラートの周波数（`TOUCH_SAMPLE_PERIOD_SEC` 10ms の決め打ち → 位置の履歴の各サンプルの時刻から、履歴の長さを求める）
+- サンプルの数のままにするもの: `electrode` の中央値フィルタ（3 サンプル）と平滑化（`smooth_samples`）。ノイズ除去の効き方はサンプルの数で決まる性質のため。`electrode` の時間のパラメータ（基準値の更新の間隔・初期取得・noise_floor の計測など）は、もともと時刻で数えている
+- 10ms 毎に呼ばれる限り、出るイベントは今と同じになるはず。記録を `replay_algo` に通して確かめる
+
+実装（2026-11-13）:
+
+- `TouchTracker::update(now_us)`・`TouchTracker::now_us()`。`TouchPoint` は周期の数（`touching_time`・`no_update_time`）の代わりに、最後に見つけた時刻（`last_seen_us`）を持ち、`now_us − last_seen_us > RELEASE_WAITING_US`（50ms）で離れたとする。`TouchPoint::touching_time()` は使われていなかったので消した
+- `PlayInfo`: `Voice` は指を検出した時刻（`onset_start_us`）を持ち、経過は時刻の差。`NOTE_ON_TIMEOUT_US`（300ms）、`onset_velocity(経過の µs)`。位置の履歴に各サンプルの時刻（`history_time_us`）を持たせ、ビブラートの周波数は履歴の最も古いサンプルから最も新しいサンプルまでの実時間で求める（`TOUCH_SAMPLE_PERIOD_SEC` は消した）
+- 呼び出し側: ファームは `cycle_start`（スキャンを始めた時刻。`signal.process` と同じ）、qubit_etude はフレームの時刻を渡す
+- テスト: `release_waits_real_time`（5・10・20・30ms 毎に呼んでも、最後に見つけてから 50ms を超えた最初の解析で離れる）、`velocity_follows_real_time`（10・30・50ms 毎に呼んでも、150ms で届けばベロシティは同じ 65）
+- 記録を `replay_algo`（間引き 10ms）に通した結果は、ほぼ同じ。違いは 3 か所で、記録のフレームが約 4.7ms 毎のため、間引いた解析の間隔が 9.4〜14ms に揺れることによる（周期の数で数えていたときは、その揺れの分だけ実時間とずれていた）: `qubit_20261027_211117.qlog` のベロシティ 91 → 90、Note Off が 9ms 早い（5 周期の保持が 50ms より長かった）。`qubit_20261111_225627.qlog` の上限の時間の Note On が 13ms 遅い（30 周期が 300ms より短かった）
+
 ## 4. 演奏情報の取り出し
 
 （第一の目標が決まってから検討する）

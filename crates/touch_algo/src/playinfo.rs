@@ -9,7 +9,8 @@
 //! Note On/Off・Move・ビブラートなどの演奏情報を作り、コールバックで出す（`PlayInfo`）。
 //! 電極の output は見ない。リングのつなぎ目での扱いはここで決める（§4.1）
 //!
-//! - 10ms 毎に、`TouchTracker::update` の後で `update` を呼ぶ前提（`TOUCH_SAMPLE_PERIOD_SEC` など）
+//! - `TouchTracker::update` の後で `update` を呼ぶ。時間は周期の数ではなく実時間で数える（`TouchTracker::now_us`。
+//!   doc/touch_analysis.md §3.8）。10ms 毎を想定しているが、間隔が延びても時間の感覚はずれない
 //! - 共有状態（ファームの `TOUCH0-3`・`ANY_TOUCH` など）には書かない。呼び出し側が読んで書く
 //! - 動作モード（Piano / Violin）は 2026-11-13 に無くした。今は Violin の形（電極 2 つで 1 ノート）だけ。
 //!   Piano の処理は後で足す
@@ -40,17 +41,16 @@ pub const NOTE_ON_DEPTH: i16 = 70;
 /// NOTE_ON_DEPTH に届かずに depth が下がったとき、それまでの最大の depth がこれを超えていれば「はじいた」として
 /// 速いベロシティで Note On を出す。超えていなければ（かすっただけ）、消えても何も出さない
 pub const FLICK_DEPTH: i16 = 50;
-/// NOTE_ON_DEPTH に届かず、下がりもしないまま（軽く触れたまま）この周期数が過ぎたら、遅いベロシティで Note On（300ms）
-pub const NOTE_ON_TIMEOUT_CYCLES: u32 = 30;
+/// NOTE_ON_DEPTH に届かず、下がりもしないまま（軽く触れたまま）この時間（µs）が過ぎたら、遅いベロシティで Note On
+pub const NOTE_ON_TIMEOUT_US: u32 = 300_000;
 /// 指を検出した周期（経過 0）のベロシティ。はじいたときもこれ
 pub const VELOCITY_FAST: u8 = 100;
-/// NOTE_ON_TIMEOUT_CYCLES のベロシティ。その間は時間で線形に補間する
+/// NOTE_ON_TIMEOUT_US のベロシティ。その間は時間で線形に補間する
 pub const VELOCITY_SLOW: u8 = 30;
 /// Move（指が動いてノートが変わった）の Note On のベロシティ。固定（2026-11-13、ユーザー）
 pub const VELOCITY_MOVE: u8 = 50;
 
 const HISTORY_SIZE: usize = 128; // Number of past locations
-const TOUCH_SAMPLE_PERIOD_SEC: f32 = 0.01; // 10ms tick
 const FEW_HZ_MIN: f32 = 1.5;
 const FEW_HZ_MAX: f32 = 8.0;
 const OSC_MIN_PEAK_TO_PEAK: f32 = 0.3;
@@ -100,12 +100,13 @@ fn note_from_location(crnt_note: u8, location: f32, layout: Layout) -> Result<u8
     note_from_position(crnt_note, location, note_slots(layout), layout.ring)
 }
 
-/// 指を検出してからの周期数から、Note On のベロシティを決める（§4.2）。
-/// 0 で VELOCITY_FAST、NOTE_ON_TIMEOUT_CYCLES 以上で VELOCITY_SLOW、その間は線形（四捨五入）
-fn onset_velocity(elapsed: u32) -> u8 {
-    let t = elapsed.min(NOTE_ON_TIMEOUT_CYCLES);
-    let span = (VELOCITY_FAST - VELOCITY_SLOW) as u32;
-    let down = (span * t + NOTE_ON_TIMEOUT_CYCLES / 2) / NOTE_ON_TIMEOUT_CYCLES;
+/// 指を検出してからの時間（µs）から、Note On のベロシティを決める（§4.2）。
+/// 0 で VELOCITY_FAST、NOTE_ON_TIMEOUT_US 以上で VELOCITY_SLOW、その間は線形（四捨五入）
+fn onset_velocity(elapsed_us: u32) -> u8 {
+    let t = elapsed_us.min(NOTE_ON_TIMEOUT_US) as u64;
+    let span = (VELOCITY_FAST - VELOCITY_SLOW) as u64;
+    let timeout = NOTE_ON_TIMEOUT_US as u64;
+    let down = (span * t + timeout / 2) / timeout;
     VELOCITY_FAST - down as u8
 }
 
@@ -125,54 +126,59 @@ enum VoiceState {
 struct Voice {
     note: Option<u8>, // 鳴らしているノート（0〜ノートの数−1、NOTE_OFFSET を足す前）。None は鳴らしていない
     state: VoiceState,
-    elapsed: u32, // 指を検出してからの周期数（測定中だけ数える。保持している周期も含む）
-    max_depth: i16, // 測定中の、それまでの最大の depth
-    prev_depth: i16, // 測定中の、前の周期の depth（下がったかを見る）
-    velocity: u8, // Note On のベロシティ（つなぎ目を越えたときの Note On も同じ値を使う）
-    history_idx: usize, // Store the last index for each touch point
+    onset_start_us: u32, // 指を検出した時刻（測定中の経過を求める）
+    max_depth: i16,      // 測定中の、それまでの最大の depth
+    prev_depth: i16,     // 測定中の、前の周期の depth（下がったかを見る）
+    velocity: u8,        // Note On のベロシティ（つなぎ目を越えたときの Note On も同じ値を使う）
+    history_idx: usize,  // Store the last index for each touch point
     location_history: [f32; HISTORY_SIZE], // Store past locations for each possible note
+    history_time_us: [u32; HISTORY_SIZE], // location_history の各サンプルの時刻（ビブラートの周波数を求める）
 }
 
 impl Voice {
     const INITIAL: Self = Voice {
         note: None,
         state: VoiceState::Idle,
-        elapsed: 0,
+        onset_start_us: 0,
         max_depth: 0,
         prev_depth: 0,
         velocity: VELOCITY_FAST,
         history_idx: 0,
         location_history: [0f32; HISTORY_SIZE],
+        history_time_us: [0; HISTORY_SIZE],
     };
     /// 新しいタッチで、履歴を今の位置で埋める。Voice は使い回すので、前のタッチの位置が残らないようにする
     /// （doc/touch_analysis.md §6.3 の 3）。履歴が平らなので、動くまではビブラートにならない
-    fn reset_history(&mut self, location: f32) {
+    fn reset_history(&mut self, location: f32, now_us: u32) {
         self.location_history = [location; HISTORY_SIZE];
+        self.history_time_us = [now_us; HISTORY_SIZE];
         self.history_idx = 0;
     }
-    fn push_history(&mut self, location: f32) {
+    fn push_history(&mut self, location: f32, now_us: u32) {
         self.location_history[self.history_idx] = location;
+        self.history_time_us[self.history_idx] = now_us;
         self.history_idx = (self.history_idx + 1) % HISTORY_SIZE;
     }
     /// 新しい指: 測定中から始める
-    fn start_onset(&mut self, location: f32, depth: i16) {
-        self.reset_history(location);
+    fn start_onset(&mut self, location: f32, depth: i16, now_us: u32) {
+        self.reset_history(location, now_us);
         self.state = VoiceState::Onset;
-        self.elapsed = 0;
+        self.onset_start_us = now_us;
         self.max_depth = depth;
         self.prev_depth = depth;
     }
     /// 測定中に、この周期に測った depth で Note On を出すか決める（doc/touch_analysis.md §4.2）。
     /// 出すならベロシティを返す
     /// - depth が NOTE_ON_DEPTH を超えた: かかった時間で決める（`onset_velocity`）
-    /// - NOTE_ON_TIMEOUT_CYCLES が過ぎた（軽く触れたまま）: 同じく時間で決める（VELOCITY_SLOW になる）
+    /// - NOTE_ON_TIMEOUT_US が過ぎた（軽く触れたまま）: 同じく時間で決める（VELOCITY_SLOW になる）
     /// - 前の周期より下がり、それまでの最大が FLICK_DEPTH を超えている（はじいた）: VELOCITY_FAST
-    fn onset(&mut self, depth: i16) -> Option<u8> {
+    fn onset(&mut self, depth: i16, now_us: u32) -> Option<u8> {
         let fell = depth < self.prev_depth;
         self.prev_depth = depth;
         self.max_depth = self.max_depth.max(depth);
-        if depth > NOTE_ON_DEPTH || self.elapsed >= NOTE_ON_TIMEOUT_CYCLES {
-            Some(onset_velocity(self.elapsed))
+        let elapsed_us = now_us.wrapping_sub(self.onset_start_us);
+        if depth > NOTE_ON_DEPTH || elapsed_us >= NOTE_ON_TIMEOUT_US {
+            Some(onset_velocity(elapsed_us))
         } else if fell && self.max_depth > FLICK_DEPTH {
             Some(VELOCITY_FAST)
         } else {
@@ -230,7 +236,10 @@ impl Voice {
             return None;
         }
 
-        let duration_sec = (HISTORY_SIZE as f32 - 1.0) * TOUCH_SAMPLE_PERIOD_SEC;
+        // 履歴の長さ: 最も古いサンプル（次に書く位置）から最も新しいサンプルまでの実時間
+        let oldest = self.history_time_us[self.history_idx];
+        let newest = self.history_time_us[(self.history_idx + HISTORY_SIZE - 1) % HISTORY_SIZE];
+        let duration_sec = newest.wrapping_sub(oldest) as f32 / 1_000_000.0;
         if duration_sec <= 0.0 {
             return None;
         }
@@ -311,28 +320,25 @@ where
         P: AsRef<[u16]> + AsMut<[u16]>,
     {
         let tps = touch.touch_points();
+        let now_us = touch.now_us();
         for (i, tp) in tps.iter().enumerate() {
             let location = tp.get_location();
             let voice = &mut self.voices[i];
             let velocity = match (tp.track(), voice.state) {
                 (Track::Started, _) => {
-                    voice.start_onset(location, tp.get_intensity());
-                    voice.onset(tp.get_intensity())
+                    voice.start_onset(location, tp.get_intensity(), now_us);
+                    voice.onset(tp.get_intensity(), now_us)
                 }
                 (Track::Followed, VoiceState::Onset) => {
-                    voice.push_history(location);
-                    voice.elapsed = voice.elapsed.saturating_add(1);
-                    voice.onset(tp.get_intensity())
+                    voice.push_history(location, now_us);
+                    voice.onset(tp.get_intensity(), now_us)
                 }
                 (Track::Followed, VoiceState::Sounding) => {
-                    voice.push_history(location);
+                    voice.push_history(location, now_us);
                     self.note_follow(i, location, layout);
                     None
                 }
-                (Track::None, VoiceState::Onset) if tp.is_touched() => {
-                    voice.elapsed = voice.elapsed.saturating_add(1);
-                    voice.onset_lost()
-                }
+                (Track::None, VoiceState::Onset) if tp.is_touched() => voice.onset_lost(),
                 _ => None,
             };
             if let Some(velocity) = velocity {
@@ -458,6 +464,9 @@ mod tests {
 
     type Log = RefCell<Vec<(u8, u8, u8)>>; // (status, note, velocity)
 
+    /// テストの解析の間隔（10ms）
+    const PERIOD_US: u32 = 10_000;
+
     /// 1 周期分の output を置いて、depth・position の層 → 演奏情報の層の順に解析する
     fn step<F, P>(tracker: &mut TouchTracker<P>, play: &mut PlayInfo<F>, values: &[(usize, u16)])
     where
@@ -470,7 +479,7 @@ mod tests {
         for &(k, v) in values {
             tracker.set_value(k, v);
         }
-        tracker.update();
+        tracker.update(tracker.now_us() + PERIOD_US);
         play.update(tracker);
     }
 
@@ -517,21 +526,21 @@ mod tests {
             step(&mut tracker, &mut play, &[(4, 20 + t * 3)]); // 20 → 62
         }
         assert!(log.borrow().is_empty());
-        step(&mut tracker, &mut play, &[(4, 80)]); // 経過 15 周期
+        step(&mut tracker, &mut play, &[(4, 80)]); // 経過 15 周期 = 150ms
         assert_eq!(
             log.borrow().as_slice(),
-            &[(STATUS_NOTE_ON, 2 + NOTE_OFFSET, onset_velocity(15))]
+            &[(STATUS_NOTE_ON, 2 + NOTE_OFFSET, onset_velocity(150_000))]
         );
-        assert_eq!(onset_velocity(15), 65);
+        assert_eq!(onset_velocity(150_000), 65);
     }
 
-    /// 軽く触れたまま: NOTE_ON_DEPTH に届かず下がりもしなければ、NOTE_ON_TIMEOUT_CYCLES で VELOCITY_SLOW
+    /// 軽く触れたまま: NOTE_ON_DEPTH に届かず下がりもしなければ、NOTE_ON_TIMEOUT_US で VELOCITY_SLOW
     #[test]
     fn light_touch_times_out_slow() {
         let log: Log = RefCell::new(Vec::new());
         let mut tracker = TouchTracker::new([0u16; 12], false);
         let mut play = PlayInfo::new(logger(&log));
-        for _ in 0..NOTE_ON_TIMEOUT_CYCLES {
+        for _ in 0..NOTE_ON_TIMEOUT_US / PERIOD_US {
             step(&mut tracker, &mut play, &[(4, 30)]);
         }
         assert!(log.borrow().is_empty());
@@ -615,13 +624,41 @@ mod tests {
         );
     }
 
-    /// ベロシティは、経過 0 で VELOCITY_FAST、NOTE_ON_TIMEOUT_CYCLES 以上で VELOCITY_SLOW、その間は線形
+    /// ベロシティは、経過 0 で VELOCITY_FAST、NOTE_ON_TIMEOUT_US 以上で VELOCITY_SLOW、その間は線形
     #[test]
     fn onset_velocity_is_linear() {
         assert_eq!(onset_velocity(0), VELOCITY_FAST);
-        assert_eq!(onset_velocity(15), 65);
-        assert_eq!(onset_velocity(NOTE_ON_TIMEOUT_CYCLES), VELOCITY_SLOW);
-        assert_eq!(onset_velocity(1000), VELOCITY_SLOW);
+        assert_eq!(onset_velocity(150_000), 65);
+        assert_eq!(onset_velocity(NOTE_ON_TIMEOUT_US), VELOCITY_SLOW);
+        assert_eq!(onset_velocity(u32::MAX), VELOCITY_SLOW);
+    }
+
+    /// 解析の間隔が 10ms でなくても、ベロシティは実時間で決まる（§3.8）。
+    /// 30ms・50ms 毎に呼んでも、150ms で NOTE_ON_DEPTH を超えればベロシティは 10ms 毎と同じ
+    #[test]
+    fn velocity_follows_real_time() {
+        fn run(period_us: u32) -> u8 {
+            let log: Log = RefCell::new(Vec::new());
+            let mut tracker = TouchTracker::new([0u16; 12], false);
+            let mut play = PlayInfo::new(logger(&log));
+            let mut now = 0;
+            let mut put = |v: u16| {
+                tracker.set_value(4, v);
+                now += period_us;
+                tracker.update(now);
+                play.update(&tracker);
+            };
+            let steps = 150_000 / period_us;
+            for t in 0..steps {
+                put(20 + (t as u16) * 40 / steps as u16); // 20 → 60（NOTE_ON_DEPTH 以下）
+            }
+            put(80); // 150ms で超える
+            let v = log.borrow()[0].2;
+            v
+        }
+        assert_eq!(run(10_000), 65);
+        assert_eq!(run(30_000), 65);
+        assert_eq!(run(50_000), 65);
     }
 
     /// リングでつなぎ目を越えたら、Move せず、Note Off → Note On でノートが変わる（§4.1）
@@ -680,9 +717,16 @@ mod tests {
             play.set_vibrato_enabled(enabled);
             step(&mut tracker, &mut play, &finger(center, 12));
             let base = tracker.touch_point(0).unwrap().get_location();
-            for (k, h) in play.voices[0].location_history.iter_mut().enumerate() {
+            // 10ms 毎のサンプルで、最も新しいものが今の時刻になるようにする（次の step で書くのは添字 0）
+            let now = tracker.now_us();
+            let voice = &mut play.voices[0];
+            voice.history_idx = 0;
+            for (k, t) in voice.history_time_us.iter_mut().enumerate() {
+                *t = now.wrapping_sub((HISTORY_SIZE - 1 - k) as u32 * PERIOD_US);
+            }
+            for (k, h) in voice.location_history.iter_mut().enumerate() {
                 // no_std の f32 に sin が無いので、三角波で代わりにする
-                let tri = (k as f32 * TOUCH_SAMPLE_PERIOD_SEC * 3.0 * 2.0) % 2.0;
+                let tri = (k as f32 * PERIOD_US as f32 / 1_000_000.0 * 3.0 * 2.0) % 2.0;
                 *h = base
                     + 0.5
                         * (if tri < 1.0 {

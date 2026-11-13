@@ -11,7 +11,8 @@
 //! ノートやビブラートなどの演奏情報は知らない。それは `playinfo` が、ここの結果から作る
 //!
 //! - 電極の output は、呼び出し側が用意した `[u16]`（ファームは配列、PC は Vec）に持つ
-//! - 10ms 毎に `update` を呼ぶ前提（`RELEASE_WAITING_TIME` など）
+//! - `update` に今の時刻（µs）を渡す。時間は周期の数ではなく実時間で数える（doc/touch_analysis.md §3.8）。
+//!   解析は 10ms 毎を想定しているが、間隔が延びても時間の感覚はずれない（分解能が粗くなるだけ）
 //! - ファームの `src/touch/qtouch.rs` から移したもの（2026-11-08、doc/touch_analysis.md §7）
 
 // =========================================================
@@ -29,7 +30,9 @@ pub const TOUCH_ON_DEPTH: i16 = 10;
 pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec あたりの片側変化量
 
 const INIT_VAL: f32 = 100.0; // Invalid location initially
-const RELEASE_WAITING_TIME: u32 = 5; // Number of cycles to wait before considering a touch point released
+/// 指を最後に見つけてからこの時間（µs）を超えたら、離れたとみなす。それまでは保持する
+/// （前は 5 周期。10ms 毎なら、6 周期目に離れたとする今と同じ）
+const RELEASE_WAITING_US: u32 = 50_000;
 /// 1 周期に取る区間の数の上限。超えたら depth の小さい区間を捨てる
 const MAX_CANDIDATES: usize = 16;
 /// 近い区間をまとめる距離（doc/touch_analysis.md §3.7.2）。隣り合う区間の position の差がこれ以内なら、
@@ -132,8 +135,7 @@ pub struct TouchPoint {
     intensity: i16,
     is_updated: bool,
     is_touched: bool,
-    touching_time: u32,
-    no_update_time: u32,
+    last_seen_us: u32, // 最後に見つけた（Started・Followed の）時刻
     track: Track,
 }
 
@@ -143,17 +145,16 @@ impl TouchPoint {
         intensity: 0,
         is_updated: false,
         is_touched: false,
-        touching_time: 0,
-        no_update_time: 0,
+        last_seen_us: 0,
         track: Track::None,
     };
     /// 新しいタッチを始める
-    fn start(&mut self, location: f32, intensity: i16) {
+    fn start(&mut self, location: f32, intensity: i16, now_us: u32) {
         self.center_location = location;
         self.intensity = intensity;
         self.is_updated = true;
         self.is_touched = true;
-        self.touching_time = 0; // Reset the touching time
+        self.last_seen_us = now_us;
         self.track = Track::Started;
     }
     /// タッチポイントが近いかどうかを判断する。リングでは距離を近い向きに測る
@@ -164,28 +165,25 @@ impl TouchPoint {
         layout.distance(self.center_location, location) <= CLOSE_RANGE
     }
     /// 同じ指が続いている: depth・position を更新する
-    fn follow(&mut self, location: f32, intensity: i16) {
+    fn follow(&mut self, location: f32, intensity: i16, now_us: u32) {
         self.center_location = location;
         self.intensity = intensity;
         self.is_updated = true;
         self.is_touched = true;
+        self.last_seen_us = now_us;
         self.track = Track::Followed;
     }
-    /// この周期に更新が無かった: RELEASE_WAITING_TIME 回続いたら離れたとみなす
-    fn maybe_released(&mut self) {
-        if self.no_update_time + RELEASE_WAITING_TIME > self.touching_time {
-            // RELEASE_WAITING_TIME 回まで、更新のないタッチポイントは、まだ離れたと見なさない
-            self.touching_time = self.touching_time.wrapping_add(1);
-            return;
+    /// この周期に更新が無かった: 最後に見つけてから RELEASE_WAITING_US を超えたら離れたとみなす
+    fn maybe_released(&mut self, now_us: u32) {
+        if now_us.wrapping_sub(self.last_seen_us) <= RELEASE_WAITING_US {
+            return; // まだ離れたと見なさない（保持する）
         }
         self.is_touched = false;
         self.intensity = 0;
         self.track = Track::Released;
     }
-    /// タッチされたタッチポイントの処理が終了したので、時間更新して更新フラグを下ろす
+    /// この周期の処理が終わったので、更新フラグを下ろす
     fn clear_updated_flag(&mut self) {
-        self.touching_time = self.touching_time.wrapping_add(1);
-        self.no_update_time = self.touching_time;
         self.is_updated = false;
     }
     fn is_updated(&self) -> bool {
@@ -215,10 +213,6 @@ impl TouchPoint {
     pub fn track(&self) -> Track {
         self.track
     }
-    /// 触れ始めてからの周期数（離れるのを待っている間も数える）
-    pub fn touching_time(&self) -> u32 {
-        self.touching_time
-    }
 }
 
 // =========================================================
@@ -232,6 +226,7 @@ pub struct TouchTracker<P> {
     touch_count: usize,                           // Current number of touch points
     any_touched: bool, // 最後の解析で、どれかのタッチポイントが触れていたか
     ring: bool,        // 電極がリングに並んでいるか（最後の電極と電極 0 が隣り合う）
+    now_us: u32,       // 最後の解析の時刻（update に渡された値）
 }
 
 impl<P> TouchTracker<P>
@@ -247,6 +242,7 @@ where
             touch_count: 0,
             any_touched: false,
             ring,
+            now_us: 0,
         }
     }
     /// 電極の output を設定する
@@ -320,8 +316,14 @@ where
                 .unwrap_or(0)
         }
     }
-    /// 1 周期分の解析。10ms 毎に呼ぶ。指を求めて追跡し、結果を各 TouchPoint の `track()` に残す
-    pub fn update(&mut self) {
+    /// 最後の解析の時刻（µs。`update` に渡された値）。`playinfo` が時間を数えるのに使う
+    pub fn now_us(&self) -> u32 {
+        self.now_us
+    }
+    /// 1 周期分の解析。now_us は今の時刻（µs。約 71 分で一周してよい）。10ms 毎を想定しているが、
+    /// 時間は実時間で数えるので、間隔が延びてもよい。指を求めて追跡し、結果を各 TouchPoint の `track()` に残す
+    pub fn update(&mut self, now_us: u32) {
+        self.now_us = now_us;
         for tp in self.touch_points.iter_mut() {
             tp.track = Track::None;
         }
@@ -488,7 +490,7 @@ where
             if let Some(tp) = nearest_tp
                 && tp.is_near_here(location, layout)
             {
-                tp.follow(location, intensity);
+                tp.follow(location, intensity, self.now_us);
                 continue;
             }
             // 近いタッチポイントがない場合は、depth が足りれば、空いているタッチポイントで新しいタッチを始める
@@ -496,7 +498,7 @@ where
                 continue;
             }
             if let Some(tp) = self.touch_points.iter_mut().find(|tp| !tp.is_touched()) {
-                tp.start(location, intensity);
+                tp.start(location, intensity, self.now_us);
             }
         }
     }
@@ -506,7 +508,7 @@ where
             // タッチされていないポイントは処理不要
             if tp.is_touched() {
                 if !tp.is_updated() {
-                    tp.maybe_released();
+                    tp.maybe_released(self.now_us);
                 } else {
                     tp.clear_updated_flag(); // Clear the updated flag for the next cycle
                 }
@@ -540,6 +542,9 @@ mod tests {
     use super::*;
     use std::vec::Vec;
 
+    /// テストの解析の間隔（10ms）
+    const PERIOD_US: u32 = 10_000;
+
     /// 1 周期分の output を置いて解析する
     pub(crate) fn put_values<P: AsRef<[u16]> + AsMut<[u16]>>(
         tracker: &mut TouchTracker<P>,
@@ -551,7 +556,7 @@ mod tests {
         for &(k, v) in values {
             tracker.set_value(k, v);
         }
-        tracker.update();
+        tracker.update(tracker.now_us() + PERIOD_US);
     }
 
     /// 候補（区間）の position を、depth の大きい順に返す
@@ -564,8 +569,33 @@ mod tests {
         temp[..n].iter().map(|c| c.position).collect()
     }
 
+    /// 指を保持する時間は実時間で数える（§3.8）: 最後に見つけてから RELEASE_WAITING_US を超えたら離れる。
+    /// 解析の間隔が 10ms でも 30ms でも、離れたとするのは最後に見つけてから 50ms を超えた最初の解析
+    #[test]
+    fn release_waits_real_time() {
+        fn released_after(period_us: u32) -> u32 {
+            let mut tracker = TouchTracker::new([0u16; 12], false);
+            let mut now = period_us;
+            tracker.set_value(5, 30);
+            tracker.update(now);
+            let last_seen = now;
+            tracker.set_value(5, 0);
+            loop {
+                now += period_us;
+                tracker.update(now);
+                if tracker.touch_point(0).unwrap().track() == Track::Released {
+                    return now - last_seen;
+                }
+            }
+        }
+        assert_eq!(released_after(10_000), 60_000);
+        assert_eq!(released_after(30_000), 60_000);
+        assert_eq!(released_after(20_000), 60_000);
+        assert_eq!(released_after(5_000), 55_000);
+    }
+
     /// 電極 4〜6 に 1 本の指を置くと、depth・position が出て Started になり、
-    /// 続けると Followed、離すと RELEASE_WAITING_TIME の後に Released になる
+    /// 続けると Followed、離すと RELEASE_WAITING_US の後に Released になる
     #[test]
     fn one_finger_is_tracked() {
         let mut tracker = TouchTracker::new([0u16; 12], false);
@@ -598,14 +628,14 @@ mod tests {
     #[test]
     fn dominant_single_electrode_is_a_touch() {
         let mut tracker = TouchTracker::new([0, 0, 0, 0, 30, 200, 30, 0, 0, 0, 0, 0u16], false);
-        tracker.update();
+        tracker.update(tracker.now_us() + PERIOD_US);
         let tp = tracker.touch_point(0).unwrap();
         assert!(tp.is_touched());
         assert_eq!(tp.get_intensity(), 260);
         assert_eq!(tp.get_location(), 5.0);
         // 記録にあった形（山 18、隣 2）
         let mut tracker = TouchTracker::new([0, 0, 0, 0, 0, 18, 2, 0, 0, 0, 0, 0u16], false);
-        tracker.update();
+        tracker.update(tracker.now_us() + PERIOD_US);
         assert!(tracker.touch_point(0).unwrap().is_touched());
     }
 
@@ -623,7 +653,7 @@ mod tests {
         );
         // SEGMENT_THRESHOLD 以下の電極は区間に入らない（端の 3・2 は重心に効かない）
         let mut tracker = TouchTracker::new([0, 3, 20, 20, 3, 0, 0, 0, 0, 0, 0, 0u16], false);
-        tracker.update();
+        tracker.update(tracker.now_us() + PERIOD_US);
         let tp = tracker.touch_point(0).unwrap();
         assert!(tp.is_touched());
         assert_eq!(tp.get_intensity(), 40);
@@ -742,7 +772,7 @@ mod tests {
         assert_eq!(c.len(), MAX_CANDIDATES);
         assert_eq!(c[0], 155.0);
         let mut tracker = TouchTracker::new(values, false);
-        tracker.update();
+        tracker.update(tracker.now_us() + PERIOD_US);
         let tp = tracker.touch_point(0).unwrap();
         assert!(tp.is_touched());
         assert_eq!(tp.get_location(), 155.0);
@@ -753,7 +783,7 @@ mod tests {
     fn edges_are_not_neighbors_without_ring() {
         // 電極 0〜1 の区間。反対の端（電極 10・11）は SEGMENT_THRESHOLD 以下なので区間にならない
         let mut tracker = TouchTracker::new([30, 10, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5u16], false);
-        tracker.update();
+        tracker.update(tracker.now_us() + PERIOD_US);
         let tp = tracker.touch_point(0).unwrap();
         assert!(tp.is_touched());
         assert_eq!(tp.get_intensity(), 40);

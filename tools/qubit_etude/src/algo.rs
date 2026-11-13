@@ -185,7 +185,7 @@ impl AlgoRunner {
                 for (k, key) in signal.keys().iter().enumerate() {
                     touch.set_value(k, key.output());
                 }
-                touch.update();
+                touch.update(t as u32);
                 play.update(touch);
             }
             self.push_result(t);

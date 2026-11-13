@@ -139,7 +139,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             {
                 point.store(key.output(), Ordering::Relaxed);
             }
-            tracker.update();
+            tracker.update(cycle_start.as_micros() as u32);
             play.update(&tracker);
             publish_touch_state(&tracker, &play);
 
