@@ -6,7 +6,7 @@ use portable_atomic::Ordering;
 
 use crate::devices::ssd1306::{Oled, OledBuffer};
 use crate::error;
-use crate::shared::{RINGLED_RX_BITS, SETTING_MODE, UI_DRAW_TIME, WORK_MODE, reset_diagnostics};
+use crate::shared::{SETTING_MODE, UI_DRAW_TIME, reset_diagnostics};
 use crate::ui;
 
 // スイッチの判定周期。短い押下を取りこぼさないよう、描画より短くする
@@ -91,14 +91,7 @@ pub async fn ui_task(
             if both_pressed {
                 enter_setting(&mut ui_page);
             } else if ui_page == SETTING_PAGE {
-                WORK_MODE.store(
-                    (WORK_MODE.load(Ordering::Relaxed) + 1) % 2,
-                    Ordering::Relaxed,
-                ); // 動作モードを切り替え
-                // 受信Note On表示を全キャンセル
-                for word in RINGLED_RX_BITS.iter() {
-                    word.store(0, Ordering::Relaxed);
-                }
+                // 設定画面では何もしない（動作モードの切替は 2026-11-13 に無くした）
             } else {
                 ui_page = prev_page(ui_page);
             }

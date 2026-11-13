@@ -3,13 +3,13 @@ use portable_atomic::Ordering;
 
 use crate::constants::*;
 use crate::error;
-use crate::shared::{AD_VALUE0, AD_VALUE1, AD_VALUE2, SETTING_MODE, WORK_MODE};
+use crate::shared::{AD_VALUE0, AD_VALUE1, AD_VALUE2, SETTING_MODE};
 use crate::tasks::midi::queue_midi;
 use crate::touch;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      Pressure Task (Core0): ADC (GP26/27/28) の連続サンプリング、圧力の計算、
-//      Violin モードの CC11 (Expression) の送信
+//      CC11 (Expression) の送信（動作モードは無く、常に送る。2026-11-13）
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 pub async fn pressure_task(
@@ -74,11 +74,7 @@ pub async fn pressure_task(
         );
         adc_counter = adc_counter.wrapping_add(1);
 
-        // Violin モードの CC11 (と、モードに入ったときの All Sound Off) を送信キューに入れる
-        let work_mode = WORK_MODE
-            .load(Ordering::Relaxed)
-            .try_into()
-            .unwrap_or(WorkMode::Piano);
-        touch::pressure::pressure_cc11_if_needed(&mut pressure_midi, work_mode, queue_midi);
+        // CC11 を送信キューに入れる（最初の 1 回は初期値）
+        touch::pressure::pressure_cc11_if_needed(&mut pressure_midi, queue_midi);
     }
 }

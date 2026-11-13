@@ -62,10 +62,6 @@ pub const MAX_ADC_CHANNELS: usize = 3; // ADCのチャンネル数
 
 // MIDI
 pub const _MIDI_CH_PIANO: u8 = 0; // ピアノ用MIDIチャンネル
-pub const MIDI_CH_VIOLIN: u8 = 1; // バイオリン用MIDIチャンネル
-pub const MIDI_CH_FLOW: u8 = 12;
+pub const MIDI_CH_VIOLIN: u8 = 1; // バイオリン用MIDIチャンネル。2026-11-13 に動作モードを無くし、ノート・CC11 はすべてこれで送る
 
 pub const MIDI_TX_TIMEOUT_MS: u64 = 20;
-
-// Work mode（ノートの決め方が変わるので、演奏情報の層（touch_algo::playinfo）に置いている）
-pub use touch_algo::playinfo::WorkMode;

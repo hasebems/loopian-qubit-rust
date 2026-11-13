@@ -14,7 +14,6 @@ const EXP_MAX_STEP: u8 = 2; // 1回の送信での変化量を制限し、急激
 const MIDI_CC_EXPRESSION: u8 = 11;
 const MIDI_CC_INPUT_CH: u8 = 0x0b;
 const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
-const MIDI_CC_ALL_SOUND_OFF: u8 = 120;
 const EXP_INDEX_MAX: usize = 100;
 const EXP_PRESSURE_TABLE: [u8; EXP_INDEX_MAX + 1] = [
     // 100段階の圧力を 100段階のCC11に変換するためのテーブル
@@ -27,28 +26,15 @@ const EXP_PRESSURE_TABLE: [u8; EXP_INDEX_MAX + 1] = [
 
 pub struct PressureMidiState {
     last_sent_cc11: u8,
-    previous_work_mode: WorkMode,
+    initialized: bool, // CC11 の初期値を送ったか
 }
 
 impl PressureMidiState {
     pub const fn new() -> Self {
         Self {
             last_sent_cc11: EXP_MIN_VALUE,
-            previous_work_mode: WorkMode::Piano,
+            initialized: false,
         }
-    }
-
-    pub fn reset_for_violin_mode(&mut self) -> u8 {
-        self.last_sent_cc11 = EXP_MIN_VALUE;
-        EXP_MIN_VALUE
-    }
-
-    fn entered_violin_mode(&self, work_mode: WorkMode) -> bool {
-        self.previous_work_mode != WorkMode::Violin && work_mode == WorkMode::Violin
-    }
-
-    fn update_work_mode(&mut self, work_mode: WorkMode) {
-        self.previous_work_mode = work_mode;
     }
 
     pub fn next_cc11_to_send(&mut self) -> Option<u8> {
@@ -79,26 +65,20 @@ fn control_change_packet(controller: u8, value: u8) -> MidiPacket {
     [MIDI_CC_INPUT_CH, MIDI_CC_STATUS, controller, value]
 }
 
-/// Violin モードで送るべき CC（All Sound Off / CC11）を決め、パケットを send に渡す
+/// 送るべき CC11 を決め、パケットを send に渡す。動作モードは無く、常に送る（2026-11-13）。
+/// 最初の 1 回は初期値（EXP_MIN_VALUE）を送る。SWAM は CC11 を送らないと音が出ないため
+/// （前は Violin モードに入ったときに、All Sound Off と一緒に送っていた）
 pub fn pressure_cc11_if_needed(
     pressure_midi: &mut PressureMidiState,
-    work_mode: WorkMode,
     mut send: impl FnMut(MidiPacket),
 ) {
-    if work_mode != WorkMode::Violin {
-        pressure_midi.update_work_mode(work_mode);
-        return;
-    }
-
-    if pressure_midi.entered_violin_mode(work_mode) {
-        let init_cc11 = pressure_midi.reset_for_violin_mode();
-        send(control_change_packet(MIDI_CC_ALL_SOUND_OFF, 0));
-        send(control_change_packet(MIDI_CC_EXPRESSION, init_cc11));
+    if !pressure_midi.initialized {
+        pressure_midi.initialized = true;
+        pressure_midi.last_sent_cc11 = EXP_MIN_VALUE;
+        send(control_change_packet(MIDI_CC_EXPRESSION, EXP_MIN_VALUE));
     } else if let Some(cc11_value) = pressure_midi.next_cc11_to_send() {
         send(control_change_packet(MIDI_CC_EXPRESSION, cc11_value));
     }
-
-    pressure_midi.update_work_mode(work_mode);
 }
 
 pub fn update_pressure(

@@ -57,10 +57,10 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 **Core0**
 - `midi_tx_task`: `MIDI_TX` のパケットを USB MIDI に送る（USB への送信はこのタスクだけ）
 - `usb_task`: USB デバイス駆動（`main.rs`）
-- `midi_rx_task`: 受信した Note On/Off を `RINGLED_RX_BITS` に反映（Violin モードでは無視）
-- `pressure_task`: 10ms 毎に ADC 3ch をサンプリングし、`PRESSURE` を算出。Violin モードの CC11 (Expression) と、モードに入ったときの All Sound Off を `MIDI_TX` へ
+- `midi_rx_task`: USB MIDI を受信する。受信した Note On/Off を `RINGLED_RX_BITS` に反映する処理は、今は止めている（`SHOW_RX_NOTES` = false。動作モードを無くして Violin の形にしたため）
+- `pressure_task`: 10ms 毎に ADC 3ch をサンプリングし、`PRESSURE` を算出。CC11 (Expression) を常に `MIDI_TX` へ（最初の 1 回は初期値）
 - `ringled_task`: 20ms 毎に `TOUCH0-3` と `RINGLED_RX_BITS` を読んで NeoPixel を描画（書き込みのタイムアウトは 15ms）
-- `ui_task`: 100ms 毎にスイッチを判定してページ / 動作モードを切り替え、OLED は 200ms 毎（5fps）に描画して I2C0 で転送。描画（1 画面 約 3ms）はテキスト 1 行・図形 1 つ毎に `yield_now` で他のタスクに順番を譲る（`DrawPacer`、`doc/task_architecture.md` §4.4.1）。診断ページの `Drw` は 1 回に Core0 を止めた最長の時間
+- `ui_task`: 100ms 毎にスイッチを判定してページを切り替え、OLED は 200ms 毎（5fps）に描画して I2C0 で転送。描画（1 画面 約 3ms）はテキスト 1 行・図形 1 つ毎に `yield_now` で他のタスクに順番を譲る（`DrawPacer`、`doc/task_architecture.md` §4.4.1）。診断ページの `Drw` は 1 回に Core0 を止めた最長の時間
 - `status_led_task`: 内蔵 LED（ハートビート / エラーコード）
 - `debug_stream_task`（`debug_stream` feature のみ）: `DEBUG_FRAMES` のタッチの生値を USB CDC で PC に送り、PC からのコマンドを受ける。この feature ではスキャン周期の既定が 2ms になり、PC の `period` コマンドで 2 / 5 / 10 / 20ms に変えられる。Note On/Off を EVENT として送る（`doc/debug_env.md`）
 
@@ -78,7 +78,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `src/shared.rs`: タスク間の共有状態と、診断用の計測値（`TimeStat` など）
 - `src/error.rs`: エラーコードの定数と `error::set` / `clear` / `get`
 - `src/tasks/`: タスク本体（ループ・周期・共有状態の読み書き）。計算や描画のロジックは `touch/`・`ui/` に置く
-- `src/constants.rs`: キー数・MIDI チャンネル・`WorkMode`・スキャン周期など。`etude`（12 キー）・`no_pca9544`（6 キー）feature でキー数が変わる
+- `src/constants.rs`: キー数・MIDI チャンネル・スキャン周期など。`etude`（12 キー）・`no_pca9544`（6 キー）feature でキー数が変わる
 - `src/devices/`: I2C デバイスの最小ドライバ（`at42qt`, `pca9544`, `ssd1306`）。I2C を所有せず、呼び出し毎に `&mut I2C` を借用する
 - `src/touch/read_touch.rs`: PCA9544 の ch 切替と AT42QT の生値（Key Signal）の読み込み、hi/lo ずれの読み直し。チップの基準値は使わない。ch 順は `CH_CONVERSION`（`[0, 1, 2, 3]`、そのまま）で決まり、キー番号は読み取り順のまま（回転しない）
 - `src/touch/pressure.rs`: ADC の移動平均基準値（上昇 / 下降で追従率を変える）と CC11 変換テーブル。送る CC はパケットとして返し、送信はタスク側が行う
@@ -89,14 +89,16 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `crates/touch_algo/`: タッチの計算。no_std で、ファーム（`touch_task`）と PC アプリが同じコードを使う。電極 1 つの単位は electrode、指 1 本の単位は touch と呼ぶ（`doc/touch_analysis.md` §7.2）
     - `electrode.rs`: 電極毎の信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。`ElectrodeSignal`、パラメータは `Params::DEFAULT`
     - `touch.rs`: depth・position の層。電極の output から指 1 本の depth（output の合計）と position（重心）を求め、追跡する（最大 4 点。`doc/touch_analysis.md` §3）。`TouchTracker`。ノートは知らない。`MAX_TOUCH_POINTS` もここにあり、`constants.rs` が再公開する
-    - `playinfo.rs`: 演奏情報の層。`TouchTracker` の結果（指毎の position・depth・`Track`）から、ノート変換・Note On/Off・Move・リングのつなぎ目の扱い・ベロシティ・ビブラートを決める（§4）。`PlayInfo`。電極の output は見ない。MIDI 出力はコールバック経由。`WorkMode` もここにあり、`constants.rs` が再公開する
+    - `playinfo.rs`: 演奏情報の層。`TouchTracker` の結果（指毎の position・depth・`Track`）から、ノート変換・Note On/Off・Move・リングのつなぎ目の扱い・ベロシティ・ビブラートを決める（§4）。`PlayInfo`。指毎に状態（待機 → 測定中 → 発音中）を持ち、Note On は depth が `NOTE_ON_DEPTH` に届いた・はじいた・上限の時間が過ぎた、のどれかで出す（§4.2）。電極の output は見ない。MIDI 出力はコールバック経由
     - 共有状態（`TOUCH0-3`・`ANY_TOUCH`・`DEBUG_VALUE`）は `touch_task` が両方の結果を読んで書く（2 つの層の分け方は `doc/touch_analysis.md` §5.6）
 
-## 動作モードと MIDI
+## MIDI
 
-- `WorkMode::Piano`: ノートは ch 13 (`MIDI_CH_FLOW` = 12)。受信ノートをリング LED に表示
-- `WorkMode::Violin`: ノートと CC11 は ch 2 (`MIDI_CH_VIOLIN` = 1)。SWAM Solo Strings 向けで、Expression (CC11) を送らないと音が出ない（`doc/midi_spec.md`）。モードに入るとき All Sound Off と CC11 初期値を送る
-- 左右スイッチの同時押しで設定画面（page 4、`SETTING_MODE=true`）に入り、エラーコードと診断値（最小・最大・回数）もクリアされる。設定画面で左スイッチを押すとモードが切り替わる。設定画面にいる間はタッチ・圧力の基準値補正（タッチは `touch_algo` の校正: 基準値の速い追従と noise_floor の計測）を行うので、センサーに触れないこと
+- 動作モード（Piano / Violin）は 2026-11-13 に無くした。今は Violin の形だけで、Piano の処理は後で足す
+- ノートと CC11 は ch 2 (`MIDI_CH_VIOLIN` = 1)。電極 2 つで 1 ノート（`ELECTRODES_PER_NOTE`）、ノート 0 は `NOTE_OFFSET`（55）。SWAM Solo Strings 向けで、Expression (CC11) を送らないと音が出ない（`doc/midi_spec.md`）ので、起動後に CC11 の初期値を送り、その後は圧力から常に送る
+- ベロシティは音量ではなく音の立ち上がりを変えるもの。Note On までの時間で決める（`doc/touch_analysis.md` §4.2）。Move の Note On は `VELOCITY_MOVE`（50）で固定
+- ビブラート（CC1・CC19）の検出は、コードは残して止めている（`PlayInfo::set_vibrato_enabled`）
+- 左右スイッチの同時押しで設定画面（page 4、`SETTING_MODE=true`）に入り、エラーコードと診断値（最小・最大・回数）もクリアされる。設定画面で設定する項目は今は無い。設定画面にいる間はタッチ・圧力の基準値補正（タッチは `touch_algo` の校正: 基準値の速い追従と noise_floor の計測）を行うので、センサーに触れないこと
 
 ## エラー処理の約束事
 

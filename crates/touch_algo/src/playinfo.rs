@@ -11,6 +11,8 @@
 //!
 //! - 10ms 毎に、`TouchTracker::update` の後で `update` を呼ぶ前提（`TOUCH_SAMPLE_PERIOD_SEC` など）
 //! - 共有状態（ファームの `TOUCH0-3`・`ANY_TOUCH` など）には書かない。呼び出し側が読んで書く
+//! - 動作モード（Piano / Violin）は 2026-11-13 に無くした。今は Violin の形（電極 2 つで 1 ノート）だけ。
+//!   Piano の処理は後で足す
 
 use crate::touch::{Layout, MAX_TOUCH_POINTS, TouchTracker, Track};
 
@@ -20,15 +22,32 @@ use crate::touch::{Layout, MAX_TOUCH_POINTS, TouchTracker, Track};
 pub const HISTERESIS: f32 = 0.7; // Hysteresis value for touch point detection
 
 // MIDI
-pub const KEYBD_LO: u8 = 21; // A0
-pub const PIANO_OFFSET: u8 = KEYBD_LO - 4;
-pub const VIOLIN_OFFSET: u8 = 55; // バイオリンモードのMIDIノートオフセット
+/// 電極この数で 1 ノート（Violin の形。指を電極 2 つ分動かすと半音 1 つ変わる）
+pub const ELECTRODES_PER_NOTE: u16 = 2;
+/// ノート 0 の MIDI ノート番号（Violin の形）
+pub const NOTE_OFFSET: u8 = 55;
 
 // コールバックの status（上位 4 ビット。下位 4 ビットは TouchPoint の id、CC では 0）
 pub const STATUS_NOTE_ON: u8 = 0x90; // Note On
 pub const STATUS_NOTE_OFF: u8 = 0x80; // Note Off
 pub const STATUS_NOTE_MOVED: u8 = 0xa0; // ノートが変わったときの古いノートの Note Off
 pub const STATUS_CC: u8 = 0xb0; // Control Change
+
+// Note On の出し方（doc/touch_analysis.md §4.2「Note On の出し方」）。2026-11-13、数値の見当はつけずに、まず試す値。
+// ベロシティで変えたいのは音量ではなく、音の立ち上がり。速い側は頭打ちにし、遅い側の違いを取る
+/// depth がこれを超えた周期に Note On を出す。ベロシティは、指を検出してからここまでにかかった時間で決める
+pub const NOTE_ON_DEPTH: i16 = 70;
+/// NOTE_ON_DEPTH に届かずに depth が下がったとき、それまでの最大の depth がこれを超えていれば「はじいた」として
+/// 速いベロシティで Note On を出す。超えていなければ（かすっただけ）、消えても何も出さない
+pub const FLICK_DEPTH: i16 = 50;
+/// NOTE_ON_DEPTH に届かず、下がりもしないまま（軽く触れたまま）この周期数が過ぎたら、遅いベロシティで Note On（300ms）
+pub const NOTE_ON_TIMEOUT_CYCLES: u32 = 30;
+/// 指を検出した周期（経過 0）のベロシティ。はじいたときもこれ
+pub const VELOCITY_FAST: u8 = 100;
+/// NOTE_ON_TIMEOUT_CYCLES のベロシティ。その間は時間で線形に補間する
+pub const VELOCITY_SLOW: u8 = 30;
+/// Move（指が動いてノートが変わった）の Note On のベロシティ。固定（2026-11-13、ユーザー）
+pub const VELOCITY_MOVE: u8 = 50;
 
 const HISTORY_SIZE: usize = 128; // Number of past locations
 const TOUCH_SAMPLE_PERIOD_SEC: f32 = 0.01; // 10ms tick
@@ -40,32 +59,9 @@ const OSC_DEADBAND: f32 = 0.1;
 const NEW_NOTE: u8 = 0xff;
 const TOUCH_POINT_ERROR: u8 = 0xfe;
 
-/// 動作モード
-#[repr(u8)]
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum WorkMode {
-    Piano = 0,
-    Violin = 1,
-}
-// u8 から WorkMode への変換を定義
-impl TryFrom<u8> for WorkMode {
-    type Error = ();
-
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
-        match v {
-            0 => Ok(WorkMode::Piano),
-            1 => Ok(WorkMode::Violin),
-            _ => Err(()), // 定義外の数値の場合はエラー
-        }
-    }
-}
-
 // =========================================================
-//      position → ノート
+//      position → ノート、時間 → ベロシティ
 // =========================================================
-/// 現在のノート・位置・電極の並びから、新しいノートを返す
-type NewLocationFn = fn(u8, f32, Layout) -> Result<u8, u8>;
-
 /// position からノート（0〜slots−1 の番号）を決める。crnt は今のノート（NEW_NOTE は新しいタッチ）。
 /// 今のノートから HISTERESIS を越えて離れたときだけ変える。リングでは距離を近い向きに測り、
 /// 四捨五入で slots になったら 0 にする
@@ -93,26 +89,46 @@ fn note_from_position(crnt: u8, position: f32, slots: u16, ring: bool) -> Result
     }
 }
 
-/// crnt_note : 0-(max_pads-1) 現在の位置、NEW_NOTE は新規ノート。電極 1 つが 1 ノート
-fn note_piano(crnt_note: u8, location: f32, layout: Layout) -> Result<u8, u8> {
-    note_from_position(crnt_note, location, layout.pads, layout.ring)
+/// ノートの数（電極数 / ELECTRODES_PER_NOTE）
+fn note_slots(layout: Layout) -> u16 {
+    layout.pads / ELECTRODES_PER_NOTE
 }
-/// crnt_note : 0-(max_pads/2-1) 現在の位置、NEW_NOTE は新規ノート。電極 2 つが 1 ノート
-fn note_violin(crnt_note: u8, location: f32, layout: Layout) -> Result<u8, u8> {
-    let location = layout.normalize(location) / 2.0;
-    note_from_position(crnt_note, location, layout.pads / 2, layout.ring)
+
+/// crnt_note : 0〜(ノートの数 − 1) の今のノート、NEW_NOTE は新規ノート。電極 ELECTRODES_PER_NOTE 個が 1 ノート
+fn note_from_location(crnt_note: u8, location: f32, layout: Layout) -> Result<u8, u8> {
+    let location = layout.normalize(location) / ELECTRODES_PER_NOTE as f32;
+    note_from_position(crnt_note, location, note_slots(layout), layout.ring)
+}
+
+/// 指を検出してからの周期数から、Note On のベロシティを決める（§4.2）。
+/// 0 で VELOCITY_FAST、NOTE_ON_TIMEOUT_CYCLES 以上で VELOCITY_SLOW、その間は線形（四捨五入）
+fn onset_velocity(elapsed: u32) -> u8 {
+    let t = elapsed.min(NOTE_ON_TIMEOUT_CYCLES);
+    let span = (VELOCITY_FAST - VELOCITY_SLOW) as u32;
+    let down = (span * t + NOTE_ON_TIMEOUT_CYCLES / 2) / NOTE_ON_TIMEOUT_CYCLES;
+    VELOCITY_FAST - down as u8
 }
 
 // =========================================================
 //      Voice: 指 1 本の演奏情報
 // =========================================================
-/// 指 1 本の演奏情報（鳴らしているノートと、ビブラートを見るための位置の履歴）。添字は TouchPoint の id と同じ
+/// 指 1 本の演奏の状態（doc/touch_analysis.md §4.2）。タッチの層の `Track` を受けて進む
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum VoiceState {
+    Idle,     // 待機: 指が無い
+    Onset, // 測定中: 指はあるが、まだ Note On を出していない（depth が NOTE_ON_DEPTH に届くのを待つ）
+    Sounding, // 発音中: Note On を出した
+}
+
+/// 指 1 本の演奏情報（状態、鳴らしているノート、ビブラートを見るための位置の履歴）。添字は TouchPoint の id と同じ
 #[derive(Clone, Copy, Debug)]
 struct Voice {
-    note: Option<u8>, // 鳴らしているノート（0〜slots−1、offset_note を足す前）。None は鳴らしていない
-    offset_note: u8,  // MIDI Note offset
-    slots: u16,       // ノートの数（Piano は電極数、Violin は電極数 / 2）
-    new_location: NewLocationFn,
+    note: Option<u8>, // 鳴らしているノート（0〜ノートの数−1、NOTE_OFFSET を足す前）。None は鳴らしていない
+    state: VoiceState,
+    elapsed: u32, // 指を検出してからの周期数（測定中だけ数える。保持している周期も含む）
+    max_depth: i16, // 測定中の、それまでの最大の depth
+    prev_depth: i16, // 測定中の、前の周期の depth（下がったかを見る）
+    velocity: u8, // Note On のベロシティ（つなぎ目を越えたときの Note On も同じ値を使う）
     history_idx: usize, // Store the last index for each touch point
     location_history: [f32; HISTORY_SIZE], // Store past locations for each possible note
 }
@@ -120,9 +136,11 @@ struct Voice {
 impl Voice {
     const INITIAL: Self = Voice {
         note: None,
-        offset_note: PIANO_OFFSET,
-        slots: 0,
-        new_location: note_piano,
+        state: VoiceState::Idle,
+        elapsed: 0,
+        max_depth: 0,
+        prev_depth: 0,
+        velocity: VELOCITY_FAST,
         history_idx: 0,
         location_history: [0f32; HISTORY_SIZE],
     };
@@ -136,7 +154,36 @@ impl Voice {
         self.location_history[self.history_idx] = location;
         self.history_idx = (self.history_idx + 1) % HISTORY_SIZE;
     }
-    /// location_history(128サンプル)から往復(半周期ごとの符号反転)を検出し、数Hzなら周波数を返す
+    /// 新しい指: 測定中から始める
+    fn start_onset(&mut self, location: f32, depth: i16) {
+        self.reset_history(location);
+        self.state = VoiceState::Onset;
+        self.elapsed = 0;
+        self.max_depth = depth;
+        self.prev_depth = depth;
+    }
+    /// 測定中に、この周期に測った depth で Note On を出すか決める（doc/touch_analysis.md §4.2）。
+    /// 出すならベロシティを返す
+    /// - depth が NOTE_ON_DEPTH を超えた: かかった時間で決める（`onset_velocity`）
+    /// - NOTE_ON_TIMEOUT_CYCLES が過ぎた（軽く触れたまま）: 同じく時間で決める（VELOCITY_SLOW になる）
+    /// - 前の周期より下がり、それまでの最大が FLICK_DEPTH を超えている（はじいた）: VELOCITY_FAST
+    fn onset(&mut self, depth: i16) -> Option<u8> {
+        let fell = depth < self.prev_depth;
+        self.prev_depth = depth;
+        self.max_depth = self.max_depth.max(depth);
+        if depth > NOTE_ON_DEPTH || self.elapsed >= NOTE_ON_TIMEOUT_CYCLES {
+            Some(onset_velocity(self.elapsed))
+        } else if fell && self.max_depth > FLICK_DEPTH {
+            Some(VELOCITY_FAST)
+        } else {
+            None
+        }
+    }
+    /// 測定中に指を見失った周期（depth は分からないが、区間が消えたので下がったとみなす）。
+    /// はじいた（それまでの最大が FLICK_DEPTH を超えている）なら VELOCITY_FAST を返す
+    fn onset_lost(&mut self) -> Option<u8> {
+        (self.max_depth > FLICK_DEPTH).then_some(VELOCITY_FAST)
+    }
     fn detect_few_hz_round_trip_hz(&self) -> Option<f32> {
         // 新規起動直後の0埋めや静止状態を除外
         let mut min_v = f32::INFINITY;
@@ -207,11 +254,8 @@ where
 {
     midi_callback: F,                  // MIDI callback function
     voices: [Voice; MAX_TOUCH_POINTS], // 指毎の演奏情報
-    last_note: u8,                     // 最後に送信したMIDIノート番号
-    on_time: u32,                      // 最後のタッチが開始してから離されるまでの時間
-    // タッチ中の TouchPoint は、最後の TouchPoint の touching_time
-    off_time: u32, // 最後のタッチが離されてからの時間
-    vibrato: u8,   // ビブラートの強さ (0-127)
+    vibrato: u8,                       // ビブラートの強さ (0-127)
+    vibrato_enabled: bool, // ビブラートを検出して CC を出すか。2026-11-13 から既定では止めている（コードは残す）
 }
 
 impl<F> PlayInfo<F>
@@ -222,224 +266,171 @@ where
         PlayInfo {
             midi_callback: cb,
             voices: [Voice::INITIAL; MAX_TOUCH_POINTS],
-            last_note: 0,
-            on_time: 0,
-            off_time: 0,
             vibrato: 0,
+            vibrato_enabled: false,
         }
     }
     /// ビブラートの強さ（0-127）。最後に検出した値で、触れていないときも残る
     pub fn vibrato(&self) -> u8 {
         self.vibrato
     }
-    /// Violinモード向けのMIDI NoteOn velocity算出
-    ///
-    /// 算出に使用する値:
-    /// - last_note: 直前に送信したノート
-    /// - on_time:   最後のタッチ継続時間(10ms単位)
-    /// - off_time:  最後に離してからの経過時間(10ms単位)
-    pub fn calc_violin_note_on_velocity(&self, note: u8) -> u8 {
-        Self::calc_violin_note_on_velocity_from(self.last_note, self.on_time, self.off_time, note)
+    /// ビブラートの検出（CC1・CC19）を動かすか。既定は止めている
+    pub fn set_vibrato_enabled(&mut self, enabled: bool) {
+        self.vibrato_enabled = enabled;
     }
 
-    /// 1 周期分。`TouchTracker::update` の後に呼ぶ。指毎の `Track` から Note On/Off を出し、
-    /// 続けて継続時間とビブラートを更新する
-    pub fn update<P>(&mut self, touch: &TouchTracker<P>, work_mode: WorkMode)
+    /// 1 周期分。`TouchTracker::update` の後に呼ぶ。指毎の `Track` で状態を進めて Note On/Off を出し、
+    /// 続けてビブラートを更新する
+    pub fn update<P>(&mut self, touch: &TouchTracker<P>)
     where
         P: AsRef<[u16]> + AsMut<[u16]>,
     {
         let layout = touch.layout();
-        if layout.pads == 0 {
+        if note_slots(layout) == 0 {
             return;
         }
-        self.perform_notes(touch, layout, work_mode);
-        self.update_durations_and_vibrato(touch, layout, work_mode);
+        self.perform_notes(touch, layout);
+        if self.vibrato_enabled {
+            self.update_vibrato(touch, layout);
+        }
     }
 
-    /// 追跡の結果（Track）から Note On/Off を出す。始まり・動きを先に、離れたのを後に処理する
-    fn perform_notes<P>(&mut self, touch: &TouchTracker<P>, layout: Layout, work_mode: WorkMode)
+    /// 追跡の結果（Track）で、指毎の状態（VoiceState）を進め、Note On/Off を出す（doc/touch_analysis.md §4.2）。
+    /// 始まり・動きを先に、離れたのを後に処理する
+    ///
+    /// | 状態 | Track | すること |
+    /// |---|---|---|
+    /// | 待機 | Started | 測定中へ。続けて、測定中の Followed と同じ判断をする |
+    /// | 測定中 | Followed | `Voice::onset` で Note On を出すか決める。出したら発音中へ |
+    /// | 測定中 | None（保持） | 指を見失った: 下がったとみなし、はじいたなら Note On |
+    /// | 測定中 | Released | 何も出さずに待機へ（かすっただけ） |
+    /// | 発音中 | Followed | ノートが変わったら Move（つなぎ目では cross_seam） |
+    /// | 発音中 | Released | Note Off → 待機 |
+    fn perform_notes<P>(&mut self, touch: &TouchTracker<P>, layout: Layout)
     where
         P: AsRef<[u16]> + AsMut<[u16]>,
     {
         let tps = touch.touch_points();
-        let mut latest_note: Option<u8> = None;
         for (i, tp) in tps.iter().enumerate() {
-            match tp.track() {
-                Track::Started => {
-                    self.voices[i].reset_history(tp.get_location());
-                    self.note_start(i, tp.get_location(), tp.get_intensity(), layout, work_mode);
+            let location = tp.get_location();
+            let voice = &mut self.voices[i];
+            let velocity = match (tp.track(), voice.state) {
+                (Track::Started, _) => {
+                    voice.start_onset(location, tp.get_intensity());
+                    voice.onset(tp.get_intensity())
                 }
-                Track::Followed => {
-                    self.voices[i].push_history(tp.get_location());
-                    if let Some(note) = self.note_follow(
-                        i,
-                        tp.get_location(),
-                        tp.get_intensity(),
-                        layout,
-                        work_mode,
-                    ) {
-                        latest_note = Some(note);
-                    }
+                (Track::Followed, VoiceState::Onset) => {
+                    voice.push_history(location);
+                    voice.elapsed = voice.elapsed.saturating_add(1);
+                    voice.onset(tp.get_intensity())
                 }
-                Track::None | Track::Released => {}
+                (Track::Followed, VoiceState::Sounding) => {
+                    voice.push_history(location);
+                    self.note_follow(i, location, layout);
+                    None
+                }
+                (Track::None, VoiceState::Onset) if tp.is_touched() => {
+                    voice.elapsed = voice.elapsed.saturating_add(1);
+                    voice.onset_lost()
+                }
+                _ => None,
+            };
+            if let Some(velocity) = velocity {
+                self.note_start(i, location, velocity, layout);
             }
         }
-        if let Some(note) = latest_note {
-            self.last_note = note;
-        }
         for (i, tp) in tps.iter().enumerate() {
-            if tp.track() == Track::Released {
-                self.note_release(i, tp.last_location(), tp.touching_time());
+            if tp.track() != Track::Released {
+                continue;
             }
+            if self.voices[i].state == VoiceState::Sounding {
+                self.note_release(i, tp.last_location());
+            }
+            self.voices[i].state = VoiceState::Idle;
         }
     }
-    /// 新しいタッチ: ノートを決めて Note On
-    fn note_start(
-        &mut self,
-        i: usize,
-        location: f32,
-        intensity: i16,
-        layout: Layout,
-        work_mode: WorkMode,
-    ) {
-        let (offset_note, slots, new_location): (u8, u16, NewLocationFn) =
-            if work_mode == WorkMode::Violin {
-                (VIOLIN_OFFSET, layout.pads / 2, note_violin)
-            } else {
-                (PIANO_OFFSET, layout.pads, note_piano)
-            };
-        let note = new_location(NEW_NOTE, location, layout).ok();
+    /// ノートを決めて Note On を出し、発音中にする
+    fn note_start(&mut self, i: usize, location: f32, velocity: u8, layout: Layout) {
+        let note = note_from_location(NEW_NOTE, location, layout).ok();
         let voice = &mut self.voices[i];
         voice.note = note;
-        voice.offset_note = offset_note;
-        voice.slots = slots;
-        voice.new_location = new_location;
+        voice.velocity = velocity;
+        voice.state = VoiceState::Sounding;
         if let Some(note) = note {
-            let midi_note = note.saturating_add(offset_note);
-            self.send_note_on(i, midi_note, intensity, location, work_mode);
-            self.last_note = midi_note;
+            self.send_note_on(i, note.saturating_add(NOTE_OFFSET), velocity, location);
         }
     }
-    /// 同じ指が続いている: ノートが変わったら、Move かつなぎ目を越えたかで分ける。
-    /// ノートが変わったときは、新しいノート（offset を足したもの）を返す
-    fn note_follow(
-        &mut self,
-        i: usize,
-        location: f32,
-        intensity: i16,
-        layout: Layout,
-        work_mode: WorkMode,
-    ) -> Option<u8> {
-        let voice = self.voices[i];
-        let crnt = voice.note?;
-        let updated = (voice.new_location)(crnt, location, layout).ok()?;
+    /// 同じ指が続いている: ノートが変わったら、Move かつなぎ目を越えたかで分ける
+    fn note_follow(&mut self, i: usize, location: f32, layout: Layout) {
+        let Some(crnt) = self.voices[i].note else {
+            return;
+        };
+        let Ok(updated) = note_from_location(crnt, location, layout) else {
+            return;
+        };
         if updated == crnt {
-            return None;
+            return;
         }
-        let from = crnt.saturating_add(voice.offset_note);
-        let to = updated.saturating_add(voice.offset_note);
-        // つなぎ目をまたぐ: ノートの番号が半周より大きく変わった（95 → 0、0 → 95 など）
-        let crossed =
-            layout.ring && (updated as i32 - crnt as i32).unsigned_abs() > voice.slots as u32 / 2;
+        let from = crnt.saturating_add(NOTE_OFFSET);
+        let to = updated.saturating_add(NOTE_OFFSET);
+        // つなぎ目をまたぐ: ノートの番号が半周より大きく変わった（47 → 0、0 → 47 など）
+        let crossed = layout.ring
+            && (updated as i32 - crnt as i32).unsigned_abs() > note_slots(layout) as u32 / 2;
         if crossed {
-            self.cross_seam(i, from, to, intensity, location, work_mode);
+            self.cross_seam(i, from, to, location);
         } else {
-            self.move_note(i, from, to, intensity, location, work_mode);
+            self.move_note(i, from, to, location);
         }
         self.voices[i].note = Some(updated);
-        Some(to)
     }
-    /// Move: 次のノートの Note On を出して、前のノートの Note Off（MOVED）を出す
-    fn move_note(
-        &self,
-        i: usize,
-        from: u8,
-        to: u8,
-        intensity: i16,
-        location: f32,
-        work_mode: WorkMode,
-    ) {
-        self.send_note_on(i, to, intensity, location, work_mode);
+    /// Move: 次のノートの Note On（ベロシティは VELOCITY_MOVE で固定）を出して、前のノートの Note Off（MOVED）を出す
+    fn move_note(&self, i: usize, from: u8, to: u8, location: f32) {
+        self.send_note_on(i, to, VELOCITY_MOVE, location);
         (self.midi_callback)(STATUS_NOTE_MOVED | i as u8, from, 0x40, location);
     }
     /// つなぎ目を越えた（doc/touch_analysis.md §4.1）: Move はせず、前のノートの Note Off を出してから、
-    /// 越えた先のノートの Note On を出す。今は出るイベントが Move とほぼ同じだが、
+    /// 越えた先のノートの Note On を、その指の Note On のベロシティで出す。
     /// Move に処理を足すことがあるので分けておく
-    fn cross_seam(
-        &self,
-        i: usize,
-        from: u8,
-        to: u8,
-        intensity: i16,
-        location: f32,
-        work_mode: WorkMode,
-    ) {
+    fn cross_seam(&self, i: usize, from: u8, to: u8, location: f32) {
         (self.midi_callback)(STATUS_NOTE_OFF | i as u8, from, 0x40, location);
-        self.send_note_on(i, to, intensity, location, work_mode);
+        self.send_note_on(i, to, self.voices[i].velocity, location);
     }
     /// 離れた: Note Off
-    fn note_release(&mut self, i: usize, location: f32, touching_time: u32) {
-        let voice = self.voices[i];
-        if let Some(note) = voice.note {
-            let midi_note = note.saturating_add(voice.offset_note);
+    fn note_release(&mut self, i: usize, location: f32) {
+        if let Some(note) = self.voices[i].note {
+            let midi_note = note.saturating_add(NOTE_OFFSET);
             (self.midi_callback)(STATUS_NOTE_OFF | i as u8, midi_note, 0x40, location);
-            self.last_note = midi_note;
         }
-        self.on_time = touching_time;
         self.voices[i].note = None;
     }
-    /// Note On を出す。ベロシティは動作モードと今までの演奏から決める
-    fn send_note_on(
-        &self,
-        i: usize,
-        midi_note: u8,
-        intensity: i16,
-        location: f32,
-        work_mode: WorkMode,
-    ) {
-        let velocity = Self::note_on_velocity_from_context(
-            work_mode,
-            self.last_note,
-            self.on_time,
-            self.off_time,
-            midi_note,
-            intensity,
-        );
+    fn send_note_on(&self, i: usize, midi_note: u8, velocity: u8, location: f32) {
         (self.midi_callback)(STATUS_NOTE_ON | i as u8, midi_note, velocity, location);
     }
 
-    /// 時間計測とビブラート。ビブラートは、リングのつなぎ目の上（position が電極数 − 1 以上。
-    /// 96 電極では 95 以上）に指がある間は、検出した値を出さない（doc/touch_analysis.md §4.1）
-    fn update_durations_and_vibrato<P>(
-        &mut self,
-        touch: &TouchTracker<P>,
-        layout: Layout,
-        work_mode: WorkMode,
-    ) where
+    /// ビブラート。リングのつなぎ目の上（position が電極数 − 1 以上。96 電極では 95 以上）に指がある間は、
+    /// 検出した値を出さない（doc/touch_analysis.md §4.1）
+    fn update_vibrato<P>(&mut self, touch: &TouchTracker<P>, layout: Layout)
+    where
         P: AsRef<[u16]> + AsMut<[u16]>,
     {
         let seam = (layout.pads - 1) as f32;
         let mut touched = false;
         let mut on_seam = false;
-        let mut latest_on_time = self.on_time;
         let mut few_hz_detected: Option<f32> = None;
 
         for (tp, voice) in touch.touch_points().iter().zip(self.voices.iter()) {
             if tp.is_touched() {
                 touched = true;
-                latest_on_time = tp.touching_time();
                 if layout.ring && tp.get_location() >= seam {
                     on_seam = true;
                 }
-                if work_mode == WorkMode::Violin && few_hz_detected.is_none() {
+                if few_hz_detected.is_none() {
                     few_hz_detected = voice.detect_few_hz_round_trip_hz();
                 }
             }
         }
 
         if touched {
-            self.on_time = latest_on_time;
-            self.off_time = 0;
             let vib = few_hz_detected.map_or(0, |hz| (hz * 10.0) as u32).min(127) as u8;
             if !on_seam && vib != self.vibrato {
                 let dpt = (vib * 2).min(48);
@@ -454,89 +445,7 @@ where
                 );
                 self.vibrato = vib;
             }
-        } else {
-            self.off_time = self.off_time.wrapping_add(1);
         }
-    }
-
-    //　タッチポイントの状況から、Note On のベロシティを決定する
-    fn note_on_velocity_from_context(
-        work_mode: WorkMode,
-        last_note: u8,
-        on_time: u32,
-        off_time: u32,
-        note: u8,
-        intensity: i16,
-    ) -> u8 {
-        if work_mode == WorkMode::Violin {
-            Self::calc_violin_note_on_velocity_from(last_note, on_time, off_time, note)
-        } else {
-            Self::default_note_on_velocity(intensity)
-        }
-    }
-    // Violin モードの Note On ベロシティ計算:
-    fn calc_violin_note_on_velocity_from(
-        last_note: u8,
-        on_time: u32,
-        off_time: u32,
-        note: u8,
-    ) -> u8 {
-        // 10ms tick前提
-        const BASE_VELOCITY: i16 = 64;
-        const SMALLER_SEC: u32 = 50; // 500ms
-        const MAX_SEC: u32 = 300; // 3秒
-
-        // on_time補正:
-        // - SMALLER_SEC未満: 0..+56 を線形加算（速いほど大きい）
-        // - SMALLER_SEC超〜MAX_SEC: 0..-32 を線形減算（遅いほど小さい）
-        let on_adjust = if on_time < SMALLER_SEC {
-            ((SMALLER_SEC - on_time) * 56 / SMALLER_SEC) as i16
-        } else {
-            let over = (on_time - SMALLER_SEC).min(MAX_SEC - SMALLER_SEC);
-            -((over * 32 / (MAX_SEC - SMALLER_SEC)) as i16)
-        };
-
-        // off_time(staccato)補正:
-        // - 0: 補正なし
-        // - 0超〜SMALLER_SEC未満: +24..0 を線形加算
-        // - SMALLER_SEC以上: 補正なし
-        let off_adjust = if off_time == 0 {
-            0
-        } else if off_time < SMALLER_SEC {
-            (((SMALLER_SEC - off_time) as i16) * 24 / (SMALLER_SEC as i16 - 1)).max(0)
-        } else {
-            0
-        };
-
-        // 音程距離補正:
-        // - distance <= 3: 最大-12 (distance=3で0、distance=0で-12)
-        // - distance > 3 : distance=12まで最大+12 を線形加算
-        let note_distance = note.abs_diff(last_note) as i16;
-        let distance_adjust = if note_distance <= 3 {
-            -((3 - note_distance) * 12 / 3)
-        } else {
-            let d = (note_distance - 3).min(9);
-            d * 12 / 9
-        };
-
-        let mut velocity = BASE_VELOCITY + on_adjust + off_adjust + distance_adjust;
-        velocity = velocity.clamp(32, 112);
-        velocity as u8
-    }
-    // デフォルトの Note On ベロシティ計算: 強度に基づいて 100..115 の範囲で線形に決める。
-    // 強度が 63 を超えたときの値（Arduino 版では 255）は MIDI のデータバイト（0..127）を超えるので、
-    // 127 で頭打ちにする（doc/touch_analysis.md §6.3）。
-    // Pad の移動平均（4 サンプルの合計）を外して強度が 1/4 になったので、
-    // 値が以前（> 255 で上限、>> 4）と同じになるよう、> 63 と >> 2 にしている
-    fn default_note_on_velocity(intensity: i16) -> u8 {
-        let velocity: u16 = if intensity < 0 {
-            0
-        } else if intensity > 63 {
-            255
-        } else {
-            100 + (intensity as u16 >> 2)
-        };
-        velocity.min(127) as u8
     }
 }
 
@@ -550,12 +459,8 @@ mod tests {
     type Log = RefCell<Vec<(u8, u8, u8)>>; // (status, note, velocity)
 
     /// 1 周期分の output を置いて、depth・position の層 → 演奏情報の層の順に解析する
-    fn step<F, P>(
-        tracker: &mut TouchTracker<P>,
-        play: &mut PlayInfo<F>,
-        values: &[(usize, u16)],
-        mode: WorkMode,
-    ) where
+    fn step<F, P>(tracker: &mut TouchTracker<P>, play: &mut PlayInfo<F>, values: &[(usize, u16)])
+    where
         F: Fn(u8, u8, u8, f32),
         P: AsRef<[u16]> + AsMut<[u16]>,
     {
@@ -566,68 +471,157 @@ mod tests {
             tracker.set_value(k, v);
         }
         tracker.update();
-        play.update(tracker, mode);
+        play.update(tracker);
     }
 
     fn logger(log: &Log) -> impl Fn(u8, u8, u8, f32) + '_ {
         |status, note, velocity, _location| log.borrow_mut().push((status, note, velocity))
     }
 
-    /// 電極 4〜6 に 1 本の指を置くと、電極 5 の Note On が出て、離すと Note Off が出る
+    /// 電極 c を中心にした指（depth 100。NOTE_ON_DEPTH を超える）
+    fn finger(c: usize, pads: usize) -> [(usize, u16); 3] {
+        [((c + pads - 1) % pads, 20), (c, 60), ((c + 1) % pads, 20)]
+    }
+
+    /// 速く押す: depth が初めから NOTE_ON_DEPTH を超えていれば、検出した周期に VELOCITY_FAST で Note On。
+    /// 電極 4 は 4 / 2 = ノート 2。離すと Note Off が 1 回だけ出る
     #[test]
-    fn one_finger_note_on_off() {
+    fn fast_press_note_on_off() {
         let log: Log = RefCell::new(Vec::new());
         let mut tracker = TouchTracker::new([0u16; 12], false);
         let mut play = PlayInfo::new(logger(&log));
-        let finger = [(4, 10), (5, 30), (6, 10)];
-        step(&mut tracker, &mut play, &finger, WorkMode::Piano);
-        // ノート = 5 + PIANO_OFFSET、ベロシティ = 100 + depth(50) / 4
+        step(&mut tracker, &mut play, &finger(4, 12));
         assert_eq!(
             log.borrow().as_slice(),
-            &[(STATUS_NOTE_ON, 5 + PIANO_OFFSET, 112)]
+            &[(STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_FAST)]
         );
-
-        // 離すと、RELEASE_WAITING_TIME の後に Note Off が 1 回だけ出る
         for _ in 0..10 {
-            step(&mut tracker, &mut play, &[], WorkMode::Piano);
+            step(&mut tracker, &mut play, &[]);
         }
         assert_eq!(
             log.borrow().as_slice(),
             &[
-                (STATUS_NOTE_ON, 5 + PIANO_OFFSET, 112),
-                (STATUS_NOTE_OFF, 5 + PIANO_OFFSET, 0x40)
+                (STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_FAST),
+                (STATUS_NOTE_OFF, 2 + NOTE_OFFSET, 0x40)
             ]
         );
     }
 
-    /// 指を動かして position がヒステリシスを越えると、新しいノートの Note On と古いノートの MOVED が出る
+    /// ゆっくり押す: NOTE_ON_DEPTH を超えた周期に、かかった時間のベロシティで Note On
+    #[test]
+    fn slow_press_velocity_by_time() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        for t in 0..15u16 {
+            step(&mut tracker, &mut play, &[(4, 20 + t * 3)]); // 20 → 62
+        }
+        assert!(log.borrow().is_empty());
+        step(&mut tracker, &mut play, &[(4, 80)]); // 経過 15 周期
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[(STATUS_NOTE_ON, 2 + NOTE_OFFSET, onset_velocity(15))]
+        );
+        assert_eq!(onset_velocity(15), 65);
+    }
+
+    /// 軽く触れたまま: NOTE_ON_DEPTH に届かず下がりもしなければ、NOTE_ON_TIMEOUT_CYCLES で VELOCITY_SLOW
+    #[test]
+    fn light_touch_times_out_slow() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        for _ in 0..NOTE_ON_TIMEOUT_CYCLES {
+            step(&mut tracker, &mut play, &[(4, 30)]);
+        }
+        assert!(log.borrow().is_empty());
+        step(&mut tracker, &mut play, &[(4, 30)]);
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[(STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_SLOW)]
+        );
+    }
+
+    /// はじく: NOTE_ON_DEPTH に届かずに下がっても、最大が FLICK_DEPTH を超えていれば、
+    /// 下がった周期に VELOCITY_FAST で Note On
+    #[test]
+    fn flick_sounds_fast() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        for v in [20, 40, 60] {
+            step(&mut tracker, &mut play, &[(4, v)]);
+        }
+        assert!(log.borrow().is_empty());
+        step(&mut tracker, &mut play, &[(4, 40)]);
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[(STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_FAST)]
+        );
+        // 区間が消えたら、そのまま見失った周期にも Note On を出す（下がったとみなす）
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        for v in [20, 60] {
+            step(&mut tracker, &mut play, &[(4, v)]);
+        }
+        step(&mut tracker, &mut play, &[]);
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[(STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_FAST)]
+        );
+        for _ in 0..10 {
+            step(&mut tracker, &mut play, &[]);
+        }
+        assert_eq!(log.borrow()[1], (STATUS_NOTE_OFF, 2 + NOTE_OFFSET, 0x40));
+    }
+
+    /// かすっただけ: FLICK_DEPTH を超えずに消えたら、Note On も Note Off も出さない
+    #[test]
+    fn graze_is_silent() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        for v in [20, 40, 30] {
+            step(&mut tracker, &mut play, &[(4, v)]);
+        }
+        for _ in 0..10 {
+            step(&mut tracker, &mut play, &[]);
+        }
+        assert!(log.borrow().is_empty());
+        // 次のタッチは、また初めから測る
+        step(&mut tracker, &mut play, &finger(4, 12));
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[(STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_FAST)]
+        );
+    }
+
+    /// 指を動かしてノートが変わると、新しいノートの Note On（VELOCITY_MOVE）と古いノートの MOVED が出る
     #[test]
     fn moving_finger_changes_note() {
         let log: Log = RefCell::new(Vec::new());
         let mut tracker = TouchTracker::new([0u16; 12], false);
         let mut play = PlayInfo::new(logger(&log));
-        let at = |c: usize| [(c - 1, 10), (c, 30), (c + 1, 10)];
-        step(&mut tracker, &mut play, &at(5), WorkMode::Piano);
-        step(&mut tracker, &mut play, &at(6), WorkMode::Piano);
+        step(&mut tracker, &mut play, &finger(4, 12));
+        step(&mut tracker, &mut play, &finger(6, 12));
         assert_eq!(
             log.borrow().as_slice(),
             &[
-                (STATUS_NOTE_ON, 5 + PIANO_OFFSET, 112),
-                (STATUS_NOTE_ON, 6 + PIANO_OFFSET, 112),
-                (STATUS_NOTE_MOVED, 5 + PIANO_OFFSET, 0x40)
+                (STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_FAST),
+                (STATUS_NOTE_ON, 3 + NOTE_OFFSET, VELOCITY_MOVE),
+                (STATUS_NOTE_MOVED, 2 + NOTE_OFFSET, 0x40)
             ]
         );
     }
 
-    /// Piano のベロシティは 100..115、強度が 63 を超えたら 127（MIDI のデータバイトの範囲に収める）
+    /// ベロシティは、経過 0 で VELOCITY_FAST、NOTE_ON_TIMEOUT_CYCLES 以上で VELOCITY_SLOW、その間は線形
     #[test]
-    fn piano_velocity_is_within_midi_range() {
-        type Play = PlayInfo<fn(u8, u8, u8, f32)>;
-        assert_eq!(Play::default_note_on_velocity(0), 100);
-        assert_eq!(Play::default_note_on_velocity(63), 115);
-        assert_eq!(Play::default_note_on_velocity(64), 127);
-        assert_eq!(Play::default_note_on_velocity(i16::MAX), 127);
-        assert_eq!(Play::default_note_on_velocity(-1), 0);
+    fn onset_velocity_is_linear() {
+        assert_eq!(onset_velocity(0), VELOCITY_FAST);
+        assert_eq!(onset_velocity(15), 65);
+        assert_eq!(onset_velocity(NOTE_ON_TIMEOUT_CYCLES), VELOCITY_SLOW);
+        assert_eq!(onset_velocity(1000), VELOCITY_SLOW);
     }
 
     /// リングでつなぎ目を越えたら、Move せず、Note Off → Note On でノートが変わる（§4.1）
@@ -636,67 +630,55 @@ mod tests {
         let log: Log = RefCell::new(Vec::new());
         let mut tracker = TouchTracker::new([0u16; 12], true);
         let mut play = PlayInfo::new(logger(&log));
-        step(
-            &mut tracker,
-            &mut play,
-            &[(10, 10), (11, 30), (0, 10)],
-            WorkMode::Piano,
-        );
-        step(
-            &mut tracker,
-            &mut play,
-            &[(11, 10), (0, 30), (1, 10)],
-            WorkMode::Piano,
-        );
+        // 電極 10 = ノート 5（ノートの数は 6）
+        step(&mut tracker, &mut play, &finger(10, 12));
+        // 電極 0 = ノート 0: つなぎ目を越えた
+        step(&mut tracker, &mut play, &finger(0, 12));
         assert_eq!(
             log.borrow().as_slice(),
             &[
-                (STATUS_NOTE_ON, 11 + PIANO_OFFSET, 112),
-                (STATUS_NOTE_OFF, 11 + PIANO_OFFSET, 0x40),
-                (STATUS_NOTE_ON, PIANO_OFFSET, 112),
+                (STATUS_NOTE_ON, 5 + NOTE_OFFSET, VELOCITY_FAST),
+                (STATUS_NOTE_OFF, 5 + NOTE_OFFSET, 0x40),
+                (STATUS_NOTE_ON, NOTE_OFFSET, VELOCITY_FAST),
             ]
         );
         // つなぎ目を越えないノートの変化は Move のまま
-        step(
-            &mut tracker,
-            &mut play,
-            &[(0, 10), (1, 30), (2, 10)],
-            WorkMode::Piano,
-        );
+        step(&mut tracker, &mut play, &finger(2, 12));
         assert_eq!(
             log.borrow()[3..],
             [
-                (STATUS_NOTE_ON, 1 + PIANO_OFFSET, 112),
-                (STATUS_NOTE_MOVED, PIANO_OFFSET, 0x40)
+                (STATUS_NOTE_ON, 1 + NOTE_OFFSET, VELOCITY_MOVE),
+                (STATUS_NOTE_MOVED, NOTE_OFFSET, 0x40)
             ]
         );
     }
 
-    /// リングの Violin（電極 2 つで 1 ノート）でも、ノートはつなぎ目で巡回する
+    /// リング（電極 2 つで 1 ノート）でも、ノートはつなぎ目で巡回する
     #[test]
-    fn ring_violin_note_wraps() {
+    fn ring_note_wraps() {
         let layout = Layout {
             pads: 96,
             ring: true,
         };
-        assert_eq!(note_violin(NEW_NOTE, 95.2, layout), Ok(0));
-        assert_eq!(note_violin(NEW_NOTE, 94.6, layout), Ok(47));
+        assert_eq!(note_from_location(NEW_NOTE, 95.2, layout), Ok(0));
+        assert_eq!(note_from_location(NEW_NOTE, 94.6, layout), Ok(47));
         // 94.4 / 2 = 47.2 は、今のノート 47 からヒステリシスの中
-        assert_eq!(note_violin(47, 94.4, layout), Ok(47));
+        assert_eq!(note_from_location(47, 94.4, layout), Ok(47));
         // 今のノート 0 から、つなぎ目の向こうに 0.4 ノート（95.2 / 2 = 47.6）はヒステリシスの中
-        assert_eq!(note_violin(0, 95.2, layout), Ok(0));
+        assert_eq!(note_from_location(0, 95.2, layout), Ok(0));
     }
 
-    /// ビブラートは、つなぎ目の上（position が電極数 − 1 以上）では検出した値を出さない（§4.1）
+    /// ビブラート: 既定では止めている。動かすと、つなぎ目の上（position が電極数 − 1 以上）では
+    /// 検出した値を出さない（§4.1）
     #[test]
     fn vibrato_is_held_on_seam() {
         // 3Hz・振幅 0.5 の揺れを位置の履歴に入れてから、1 周期解析する
-        fn run(center: usize) -> (u8, usize) {
+        fn run(center: usize, enabled: bool) -> (u8, usize) {
             let log: Log = RefCell::new(Vec::new());
             let mut tracker = TouchTracker::new([0u16; 12], true);
             let mut play = PlayInfo::new(logger(&log));
-            let at = |c: usize| [((c + 11) % 12, 10), (c, 30), ((c + 1) % 12, 10)];
-            step(&mut tracker, &mut play, &at(center), WorkMode::Violin);
+            play.set_vibrato_enabled(enabled);
+            step(&mut tracker, &mut play, &finger(center, 12));
             let base = tracker.touch_point(0).unwrap().get_location();
             for (k, h) in play.voices[0].location_history.iter_mut().enumerate() {
                 // no_std の f32 に sin が無いので、三角波で代わりにする
@@ -709,16 +691,18 @@ mod tests {
                             3.0 - tri * 2.0
                         });
             }
-            step(&mut tracker, &mut play, &at(center), WorkMode::Violin);
+            step(&mut tracker, &mut play, &finger(center, 12));
             let cc = log.borrow().iter().filter(|e| e.0 == STATUS_CC).count();
             (play.vibrato(), cc)
         }
+        // 止めている間は出さない
+        assert_eq!(run(5, false), (0, 0));
         // つなぎ目から離れた所では検出して CC を出す
-        let (vib, cc) = run(5);
+        let (vib, cc) = run(5, true);
         assert!(vib > 0);
         assert_eq!(cc, 2);
         // 電極 11 の上（position 11.0 = 電極数 − 1）では出さない
-        assert_eq!(run(11), (0, 0));
+        assert_eq!(run(11, true), (0, 0));
     }
 
     /// 新しいタッチでは、前のタッチの位置の履歴が残らない（§6.3 の 3）
@@ -726,12 +710,11 @@ mod tests {
     fn new_touch_clears_location_history() {
         let mut tracker = TouchTracker::new([0u16; 12], false);
         let mut play = PlayInfo::new(|_, _, _, _| {});
-        let at = |c: usize| [(c - 1, 10), (c, 30), (c + 1, 10)];
-        step(&mut tracker, &mut play, &at(2), WorkMode::Violin);
+        step(&mut tracker, &mut play, &finger(2, 12));
         for _ in 0..10 {
-            step(&mut tracker, &mut play, &[], WorkMode::Violin);
+            step(&mut tracker, &mut play, &[]);
         }
-        step(&mut tracker, &mut play, &at(8), WorkMode::Violin);
+        step(&mut tracker, &mut play, &finger(8, 12));
         assert!(play.voices[0].location_history.iter().all(|&l| l == 8.0));
     }
 }

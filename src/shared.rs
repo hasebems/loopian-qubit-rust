@@ -11,7 +11,7 @@ use core::sync::atomic::AtomicBool;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use portable_atomic::{AtomicI32, AtomicU8, AtomicU16, AtomicU32, Ordering};
+use portable_atomic::{AtomicI32, AtomicU16, AtomicU32, Ordering};
 
 use crate::constants::*;
 
@@ -45,8 +45,6 @@ pub static AD_VALUE1: AtomicU32 = AtomicU32::new(0); // ADCの値(A1)
 pub static AD_VALUE2: AtomicU32 = AtomicU32::new(0); // ADCの値(B0)
 pub static AD_VALUE3: AtomicU32 = AtomicU32::new(0); // ADCの値(B1)
 pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果: pressure_task → CC11送信, OLED (page 1)
-// 動作モード（Piano/Violin）: ui_task → touch_task, pressure_task, midi_rx_task, OLED
-pub static WORK_MODE: AtomicU8 = AtomicU8::new(0);
 // 設定画面にいる（タッチ・圧力の基準値を補正中。センサーに触れない前提）
 // ui_task → touch_task (touch_algo の校正), pressure_task, ringled
 pub static SETTING_MODE: AtomicBool = AtomicBool::new(false);

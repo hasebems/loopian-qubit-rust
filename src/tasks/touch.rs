@@ -8,7 +8,7 @@ use crate::devices;
 use crate::error;
 use crate::shared::{
     ANALYSIS_TIME, ANY_TOUCH, DEBUG_VALUE, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4,
-    POINT5, SCAN_TIME, SETTING_MODE, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3, WORK_MODE,
+    POINT5, SCAN_TIME, SETTING_MODE, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3,
     scan_period_us,
 };
 use crate::tasks::midi::queue_midi;
@@ -21,7 +21,6 @@ use touch_algo::playinfo::STATUS_NOTE_MOVED;
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
-    use core::cell::Cell;
     use touch_algo::electrode::{ElectrodeSignal, ElectrodeState, Params, State};
     use touch_algo::playinfo::PlayInfo;
     use touch_algo::touch::TouchTracker;
@@ -45,8 +44,6 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         error::set(error::TOUCH_INIT_TIMEOUT);
     }
 
-    // コールバック内で使う動作モード（解析の直前に更新する）
-    let current_mode = Cell::new(WorkMode::Piano);
     // タッチの解析は 2 つの層: depth・position（TouchTracker）→ 演奏情報（PlayInfo）。doc/touch_analysis.md §5.6
     let mut tracker = TouchTracker::new([0u16; TOTAL_QT_KEYS], TOUCH_RING);
     let mut play = PlayInfo::new(|status, note, velocity, _location| {
@@ -55,15 +52,11 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         // デバッグ用: PC に Note のイベントを送る
         #[cfg(feature = "debug_stream")]
         queue_note_event(status, note, velocity, _location);
-        let midi_channel = if current_mode.get() == WorkMode::Piano {
-            MIDI_CH_FLOW
-        } else {
-            MIDI_CH_VIOLIN
-        };
+        // 動作モードは無い（2026-11-13）。ノートは MIDI_CH_VIOLIN で送る
         let status = if status == STATUS_NOTE_MOVED {
-            0x80 | midi_channel // 移動イベントはNote Offとして扱う
+            0x80 | MIDI_CH_VIOLIN // 移動イベントはNote Offとして扱う
         } else {
-            status | midi_channel
+            status | MIDI_CH_VIOLIN
         };
         queue_midi([status >> 4, status, note, velocity]);
     });
@@ -107,12 +100,6 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         // divider フレームに 1 回行う（20ms 周期では毎回）。起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わない
         if cycle_start >= analysis_start_at && frame.is_multiple_of(divider) {
             let analysis_start = Instant::now();
-            let work_mode = WORK_MODE
-                .load(Ordering::Relaxed)
-                .try_into()
-                .unwrap_or(WorkMode::Piano);
-            current_mode.set(work_mode);
-
             // 設定画面にいる間は校正（基準値の速い追従と noise_floor の計測）
             let (raw, valid) = read_touch.raw();
             signal.process(
@@ -137,7 +124,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
                 point.store(key.output(), Ordering::Relaxed);
             }
             tracker.update();
-            play.update(&tracker, work_mode);
+            play.update(&tracker);
             publish_touch_state(&tracker, &play);
 
             tracker.lighten_leds(|_location, _intensity| {

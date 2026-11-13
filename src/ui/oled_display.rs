@@ -1,4 +1,3 @@
-use crate::constants::*;
 use core::fmt::Write;
 use embassy_time::Instant;
 use embedded_graphics::image::{Image, ImageRaw};
@@ -18,7 +17,7 @@ use crate::error;
 use crate::shared::{
     AD_VALUE0, AD_VALUE1, AD_VALUE2, AD_VALUE3, ANALYSIS_TIME, DEBUG_VALUE, MIDI_TX_MAX_USED,
     MIDI_TX_OVERFLOW, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4, POINT5, PRESSURE,
-    SCAN_TIME, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3, UI_DRAW_TIME, WORK_MODE,
+    SCAN_TIME, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3, UI_DRAW_TIME,
 };
 
 /// 設定画面のページ番号
@@ -390,15 +389,16 @@ async fn display_diag(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
     .await;
 }
 
+/// 設定画面（page 4）。動作モードの切替は 2026-11-13 に無くしたので、今は設定する項目は無い。
+/// この画面にいる間は、タッチ・圧力の基準値を補正している（センサーに触れない）
 async fn display4(buffer: &mut OledBuffer, counter: u32, pacer: &mut DrawPacer) {
     buffer.clear();
     draw(buffer, pacer, &outline_frame()).await;
 
-    //let style_big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
     let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
 
     let mut text: String<32> = String::new();
-    let _ = write!(text, "Piano");
+    let _ = write!(text, "Setting");
     draw(
         buffer,
         pacer,
@@ -406,34 +406,25 @@ async fn display4(buffer: &mut OledBuffer, counter: u32, pacer: &mut DrawPacer) 
     )
     .await;
 
-    text.clear();
-    let _ = write!(text, "Violin");
-    draw(
-        buffer,
-        pacer,
-        &Text::new(&text, Point::new(12, 36), style_small),
-    )
-    .await;
+    if counter % 10 < 5 {
+        text.clear();
+        let _ = write!(text, "Don't touch");
+        draw(
+            buffer,
+            pacer,
+            &Text::new(&text, Point::new(12, 36), style_small),
+        )
+        .await;
+    }
 
     text.clear();
-    let _ = write!(text, "up/down   quit");
+    let _ = write!(text, "R: quit");
     draw(
         buffer,
         pacer,
         &Text::new(&text, Point::new(20, 56), style_small),
     )
     .await;
-
-    let work_mode = WORK_MODE
-        .load(core::sync::atomic::Ordering::Relaxed)
-        .try_into()
-        .unwrap_or(WorkMode::Piano);
-    if counter % 10 < 5 {
-        let outline = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-        let y = if work_mode == WorkMode::Piano { 10 } else { 27 };
-        let cursor = Rectangle::new(Point::new(8, y), Size::new(100, 14)).into_styled(outline);
-        draw(buffer, pacer, &cursor).await;
-    }
 }
 
 pub fn draw_bar(buffer: &mut OledBuffer, number: i32, value: u32) {

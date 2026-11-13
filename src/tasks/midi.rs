@@ -6,9 +6,11 @@ use portable_atomic::Ordering;
 
 use crate::constants::*;
 use crate::error;
-use crate::shared::{
-    MIDI_TX, MIDI_TX_MAX_USED, MIDI_TX_OVERFLOW, MidiPacket, RINGLED_RX_BITS, WORK_MODE,
-};
+use crate::shared::{MIDI_TX, MIDI_TX_MAX_USED, MIDI_TX_OVERFLOW, MidiPacket, RINGLED_RX_BITS};
+
+/// 受信した Note On/Off をリング LED に表示するか。動作モードを無くして Violin の形だけにしたので、
+/// Violin モードと同じく表示しない（2026-11-13）。Piano の処理を足すときに戻す
+const SHOW_RX_NOTES: bool = false;
 
 /// MIDI パケットを送信キューに入れる（待たない）。キューが一杯なら捨ててエラーを記録する
 pub fn queue_midi(packet: MidiPacket) {
@@ -60,12 +62,7 @@ pub async fn midi_rx_task(mut receiver: Receiver<'static, Driver<'static, USB>>)
     loop {
         match receiver.read_packet(&mut buf).await {
             Ok(n) => {
-                let work_mode = WORK_MODE
-                    .load(Ordering::Relaxed)
-                    .try_into()
-                    .unwrap_or(WorkMode::Piano);
-
-                if work_mode != WorkMode::Violin {
+                if SHOW_RX_NOTES {
                     for packet in buf[0..n].chunks(4) {
                         if packet.len() == 4 {
                             let status = packet[1];

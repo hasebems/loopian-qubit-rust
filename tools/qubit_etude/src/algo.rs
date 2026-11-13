@@ -4,7 +4,7 @@
 //! - 同じフレームで、その output を TouchTracker（touch_algo::touch）→ PlayInfo（touch_algo::playinfo）の
 //!   順に通し、タッチポイント毎の position・depth と、出てきたイベント（Note On/Off/Moved）をためる
 //!   （doc/touch_analysis.md §5.6・§7.4）。
-//!   ファームは信号処理と解析を 10ms 毎に行うので、同じ条件にするには間引きを 10ms にする。動作モードは Piano
+//!   ファームは信号処理と解析を 10ms 毎に行うので、同じ条件にするには間引きを 10ms にする。動作モードは無い（2026-11-13。Violin の形）
 //! - パラメータ・間引き・キー数が変わったら、Store の先頭から通し直す
 //! - 校正のスイッチは PC のアルゴリズムだけのもので、ファームの SETTING_MODE とは連動しない。
 //!   操作した時刻（そのとき最後に受け取ったフレームの時刻）を覚えておき、通し直すときも同じ時刻で切り替える
@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 
 use touch_algo::electrode::{ElectrodeSignal, ElectrodeState, Params, State};
 use touch_algo::playinfo::{
-    PlayInfo, STATUS_CC, STATUS_NOTE_MOVED, STATUS_NOTE_OFF, STATUS_NOTE_ON, WorkMode,
+    PlayInfo, STATUS_CC, STATUS_NOTE_MOVED, STATUS_NOTE_OFF, STATUS_NOTE_ON,
 };
 use touch_algo::touch::{MAX_TOUCH_POINTS, TouchTracker};
 
@@ -186,7 +186,7 @@ impl AlgoRunner {
                     touch.set_value(k, key.output());
                 }
                 touch.update();
-                play.update(touch, WorkMode::Piano);
+                play.update(touch);
             }
             self.push_result(t);
         }
@@ -407,7 +407,8 @@ mod tests {
             .collect();
         assert_eq!(kinds, vec![STATUS_NOTE_ON, STATUS_NOTE_OFF]);
         let on = runner.touch_events[0];
-        assert_eq!(on.note, 5 + touch_algo::playinfo::PIANO_OFFSET);
+        // 電極 2 つで 1 ノート: position 5.0 / 2 = 2.5 → ノート 3（四捨五入）
+        assert_eq!(on.note, 3 + touch_algo::playinfo::NOTE_OFFSET);
         assert!((on.location - 5.0).abs() < 0.5);
         // 触れている間はタッチポイント 0 に position がある
         let i = runner.time_us.partition_point(|&t| t < 4_200_000);
