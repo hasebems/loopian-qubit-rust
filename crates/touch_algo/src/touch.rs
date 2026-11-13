@@ -18,15 +18,29 @@
 //      Constants
 // =========================================================
 pub const MAX_TOUCH_POINTS: usize = 4; // Maximum number of touch points to track
-// Threshold for touch point detection。Pad の移動平均（4 サンプルの合計）を外したので、
-// 以前の 32 を 1/4 にして同じ感度にしている（doc/touch_baseline.md §4.6）
-pub const TOUCH_THRESHOLD: u16 = 8;
+/// 区間（doc/touch_analysis.md §3.4）: output がこれより大きい電極が続く範囲を、1 つの候補とする。
+/// 2 本の指の間や区間の端に残る小さな output で、区間がつながったり広がったりしないよう、0 にはしない。
+/// 追跡中の指は近くに区間があれば続くので、これが OFF のしきい値にもあたる（§3.5）。
+/// 2026-11-13、まずは 5 で始める
+pub const SEGMENT_THRESHOLD: u16 = 5;
+/// 新しい指を始める depth（§3.5）: 区間の depth がこれより大きく、近くに追跡中の指が無ければ、新しい指にする。
+/// 追跡中の指は、depth によらず続く。2026-11-13、まずは 10 で始める
+pub const TOUCH_ON_DEPTH: i16 = 10;
 pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec あたりの片側変化量
-pub const FINGER_RANGE: usize = 3; // Maximum serial numbers of one touch point
 
 const INIT_VAL: f32 = 100.0; // Invalid location initially
 const RELEASE_WAITING_TIME: u32 = 5; // Number of cycles to wait before considering a touch point released
-const CANDIDATE_MERGE_RANGE: f32 = 1.6; // Merge close candidates in the same cycle
+/// 1 周期に取る区間の数の上限。超えたら depth の小さい区間を捨てる
+const MAX_CANDIDATES: usize = 16;
+/// 近い区間をまとめる距離（doc/touch_analysis.md §3.7.2）。隣り合う区間の position の差がこれ以内なら、
+/// 1 本のタッチとしてまとめる。今まで 2 本だったとき・新しく触れたときに使う。
+/// §3.7 の初めの値は 6 電極だったが、区間で探すと遠すぎたので 4 にした（2026-11-13）
+pub const MERGE_DISTANCE: f32 = 4.0;
+/// 1 本だったタッチを分ける距離（§3.7.2）。今まで 1 本だったときは、これより離れるまで 1 本のまま。
+/// MERGE_DISTANCE との差がヒステリシスになる
+pub const SPLIT_DISTANCE: f32 = 7.0;
+/// 前の周期の指を数える範囲を、2 つの区間の position の外側へ広げる幅（電極）
+const MERGE_COUNT_MARGIN: f32 = 1.0;
 
 /// 電極の並び: 数と、リングかどうか（doc/touch_analysis.md §6.1 の 3・4）
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +58,14 @@ impl Layout {
             if d > n / 2.0 { d - n } else { d }
         } else {
             d
+        }
+    }
+    /// a から右へ b までの距離（b − a）。リングでは右回りに測る（0 〜 pads 未満）
+    pub(crate) fn ahead(self, a: f32, b: f32) -> f32 {
+        if self.ring {
+            wrap(b - a, self.pads as f32)
+        } else {
+            b - a
         }
     }
     /// 2 つの position の距離。リングでは近い向きに測る（例: 96 電極で 95.8 と 0.1 は 0.3）
@@ -83,6 +105,24 @@ pub enum Track {
     Started,  // 新しいタッチが始まった
     Followed, // 同じ指が続いている（動いたかもしれない）
     Released, // 離れた
+}
+
+/// 1 周期の候補: 区間（まとめたときは、まとめた範囲）と、そこから求めた position と depth。
+/// first・last は電極番号（last を含む）。リングでは巡回させる前の番号で、last が電極数以上になることがある
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    first: i32,
+    last: i32,
+    position: f32,
+    depth: i16,
+}
+impl Candidate {
+    const EMPTY: Self = Candidate {
+        first: 0,
+        last: 0,
+        position: INIT_VAL,
+        depth: 0,
+    };
 }
 
 /// 追跡している指 1 本。depth・position と継続時間を持つ
@@ -288,199 +328,149 @@ where
         if self.pads.as_ref().is_empty() {
             return;
         }
-        let mut temp_touch_point: [(f32, f32, i16); MAX_TOUCH_POINTS] =
-            [(INIT_VAL, INIT_VAL, 0); MAX_TOUCH_POINTS];
-        let mut temp_index = 0;
+        let mut candidates = [Candidate::EMPTY; MAX_CANDIDATES];
 
-        // 1: 全パッドを走査し、山をタッチの候補として temp_touch_point に保存
-        self.scan_pads(&mut temp_touch_point, &mut temp_index);
+        // 1: output が SEGMENT_THRESHOLD を超える電極が続く区間を探し、区間毎に position と depth を求める
+        let count = self.scan_segments(&mut candidates);
 
-        // 2: 候補の前後のパッドから、position と depth を求める
-        self.decide_touch_point(&mut temp_touch_point, &mut temp_index);
-
-        // 2.5: 同一周期内の近接候補を統合し、1つのタッチ候補として扱う
-        self.merge_close_candidates(&mut temp_touch_point, &mut temp_index);
+        // 2: 近い区間を 1 本のタッチにまとめ、depth の大きい順に並べる（§3.7.2）
+        let count = self.merge_segments(&mut candidates, count);
+        candidates[..count].sort_unstable_by(|a, b| b.depth.cmp(&a.depth));
+        self.touch_count = count;
 
         // 3: 前回の指と比較し、近いものを紐付けて更新、無ければ新しい指にする
-        self.track_touch_points(&temp_touch_point, temp_index);
+        self.track_touch_points(&candidates[..count]);
 
         // 4: 更新のなかった指が離れたかを判断する
         self.release_touch_points();
 
         self.any_touched = self.touch_points.iter().any(|tp| tp.is_touched());
     }
-    /// 山（両隣より output が大きい電極、またはその平らな頂上）を探し、TOUCH_THRESHOLD を超えたものを候補にする。
-    /// 傾きが 0 の所（同じ値が続く所）では、直前の 0 でない傾きを引き継ぐので、
-    /// 頂上が平らな山（例: 3, 10, 10, 2）も 1 つの山になる（doc/touch_analysis.md §6.1 の 1）。
-    /// 候補の電極は平らな頂上の中央（偶数個なら番号の小さい側）
-    fn scan_pads(
-        &mut self,
-        temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
-        temp_index: &mut usize,
-    ) {
-        let max_pads = self.max_pads() as i32;
-        // 傾き: 電極 i-1 → i で下がれば正、上がれば負（slope(i) = pad(i-1) - pad(i)）
-        let slope = |i: i32| self.pad(i - 1) as i16 - self.pad(i) as i16;
-        // 調べる傾きの範囲。リングでは 0..max_pads で 1 周（電極 max_pads-1 → 0 の傾きも含む）。
-        // リングでなければ、外側の 0 との傾きも含めて 0..=max_pads
-        let (end, mut diff_before) = if self.ring {
-            // 1 周目の始めの傾きは、つなぎ目の手前の最後の 0 でない傾きから引き継ぐ
-            let init = (1..max_pads)
-                .rev()
-                .map(slope)
-                .find(|&d| d != 0)
-                .unwrap_or(0);
-            (max_pads, init)
+    /// 区間（doc/touch_analysis.md §3.4）を探し、区間毎の position と depth を candidates に電極の順に入れて、
+    /// その数を返す。区間は、output が SEGMENT_THRESHOLD より大きい電極が続く範囲。depth・position は区間の中の
+    /// output をそのまま使う（`window_centroid`）。
+    /// リングでは SEGMENT_THRESHOLD 以下の電極の次から 1 周調べるので、つなぎ目をまたぐ区間も 1 つになる。
+    /// 全部の電極が SEGMENT_THRESHOLD を超えたときは、1 周を 1 つの区間にする。
+    /// 区間が MAX_CANDIDATES を超えたら、depth の小さいものを捨てる（電極の順は保つ）
+    fn scan_segments(&self, candidates: &mut [Candidate; MAX_CANDIDATES]) -> usize {
+        let n = self.max_pads() as i32;
+        let above = |i: i32| self.pad(i) > SEGMENT_THRESHOLD;
+        let mut count = 0usize;
+        let start = if self.ring {
+            match (0..n).find(|&i| !above(i)) {
+                Some(low) => low + 1,
+                None => {
+                    if let Some(c) = self.candidate(0, n - 1) {
+                        candidates[0] = c;
+                        count = 1;
+                    }
+                    return count;
+                }
+            }
         } else {
-            (max_pads + 1, 0)
+            0
         };
-        for i in 0..end {
-            let diff_after = slope(i);
-            if diff_after == 0 {
-                continue; // 平らな所は、直前の傾きを引き継ぐ
+        let mut i = 0;
+        while i < n {
+            if !above(start + i) {
+                i += 1;
+                continue;
             }
-            if diff_after > 0 && diff_before < 0 {
-                // 上り → 下り。電極 i-1 が頂上の右端
-                let top = i - 1;
-                let value = self.pad(top);
-                if value > TOUCH_THRESHOLD {
-                    // 平らな頂上の左端まで戻り、中央を候補にする
-                    let mut width = 1;
-                    while width < max_pads && self.pad(top - width) == value {
-                        width += 1;
-                    }
-                    let left = top - width + 1;
-                    let center = (left + (width - 1) / 2).rem_euclid(max_pads);
-                    temp_touch_point[*temp_index] = (center as f32, INIT_VAL, 0);
-                    *temp_index += 1;
-                    if *temp_index >= MAX_TOUCH_POINTS {
-                        break; // Prevent overflow of touch points
-                    }
-                }
+            let first = start + i;
+            while i < n && above(start + i) {
+                i += 1;
             }
-            diff_before = diff_after;
-        }
-        self.touch_count = *temp_index; // Update the touch count
-    }
-    fn decide_touch_point(
-        &mut self,
-        temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
-        temp_index: &mut usize,
-    ) {
-        // 1 つの電極だけが突出した候補をノイズとして捨てる判定（SINGLE_PAD_SPIKE_*）は外した（2026-11-08、
-        // doc/touch_analysis.md §6.1 の 10）。指が電極の真上を強く押したときの本当のタッチまで捨てていたため。
-        // 1 周期だけ跳ねるノイズは、electrode の中央値フィルタで時間方向に取り除いている
-        let fr = FINGER_RANGE as i32;
-        for tp in temp_touch_point.iter_mut().take(*temp_index) {
-            *tp = match self.window_centroid(tp.0 as i32, -fr, fr) {
-                Some((position, depth)) => (tp.0, position, depth),
-                // 無効なタッチポイント（sum=0だった場合）は初期値のままにする
-                None => (tp.0, INIT_VAL, 0),
+            let Some(c) = self.candidate(first, start + i - 1) else {
+                continue;
             };
+            if count < MAX_CANDIDATES {
+                candidates[count] = c;
+                count += 1;
+            } else if let Some((min_idx, min)) =
+                candidates.iter().enumerate().min_by_key(|(_, c)| c.depth)
+                && min.depth < c.depth
+            {
+                // depth の最も小さい区間を抜いて詰め、最後に足す
+                candidates.copy_within(min_idx + 1.., min_idx);
+                candidates[MAX_CANDIDATES - 1] = c;
+            }
         }
+        count
     }
-    /// 同一周期内で近接した候補を1つに統合する（doc/touch_analysis.md §6.1 の 7）。
-    /// まとまりのどれかの候補から CANDIDATE_MERGE_RANGE 以内の候補を、加わらなくなるまで加える。
-    /// 2 つ以上まとめたときは、まとめた候補の窓を合わせた範囲（一番左の山 − FINGER_RANGE 〜
-    /// 一番右の山 + FINGER_RANGE）で position と depth を計算し直す
-    fn merge_close_candidates(
-        &mut self,
-        temp_touch_point: &mut [(f32, f32, i16); MAX_TOUCH_POINTS],
-        temp_index: &mut usize,
-    ) {
+    /// 電極 first〜last（last を含む）の output から候補を作る。output がすべて 0 なら None
+    fn candidate(&self, first: i32, last: i32) -> Option<Candidate> {
+        self.window_centroid(first, 0, last - first)
+            .map(|(position, depth)| Candidate {
+                first,
+                last,
+                position,
+                depth,
+            })
+    }
+    /// 近い区間を 1 本のタッチにまとめ、まとめた後の数を返す（doc/touch_analysis.md §3.7.2）。
+    /// 電極の順に、まとめた候補と次の区間の position の差が `merge_limit` 以内ならまとめる。
+    /// まとめた候補の depth・position は、範囲（間の SEGMENT_THRESHOLD 以下の電極も含む）の output から求め直す。
+    /// リングでは、最後の候補と最初の候補（つなぎ目をまたいで隣り合う）も比べる
+    fn merge_segments(&self, candidates: &mut [Candidate; MAX_CANDIDATES], count: usize) -> usize {
+        if count < 2 {
+            return count;
+        }
         let layout = self.layout();
-        let n = *temp_index;
-        let mut merged: [(f32, f32, i16); MAX_TOUCH_POINTS] =
-            [(INIT_VAL, INIT_VAL, 0); MAX_TOUCH_POINTS];
-        let mut merged_count = 0usize;
-        let mut used = [false; MAX_TOUCH_POINTS];
-
-        for i in 0..n {
-            if used[i] {
-                continue;
-            }
-            used[i] = true;
-            let seed = temp_touch_point[i];
-            if seed.1 == INIT_VAL {
-                continue;
-            }
-
-            // まとまりを広げる
-            let mut member = [false; MAX_TOUCH_POINTS];
-            member[i] = true;
-            loop {
-                let mut added = false;
-                for j in 0..n {
-                    if used[j] {
-                        continue;
-                    }
-                    let cand = temp_touch_point[j];
-                    if cand.1 == INIT_VAL {
-                        used[j] = true;
-                        continue;
-                    }
-                    let near = (0..n).any(|k| {
-                        member[k]
-                            && layout.distance(temp_touch_point[k].1, cand.1)
-                                <= CANDIDATE_MERGE_RANGE
-                    });
-                    if near {
-                        used[j] = true;
-                        member[j] = true;
-                        added = true;
-                    }
-                }
-                if !added {
-                    break;
-                }
-            }
-
-            let result = if member.iter().filter(|&&m| m).count() == 1 {
-                seed
+        let mut merged = 0usize;
+        for k in 1..count {
+            let (cur, next) = (candidates[merged], candidates[k]);
+            if layout.ahead(cur.position, next.position)
+                <= self.merge_limit(cur.position, next.position)
+                && let Some(c) = self.candidate(cur.first, next.last)
+            {
+                candidates[merged] = c;
             } else {
-                // 山の電極の、seed の山からの相対位置（リングでは近い向き）で範囲を決める
-                let (mut lo, mut hi) = (0i32, 0i32);
-                for k in (0..n).filter(|&k| member[k]) {
-                    let d = layout.diff(temp_touch_point[k].0, seed.0) as i32;
-                    lo = lo.min(d);
-                    hi = hi.max(d);
-                }
-                let fr = FINGER_RANGE as i32;
-                lo -= fr;
-                // 同じ電極を 2 回数えないよう、範囲は電極数までにする
-                hi = (hi + fr).min(lo + layout.pads as i32 - 1);
-                match self.window_centroid(seed.0 as i32, lo, hi) {
-                    Some((position, depth)) => (seed.0, position, depth),
-                    None => seed,
-                }
-            };
-            if merged_count < MAX_TOUCH_POINTS {
-                merged[merged_count] = result;
-                merged_count += 1;
+                merged += 1;
+                candidates[merged] = next;
             }
         }
-
-        temp_touch_point[..merged_count].copy_from_slice(&merged[..merged_count]);
-        for tp in temp_touch_point.iter_mut().skip(merged_count) {
-            *tp = (INIT_VAL, INIT_VAL, 0);
+        let mut count = merged + 1;
+        if self.ring && count >= 2 {
+            let (last, first) = (candidates[count - 1], candidates[0]);
+            if layout.ahead(last.position, first.position)
+                <= self.merge_limit(last.position, first.position)
+                && let Some(c) = self.candidate(last.first, first.last + layout.pads as i32)
+            {
+                candidates[0] = c;
+                count -= 1;
+            }
         }
-        *temp_index = merged_count;
-        self.touch_count = merged_count;
+        count
     }
-    /// 候補を、前の周期の指（TouchPoint）に結び付ける。近いものが無ければ新しい指にする。
-    /// TouchPoint が空いていなければ、その候補は捨てる
-    fn track_touch_points(
-        &mut self,
-        temp_touch_point: &[(f32, f32, i16); MAX_TOUCH_POINTS],
-        temp_index: usize,
-    ) {
+    /// 区間 a・b（position。b は a から右へ測る）をまとめる距離。2 つの position の間（外側へ MERGE_COUNT_MARGIN 広げる）に
+    /// 前の周期の指が 1 本だけあれば、今まで 1 本だったとして SPLIT_DISTANCE。
+    /// 2 本以上、または 1 本も無ければ MERGE_DISTANCE（§3.7.2）
+    fn merge_limit(&self, a: f32, b: f32) -> f32 {
         let layout = self.layout();
-        for cand in temp_touch_point.iter().take(temp_index) {
-            let (location, intensity) = (cand.1, cand.2);
-            // 無効なタッチポイント（sum=0だった場合）はスキップ
-            if location == INIT_VAL {
-                continue;
-            }
+        let span = layout.ahead(a, b);
+        let fingers = self
+            .touch_points
+            .iter()
+            .filter(|tp| tp.is_touched())
+            .filter(|tp| {
+                // a の少し左（−MERGE_COUNT_MARGIN）から右へ測る
+                let t =
+                    layout.ahead(a - MERGE_COUNT_MARGIN, tp.get_location()) - MERGE_COUNT_MARGIN;
+                t >= -MERGE_COUNT_MARGIN && t <= span + MERGE_COUNT_MARGIN
+            })
+            .count();
+        if fingers == 1 {
+            SPLIT_DISTANCE
+        } else {
+            MERGE_DISTANCE
+        }
+    }
+    /// 候補を、前の周期の指（TouchPoint）に結び付ける。近いものが無ければ、depth が TOUCH_ON_DEPTH を
+    /// 超えるときだけ新しい指にする（§3.5）。TouchPoint が空いていなければ、その候補は捨てる
+    fn track_touch_points(&mut self, candidates: &[Candidate]) {
+        let layout = self.layout();
+        for cand in candidates {
+            let (location, intensity) = (cand.position, cand.depth);
 
             // 現在のタッチポイントで近いものがあれば、タッチポイントがそこから移動したとみなす
             let mut nearest = layout.pads as f32;
@@ -501,7 +491,10 @@ where
                 tp.follow(location, intensity);
                 continue;
             }
-            // 近いタッチポイントがない場合は、空いているタッチポイントで新しいタッチを始める
+            // 近いタッチポイントがない場合は、depth が足りれば、空いているタッチポイントで新しいタッチを始める
+            if intensity <= TOUCH_ON_DEPTH {
+                continue;
+            }
             if let Some(tp) = self.touch_points.iter_mut().find(|tp| !tp.is_touched()) {
                 tp.start(location, intensity);
             }
@@ -561,13 +554,14 @@ mod tests {
         tracker.update();
     }
 
-    /// 候補（山の電極）を返す
+    /// 候補（区間）の position を、depth の大きい順に返す
     fn candidates<const N: usize>(values: [u16; N], ring: bool) -> Vec<f32> {
-        let mut tracker = TouchTracker::new(values, ring);
-        let mut temp = [(INIT_VAL, INIT_VAL, 0); MAX_TOUCH_POINTS];
-        let mut n = 0;
-        tracker.scan_pads(&mut temp, &mut n);
-        temp[..n].iter().map(|t| t.0).collect()
+        let tracker = TouchTracker::new(values, ring);
+        let mut temp = [Candidate::EMPTY; MAX_CANDIDATES];
+        let n = tracker.scan_segments(&mut temp);
+        let n = tracker.merge_segments(&mut temp, n);
+        temp[..n].sort_unstable_by(|a, b| b.depth.cmp(&a.depth));
+        temp[..n].iter().map(|c| c.position).collect()
     }
 
     /// 電極 4〜6 に 1 本の指を置くと、depth・position が出て Started になり、
@@ -615,63 +609,192 @@ mod tests {
         assert!(tracker.touch_point(0).unwrap().is_touched());
     }
 
-    /// 頂上が平らな山も 1 つの山になる（§6.1 の 1）。候補は頂上の中央（偶数個なら小さい側）
+    /// 頂上が平らな山も、1 本の指で山が 2 つできても、区間が 1 つなら 1 つの候補になる（§3.4）
     #[test]
-    fn plateau_peak_is_found() {
+    fn segment_is_one_candidate() {
         assert_eq!(
             candidates([0, 3, 10, 10, 2, 0, 0, 0, 0, 0, 0, 0], false),
-            [2.0]
+            [2.5]
         );
+        // 山が 2 つ（電極 2 と 4）でも、間が SEGMENT_THRESHOLD を超えていれば 1 つの区間
         assert_eq!(
-            candidates([0, 3, 10, 10, 10, 2, 0, 0, 0, 0, 0, 0], false),
+            candidates([0, 0, 20, 10, 20, 0, 0, 0, 0, 0, 0, 0], false),
             [3.0]
         );
-        // 山の途中の平らな所（上りの途中）は山ではない
-        assert_eq!(
-            candidates([0, 3, 9, 9, 20, 2, 0, 0, 0, 0, 0, 0], false),
-            [4.0]
-        );
-        // 平らな頂上の山でも、タッチになる
+        // SEGMENT_THRESHOLD 以下の電極は区間に入らない（端の 3・2 は重心に効かない）
         let mut tracker = TouchTracker::new([0, 3, 20, 20, 3, 0, 0, 0, 0, 0, 0, 0u16], false);
         tracker.update();
         let tp = tracker.touch_point(0).unwrap();
         assert!(tp.is_touched());
+        assert_eq!(tp.get_intensity(), 40);
         assert_eq!(tp.get_location(), 2.5);
+    }
+
+    /// SEGMENT_THRESHOLD 以下の電極で区切られても、近ければ（MERGE_DISTANCE 以内）1 つにまとめ、
+    /// 間の電極も含めて depth・position を求め直す。離れていれば別の候補になる（§3.7.2）
+    #[test]
+    fn close_segments_are_merged() {
+        // 電極 3 と 5（間の 4 は 5 で区間に入らない）: 合計 55、重心 (3×20 + 4×5 + 5×30) / 55
+        let tracker = TouchTracker::new([0, 0, 0, 20, 5, 30, 0, 0, 0, 0, 0, 0u16], false);
+        let mut temp = [Candidate::EMPTY; MAX_CANDIDATES];
+        let n = tracker.scan_segments(&mut temp);
+        assert_eq!(n, 2);
+        assert_eq!(tracker.merge_segments(&mut temp, n), 1);
+        assert_eq!(temp[0].depth, 55);
+        assert!((temp[0].position - 230.0 / 55.0).abs() < 1e-4);
+        // 電極 1 と 9（8 電極離れている）は別
+        assert_eq!(
+            candidates([0, 20, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0], false),
+            [9.0, 1.0]
+        );
+    }
+
+    /// 1 本だった指は SPLIT_DISTANCE を超えるまで分けない（§3.7.2）
+    #[test]
+    fn one_finger_splits_only_beyond_split_distance() {
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        // 幅広く 1 本（電極 2〜9、position 5.5）
+        let wide: Vec<(usize, u16)> = (2..=9).map(|k| (k, 20)).collect();
+        put_values(&mut tracker, &wide);
+        assert_eq!(tracker.touch_count(), 1);
+        // 2 と 8.5（差 6.5）: MERGE_DISTANCE は超えるが、1 本だったので 1 本のまま
+        put_values(&mut tracker, &[(2, 20), (8, 20), (9, 20)]);
+        assert_eq!(tracker.touch_count(), 1);
+        assert_eq!(tracker.touch_point(0).unwrap().track(), Track::Followed);
+        assert!(!tracker.touch_point(1).unwrap().is_touched());
+        // 2 と 9.5（差 7.5）: SPLIT_DISTANCE を超えたので分ける
+        put_values(&mut tracker, &[(2, 20), (9, 20), (10, 20)]);
+        assert_eq!(tracker.touch_count(), 2);
+    }
+
+    /// 2 本だった指は MERGE_DISTANCE 以内に近づくまでまとめない（§3.7.2）
+    #[test]
+    fn two_fingers_merge_only_within_merge_distance() {
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        // 1 と 9（差 8）: 2 本
+        put_values(&mut tracker, &[(1, 20), (9, 20)]);
+        assert_eq!(tracker.touch_count(), 2);
+        // 2 と 8.5（差 6.5）: SPLIT_DISTANCE 以内だが、2 本だったので 2 本のまま
+        put_values(&mut tracker, &[(2, 20), (8, 20), (9, 20)]);
+        assert_eq!(tracker.touch_count(), 2);
+        // 3 と 8.5（差 5.5）: まだ 2 本
+        put_values(&mut tracker, &[(3, 20), (8, 20), (9, 20)]);
+        assert_eq!(tracker.touch_count(), 2);
+        // 4 と 8（差 4）: MERGE_DISTANCE 以内なのでまとめる
+        put_values(&mut tracker, &[(4, 20), (8, 20)]);
+        assert_eq!(tracker.touch_count(), 1);
+    }
+
+    /// 近い 2 本の指の間の電極が SEGMENT_THRESHOLD をまたいで揺れても、1 本のまま往復しない（§3.7.1）
+    #[test]
+    fn close_fingers_do_not_flicker() {
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        for t in 0..16 {
+            let mid = if (t / 2) % 2 == 0 { 8 } else { 4 };
+            put_values(
+                &mut tracker,
+                &[(3, 15), (4, 25), (5, mid), (6, 20), (7, 12)],
+            );
+            assert_eq!(tracker.touch_count(), 1, "t={t}");
+            let tp = tracker.touch_point(0).unwrap();
+            assert!(tp.is_touched());
+            // 間の電極も含めて求めるので、position は 4.8〜5.0 の間にとどまる
+            assert!(
+                (tp.get_location() - 4.9).abs() < 0.15,
+                "t={t} {}",
+                tp.get_location()
+            );
+            assert!(!tracker.touch_point(1).unwrap().is_touched());
+        }
+    }
+
+    /// 新しい指は depth が TOUCH_ON_DEPTH を超えたときに始まり、
+    /// 追跡中の指は depth が小さくなっても、近くに区間があれば続く（§3.5）
+    #[test]
+    fn on_depth_starts_and_segment_follows() {
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        // depth 8（区間は電極 5 だけ）: 新しい指にならない
+        put_values(&mut tracker, &[(5, 8)]);
+        assert!(!tracker.is_any_touched());
+        // depth 12（6, 6。電極の間）: 山はどちらも 6 だが、depth で始まる
+        put_values(&mut tracker, &[(5, 6), (6, 6)]);
+        let tp = tracker.touch_point(0).unwrap();
+        assert_eq!(tp.track(), Track::Started);
+        assert_eq!(tp.get_intensity(), 12);
+        assert_eq!(tp.get_location(), 5.5);
+        // depth 8 に下がっても続く
+        put_values(&mut tracker, &[(5, 8)]);
+        let tp = tracker.touch_point(0).unwrap();
+        assert_eq!(tp.track(), Track::Followed);
+        assert_eq!(tp.get_intensity(), 8);
+    }
+
+    /// 区間が MAX_CANDIDATES を超えても、depth の大きい区間は捨てない
+    #[test]
+    fn strongest_segment_is_kept_when_many() {
+        // depth 6 の区間を 8 電極おきに 19 個（まとめない距離）と、depth 50 の区間を 1 つ
+        let mut values = [0u16; 160];
+        for k in 0..19 {
+            values[k * 8] = 6;
+        }
+        values[155] = 50;
+        let c = candidates(values, false);
+        assert_eq!(c.len(), MAX_CANDIDATES);
+        assert_eq!(c[0], 155.0);
+        let mut tracker = TouchTracker::new(values, false);
+        tracker.update();
+        let tp = tracker.touch_point(0).unwrap();
+        assert!(tp.is_touched());
+        assert_eq!(tp.get_location(), 155.0);
     }
 
     /// リングでない構成では、両端の電極は隣り合わない（§6.1 の 4）
     #[test]
     fn edges_are_not_neighbors_without_ring() {
-        // 電極 0 の山。反対の端（電極 11）の output は窓に入らない
+        // 電極 0〜1 の区間。反対の端（電極 10・11）は SEGMENT_THRESHOLD 以下なので区間にならない
         let mut tracker = TouchTracker::new([30, 10, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5u16], false);
         tracker.update();
         let tp = tracker.touch_point(0).unwrap();
         assert!(tp.is_touched());
         assert_eq!(tp.get_intensity(), 40);
         assert_eq!(tp.get_location(), 0.25);
-        // 最後の電極の山も候補になる
+        // 両端に区間があっても、つながらない
         assert_eq!(
-            candidates([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 30], false),
-            [11.0]
+            candidates([20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 30], false),
+            [10.75, 0.0]
         );
     }
 
-    /// リングでは、つなぎ目をまたぐ山も 1 回だけ見つかる
+    /// リングでは、つなぎ目をまたぐ区間も 1 つになる
     #[test]
-    fn ring_finds_peak_at_seam_once() {
-        assert_eq!(
-            candidates([10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 20], true),
-            [11.0]
-        );
-        assert_eq!(
-            candidates([20, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10], true),
-            [0.0]
-        );
-        // 平らな頂上がつなぎ目をまたぐ（電極 11 と 0）: 中央の小さい側は電極 11
+    fn ring_segment_at_seam_is_one() {
+        // 電極 11（20）と 0（10）: 11 + 10/30
+        let c = candidates([10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 20], true);
+        assert_eq!(c.len(), 1);
+        assert!((c[0] - (11.0 + 10.0 / 30.0)).abs() < 1e-4, "{c:?}");
         assert_eq!(
             candidates([20, 3, 0, 0, 0, 0, 0, 0, 0, 0, 3, 20], true),
-            [11.0]
+            [11.5]
         );
+        // リングでない構成では、つながらない
+        assert_eq!(
+            candidates([20, 3, 0, 0, 0, 0, 0, 0, 0, 0, 3, 20], false),
+            [0.0, 11.0]
+        );
+        // つなぎ目の両側の近い区間（電極 1 と 22。右回りに 3）は、つなぎ目をまたいでまとめる
+        let mut v = [0u16; 24];
+        v[1] = 20;
+        v[22] = 20;
+        let c = candidates(v, true);
+        assert_eq!(c.len(), 1);
+        assert!((c[0] - 23.5).abs() < 1e-4, "{c:?}");
+        // つなぎ目から離れた区間（電極 1 と 12）は別
+        let mut v = [0u16; 24];
+        v[1] = 20;
+        v[12] = 30;
+        assert_eq!(candidates(v, true), [12.0, 1.0]);
+        // 全部の電極が SEGMENT_THRESHOLD を超えたら、1 周を 1 つの区間にする
+        assert_eq!(candidates([10u16; 12], true).len(), 1);
     }
 
     /// リングでは、つなぎ目の近くの position も 0 以上電極数未満になる（§6.1 の 3）
@@ -704,21 +827,6 @@ mod tests {
         let tp = tracker.touch_point(0).unwrap();
         assert_eq!(tp.track(), Track::Followed);
         assert_eq!(tp.get_location(), 0.0);
-        assert!(!tracker.touch_point(1).unwrap().is_touched());
-    }
-
-    /// まとめた候補は、窓を合わせた範囲で計算し直す（§6.1 の 7）
-    #[test]
-    fn merged_candidates_are_recomputed() {
-        let mut tracker = TouchTracker::new([0u16; 12], false);
-        // 山は電極 3 と 5（電極 1 と 8 の 8 はしきい値以下なので山にならない）。
-        // 窓の重心は 3.55 と 4.60 で、1.6 以内なのでまとめる
-        put_values(&mut tracker, &[(1, 8), (3, 20), (4, 5), (5, 20), (8, 8)]);
-        let tp = tracker.touch_point(0).unwrap();
-        // 電極 0〜8 の output: 合計 61、重心 = 3 + (−2×8 + 1×5 + 2×20 + 5×8) / 61
-        assert_eq!(tp.get_intensity(), 61);
-        let expected = 3.0 + 69.0 / 61.0;
-        assert!((tp.get_location() - expected).abs() < 1e-4);
         assert!(!tracker.touch_point(1).unwrap().is_touched());
     }
 }
