@@ -64,7 +64,6 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     // スキャン周期。debug_stream では PC のコマンドで変わるので、毎周期確かめる
     let mut period_us = scan_period_us();
     let mut period = Duration::from_micros(period_us as u64);
-    let mut divider = analysis_divider(period_us);
     let mut ticker = Ticker::every(period);
     let mut frame = 0u32;
     // 信号処理（ノイズ除去・基準値。doc/touch_baseline.md §3）。タスクの future は静的に確保されるので、
@@ -73,16 +72,22 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         ElectrodeSignal::new([ElectrodeState::INITIAL; TOTAL_QT_KEYS], Params::DEFAULT);
     // 起動直後はチップが自身を校正しているので、この時刻までは信号処理にも解析にも渡さない
     let analysis_start_at = Instant::now() + Duration::from_millis(TOUCH_STARTUP_SETTLE_MS);
+    // 次に信号処理と解析を行う時刻。フレームの数ではなく時刻で決める（2026-11-13）。
+    // スキャンが周期を超えると ticker.reset() でフレームの間隔が延びるので、フレームの数で決めると解析の間隔も延びる
+    // （etude の 2ms 周期では、スキャンに約 2.4ms かかってフレームが約 4.7ms 毎になり、5 フレーム毎の解析が約 23.5ms 毎になっていた）
+    let analysis_period = Duration::from_micros(ANALYSIS_PERIOD_US as u64);
+    let analysis_tolerance = Duration::from_micros(ANALYSIS_TOLERANCE_US as u64);
+    // None は、まだ解析していない（最初の解析のフレームから数え始める）
+    let mut next_analysis_at: Option<Instant> = None;
 
     // Task Loop
     loop {
         ticker.next().await;
         let cycle_start = Instant::now();
         if scan_period_us() != period_us {
-            // 周期が変わったら Ticker を作り直し、解析の間引きも計算し直す
+            // 周期が変わったら Ticker を作り直す
             period_us = scan_period_us();
             period = Duration::from_micros(period_us as u64);
-            divider = analysis_divider(period_us);
             ticker = Ticker::every(period);
         }
 
@@ -97,8 +102,19 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         queue_debug_frame(&read_touch, frame, cycle_start);
 
         // 信号処理と解析: TouchTracker・PlayInfo と touch_algo のパラメータは 10ms 毎（8〜10ms）に呼ばれる前提なので、
-        // divider フレームに 1 回行う（20ms 周期では毎回）。起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わない
-        if cycle_start >= analysis_start_at && frame.is_multiple_of(divider) {
+        // 前の解析から ANALYSIS_PERIOD_US（10ms）経ったフレームで行う。ANALYSIS_TOLERANCE_US まで早くてもよい
+        // （2ms 周期のフレームの揺れを吸収する）。遅れたときは、間隔を保つよう次の時刻を ANALYSIS_PERIOD_US 先にし、
+        // 1 周期以上遅れたら今のフレームから数え直す（20ms 周期では毎フレーム）。qubit_etude の間引きと同じ決め方。
+        // 起動直後の TOUCH_STARTUP_SETTLE_MS の間は行わず、その後の最初の解析のフレームから数え始める
+        let analysis_due = match next_analysis_at {
+            None => cycle_start >= analysis_start_at,
+            Some(at) => cycle_start + analysis_tolerance >= at,
+        };
+        if analysis_due {
+            next_analysis_at = Some(match next_analysis_at {
+                Some(at) if cycle_start <= at + analysis_period => at + analysis_period,
+                _ => cycle_start + analysis_period,
+            });
             let analysis_start = Instant::now();
             // 設定画面にいる間は校正（基準値の速い追従と noise_floor の計測）
             let (raw, valid) = read_touch.raw();

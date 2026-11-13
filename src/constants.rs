@@ -10,7 +10,7 @@ pub const CORE1_STACK_SIZE: usize = 16384;
 
 // タッチのスキャン周期と解析周期
 // TouchTracker・PlayInfo の時間に関する定数は 10ms 毎に呼ばれる前提なので、解析は 10ms 毎に行う。
-// スキャン周期を短くする場合は、analysis_divider() フレームに 1 回解析する
+// 解析するフレームはフレームの数ではなく時刻で決める（前の解析から ANALYSIS_PERIOD_US 経ったフレーム。tasks/touch.rs）
 // debug_stream では、チップの更新（8ms 周期）より速く読んで観察するため既定を 2ms にし、
 // PC からのコマンドで SCAN_PERIODS_US のどれかに変えられる（doc/debug_env.md §3.3）
 #[cfg(not(feature = "debug_stream"))]
@@ -20,14 +20,9 @@ pub const SCAN_PERIOD_US: u32 = 2_000;
 #[cfg(feature = "debug_stream")]
 pub const SCAN_PERIODS_US: [u32; 4] = [2_000, 5_000, 10_000, 20_000]; // PC から選べる周期
 pub const ANALYSIS_PERIOD_US: u32 = 10_000;
-const _: () = assert!(ANALYSIS_PERIOD_US.is_multiple_of(SCAN_PERIOD_US));
-
-/// 解析の間引き（何フレームに 1 回解析するか）。
-/// 周期が 10ms より長い（20ms）ときは毎フレーム解析する。このとき TouchTracker・PlayInfo の時間の計算はずれる
-pub const fn analysis_divider(scan_period_us: u32) -> u32 {
-    let divider = ANALYSIS_PERIOD_US / scan_period_us;
-    if divider == 0 { 1 } else { divider }
-}
+/// 解析の時刻がこのくらい早くても解析する（2ms 周期のフレームの揺れを吸収する。qubit_etude の DECIMATION_TOLERANCE_US と同じ）。
+/// スキャン周期が 10ms より長い（20ms）ときは毎フレーム解析する。このとき TouchTracker・PlayInfo の時間の計算はずれる
+pub const ANALYSIS_TOLERANCE_US: u32 = 1_000;
 // 起動後、この時間はスキャンだけを行い、信号処理（touch_algo）にも解析（ノートの生成）にも渡さない。
 // AT42QT1070 は電源投入から 230ms 未満で自身を校正する（データシート §6.5 TD）ので、
 // その前の値で touch_algo が基準値を初期取得しないようにする（doc/touch_baseline.md §4.4）

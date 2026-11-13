@@ -88,6 +88,7 @@ debug_stream = []   # USB CDC でタッチの生値を PC に送る
     - 周期の既定値は `constants.rs` の `SCAN_PERIOD_US`（µs の const）。`debug_stream` のときは 2000、無いときは 10000
     - 実行中の周期は `shared::scan_period_us()` で読み、`shared::set_scan_period_us()` で変える（値は `shared.rs` の非公開の Atomic `SCAN_PERIOD_SETTING_US` に持つ）。`debug_stream` が無いときは `scan_period_us()` は const を返すだけ
     - 周期を変えたときは `Ticker` を作り直し、解析の間引き（`analysis_divider(周期)`）も計算し直す
+        - 2026-11-13 変更: `analysis_divider()` を消し、解析はフレームの数ではなく時刻で決める（前の解析から 10ms 経ったフレーム。`hw96_check.md` §2.1）。スキャンが周期を超えて `ticker.reset()` されると、フレームの数で決めた解析の間隔が延びていたため（etude の 2ms 周期では約 23.5ms 毎）
     - **選べる周期は 2, 5, 10, 20ms の 4 つ**（2026-09-30 決定）。それ以外の値を指定されたら、周期は変えずにエラーを返す
     - 20ms は 10ms の約数ではないので、解析の周期を 10ms にできない。**20ms のときは毎スキャン（20ms 毎）解析する**（2026-09-30 決定）。`analysis_divider()` は `max(10ms / 周期, 1)` を返す
         - `QubitTouch` の時間の定数は 10ms 毎の呼び出しを前提にしているので、20ms のときは時間の計算（離したと判断するまでの時間、ビブラート、ベロシティ）が 2 倍にずれる。承知の上で使う（ノートは出るが、振る舞いは通常と同じではない）

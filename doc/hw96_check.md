@@ -29,6 +29,17 @@
 - 1 周のスキャン時間を診断ページの `SCAN_TIME`（最小・平均・最大）で実測し、スキャン周期（`SCAN_PERIOD_US`）を 8ms にするか 10ms にするかを決める（`touch_baseline.md` §3.2）。10ms にすると、チップの 8ms 周期とずれて、ときどきサンプルを 1 つ飛ばす
 - 決めた周期で `PERIOD_OVERRUN` が増えないこと。スキャン＋解析が周期を超えることが常態化するなら、`task_architecture.md` §4.1 のとおりタスクを分けるなどの対処を考える
 
+### 2.1 etude での実測と 96 キーの見積もり（2026-11-13）
+
+- etude（チップ 2 つ）の `SCAN_TIME`: 最小 2027µs・平均 24xxµs・最大 3086µs（ユーザーが OLED の診断ページで読んだ）。チップ 1 つあたり約 1.2ms
+- 記録（`.qlog` 3 本、2ms 周期の設定）では、フレームの seq は欠けずに続き、1 フレームが約 4.7ms 毎だった。スキャン（約 2.4〜2.7ms）が毎回 2ms を超え、`ticker.reset()` の後に 2ms 待つため
+- **96 キー（チップ 16 個）では、スキャンに約 20ms かかる見込みで、10ms に収まらない**。前の見積もり（8ms 前後）は I2C の理論値（400kHz で 1 バイト約 22.5µs、チップ 1 つあたり約 0.4ms）に近いが、実測はその約 3 倍
+- 遅い理由の見当: AT42QT1070 はバイト毎の処理の間 SCL を Low に引き延ばす（クロックストレッチ。データシート付録 A.5「The device extends the SCL low period by pulling the SCL line low whenever it needs extra time for processing between the data transmissions」）。波形では確かめていない
+- 別に気づいたこと（未確認）: データシート付録 A.5 は「Each write or read cycle must end with a stop condition. The device may not respond correctly if a cycle is terminated by a new start condition.」としている。今の読み取り（`at42.read_6key`・`read_1key`）は `write_read`（リピーテッドスタート）なので、これに反する。hi/lo のずれ（読み直しで対処している）の原因かもしれない。書き込みと読み出しを STOP で区切った 2 回の通信に分ければデータシートどおりになる（時間は少し延びる）
+- 対処の案（未決）: 解析の周期を 20ms にする（`touch_algo` の時間の定数を時間で数えるように直す）、2 つの I2C バスに分けて同時に読む（配線の変更が要る）、1 周期に半分ずつ読む。先に `write_read` を STOP で区切ったときの時間と hi/lo のずれを etude で確かめる
+- 解析の周期のずれは直した（2026-11-13）: 前は解析を「`analysis_divider()` フレームに 1 回」で決めていたので、スキャンが周期を超えると解析の間隔も延びていた（etude では約 23.5ms 毎。ファームのベロシティが qubit_etude より大きく出ていた原因）。今は前の解析から 10ms 経ったフレームで解析する（`touch_task`、`ANALYSIS_TOLERANCE_US`）。スキャンが周期を超えても、解析の間隔は平均 10ms に保たれる。ただし 1 回のスキャンが 10ms を超える（96 キーの見込み）と、解析も毎フレーム（スキャンの間隔）になる
+    - 2026-11-13 確認: etude に書き込み、qubit_etude（間引き 10ms）とファームのベロシティがほぼ同じになったことをユーザーが確かめた
+
 ## 3. キー毎の感度がそろっているか
 
 元: `debug_env.md` §6.2.3 の「96 キーでの再確認」
