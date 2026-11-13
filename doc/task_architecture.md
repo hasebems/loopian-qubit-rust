@@ -5,7 +5,7 @@
 > - エラー 25（予約）は `SPAWN_DEBUG_STREAM` として使っている（`debug_stream` feature のときだけ）
 > - `task_architecture` ブランチは、そこから分けた `debug_env` ブランチにすべて含まれているので削除した（2026-10-01）。その後の改修（§4.4.1 の描画の分割など）も `debug_env` で行う
 - OLED の描画を分割した（2026-10-01、§4.4.1）。診断ページの `Drw`（`UI_DRAW_TIME`）は「描画 1 回の時間」から「1 回に Core0 を止めた最長の時間」に変わった
-- タッチの基準値をチップの基準値から `touch_algo`（`crates/touch_algo` の `ElectrodeSignal`）に置き換えた（2026-10-03、`doc/debug_env.md` の段階 4、`doc/touch_baseline.md` §4）。`read_touch` はチップの基準値と `reference_adjust` を使わず、生値と読み取り成功フラグ（`valid`）を返すだけになった。`touch_task` はスキャンと解析の間で `ElectrodeSignal::process()` を呼び、その output を `QubitTouch` に渡す。`POINT0`–`POINT5` はキー 0〜5 の output を出す
+- タッチの基準値をチップの基準値から `touch_algo`（`crates/touch_algo` の `ElectrodeSignal`）に置き換えた（2026-10-03、`doc/debug_env.md` の段階 4、`doc/touch_baseline.md` §3.11）。`read_touch` はチップの基準値と `reference_adjust` を使わず、生値と読み取り成功フラグ（`valid`）を返すだけになった。`touch_task` はスキャンと解析の間で `ElectrodeSignal::process()` を呼び、その output を `QubitTouch` に渡す。`POINT0`–`POINT5` はキー 0〜5 の output を出す
 
 
 ## 1. 目的と位置づけ
@@ -144,7 +144,7 @@ loop {
 - `SCAN_PERIOD_MS` の初期値は **10ms**。`QubitTouch` の中の時間の定数（`TOUCH_SAMPLE_PERIOD_SEC` = 0.01、`RELEASE_WAITING_TIME`、ベロシティ計算の 10ms tick など）は「10ms 毎に呼ばれる」ことを前提にしているため。これで改修前と同じ振る舞いになる
 - **解析する周期**: `SCAN_PERIOD_MS` を 10ms より短くする場合（デバッグ環境での 2ms など）でも、解析は 10ms 毎に行う。`ANALYSIS_DIVIDER = ANALYSIS_PERIOD_MS / SCAN_PERIOD_MS` フレームに 1 回解析する（`ANALYSIS_PERIOD_MS` = 10）。そのため `SCAN_PERIOD_MS` は 10 の約数（1, 2, 5, 10）に限り、倍数であることをコンパイル時に確認する。3 つの定数は `constants.rs` に置く
 - **起動直後の `TOUCH_STARTUP_SETTLE_MS`（500ms）の間は、スキャンだけを行い解析しない**。改修の時点では、`read_touch` がチップの基準値を最初のスキャンの後に初めて読むので、最初のフレームは基準値 0 で引かれて全キーが大きな値になり、スキャンの直後に必ず解析する構成ではこれを確実に拾って誤ったノートを出していた（§6.1「動作チェック後の修正」）。チップ自身の校正（電源投入から 230ms 未満）と、基準値の読み直し（120ms 毎）が何度か行われるまで待つ、という理由だった
-    - （2026-10-03 追記）`touch_algo` への置き換えの後は、チップの基準値は読まない。待つ理由は、チップ自身の校正が終わる前の値で `touch_algo` が基準値を初期取得しないようにするため。この間は信号処理（`ElectrodeSignal::process()`）も呼ばない。500ms の後、`touch_algo` の初期取得（`ACQUIRE_MS` = 300ms）が終わるまで output は 0 になる（`touch_baseline.md` §4.4）
+    - （2026-10-03 追記）`touch_algo` への置き換えの後は、チップの基準値は読まない。待つ理由は、チップ自身の校正が終わる前の値で `touch_algo` が基準値を初期取得しないようにするため。この間は信号処理（`ElectrodeSignal::process()`）も呼ばない。500ms の後、`touch_algo` の初期取得（`ACQUIRE_MS` = 300ms）が終わるまで output は 0 になる（`touch_baseline.md` §3.11）
 - 毎フレームの解析（フレーム駆動）と、`QubitTouch` の時間基準化は、`touch_baseline.md`（速さ検出）の段階で行う
 - `ReadTouch` と `QubitTouch` は同じタスクの中の構造体で、値は関数呼び出しで渡す。今の `TOUCH_RAW_DATA`（Mutex）は不要になる
 - `SETTING_MODE`（§4.5）を参照して基準値を補正する。改修の時点では `read_touch` の `reference_adjust` で従来どおり行っていた。2026-10-03 からは `ElectrodeSignal::process()` の `calibrating` に渡し、`touch_algo` が校正（基準値の速い追従と noise_floor の計測）を行う（`touch_baseline.md` §3.7）
@@ -236,7 +236,7 @@ loop {
 | `WORK_MODE` | `AtomicU8` | ui (C0) | touch (C1), pressure, midi_rx, ui (C0) | 変更なし |
 | `SETTING_MODE` | `AtomicBool` | ui (C0) | touch (C1), pressure, ringled (C0) | 旧 `WORK_MODE_DISPLAY`。設定画面（基準値の補正中）であることを表すので、名前を意味に合わせる |
 | `ERROR_CODE` | `AtomicU8` | 全タスク | status_led, ui (C0) | `src/error.rs` へ移し、外からは見えないようにする。`error::set` / `clear` / `get` で扱う（§4.7） |
-| `POINT0`–`POINT5`, `DEBUG_VALUE`, `AD_VALUE*` | Atomic | 各タスク | ui (C0) | デバッグ表示用。`debug_env.md` の段階で PC 側に移し、整理する。→ `POINT0`–`POINT5` は PC 側に移さず、キー 0〜5 の `touch_algo` の output を出すことにした（2026-10-03、`touch_baseline.md` §3.10） |
+| `POINT0`–`POINT5`, `DEBUG_VALUE`, `AD_VALUE*` | Atomic | 各タスク | ui (C0) | デバッグ表示用。`debug_env.md` の段階で PC 側に移し、整理する。→ `POINT0`–`POINT5` は PC 側に移さず、キー 0〜5 の `touch_algo` の output を出すことにした（2026-10-03、`touch_baseline.md` §3.9） |
 | `SCAN_TIME`, `ANALYSIS_TIME`, `UI_DRAW_TIME` | `TimeStat`（最小・平均・最大の Atomic の組） | touch (C1)、ui (C0) | ui (C0) | 新規。診断用（§4.6） |
 | `PERIOD_OVERRUN`, `MIDI_TX_MAX_USED`, `MIDI_TX_OVERFLOW` | `AtomicU32` | touch (C1)、`queue_midi` の呼び出し元 | ui (C0) | 新規。診断用（§4.6） |
 

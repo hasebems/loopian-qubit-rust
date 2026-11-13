@@ -25,7 +25,7 @@ pub const ANALYSIS_PERIOD_US: u32 = 10_000;
 pub const ANALYSIS_TOLERANCE_US: u32 = 1_000;
 // 起動後、この時間はスキャンだけを行い、信号処理（touch_algo）にも解析（ノートの生成）にも渡さない。
 // AT42QT1070 は電源投入から 230ms 未満で自身を校正する（データシート §6.5 TD）ので、
-// その前の値で touch_algo が基準値を初期取得しないようにする（doc/touch_baseline.md §4.4）
+// その前の値で touch_algo が基準値を初期取得しないようにする（doc/touch_baseline.md §3.11）
 pub const TOUCH_STARTUP_SETTLE_MS: u64 = 500;
 
 // Message for Ringled / touch callback status

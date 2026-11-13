@@ -44,7 +44,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
         error::set(error::TOUCH_INIT_TIMEOUT);
     }
 
-    // タッチの解析は 2 つの層: depth・position（TouchTracker）→ 演奏情報（PlayInfo）。doc/touch_analysis.md §5.6
+    // タッチの解析は 2 つの層: depth・position（TouchTracker）→ 演奏情報（PlayInfo）。doc/touch_analysis.md §5
     let mut tracker = TouchTracker::new([0u16; TOTAL_QT_KEYS], TOUCH_RING);
     let mut play = PlayInfo::new(|status, note, velocity, _location| {
         // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信キューに入れる

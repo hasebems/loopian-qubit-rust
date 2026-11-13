@@ -880,7 +880,7 @@ impl EtudeApp {
             });
         }
 
-        ui.collapsing("パラメータ（doc/touch_baseline.md §3.11）", |ui| {
+        ui.collapsing("パラメータ（doc/touch_baseline.md §3.10）", |ui| {
             let mut p = self.algo.params;
             egui::Grid::new("params").show(ui, |ui| {
                 param(

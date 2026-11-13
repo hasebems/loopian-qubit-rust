@@ -18,7 +18,7 @@ fn record_i2c(stat: &TimeStat, start: Instant, ok: bool) {
     }
 }
 
-/// 全キーの生値（Key Signal）を読む。基準値の管理・ノイズ除去は touch_algo が行う（doc/touch_baseline.md §4.3）
+/// 全キーの生値（Key Signal）を読む。基準値の管理・ノイズ除去は touch_algo が行う（doc/touch_baseline.md §3.11）
 pub struct ReadTouch {
     raw_value: [u16; constants::TOTAL_QT_KEYS],
     valid: u128, // 最後のスキャンの読み取り成功フラグ（1 bit / キー）

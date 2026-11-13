@@ -3,7 +3,7 @@
 //! - Store のフレームを、間引いてから ElectrodeSignal::process に 1 フレームずつ通し、結果を時刻と一緒にためる
 //! - 同じフレームで、その output を TouchTracker（touch_algo::touch）→ PlayInfo（touch_algo::playinfo）の
 //!   順に通し、タッチポイント毎の position・depth と、出てきたイベント（Note On/Off/Moved）をためる
-//!   （doc/touch_analysis.md §5.6・§7.4）。
+//!   （doc/touch_analysis.md §5・§7.1）。
 //!   ファームは信号処理と解析を 10ms 毎に行うので、同じ条件にするには間引きを 10ms にする。動作モードは無い（2026-11-13。Violin の形）
 //! - パラメータ・間引き・キー数が変わったら、Store の先頭から通し直す
 //! - 校正のスイッチは PC のアルゴリズムだけのもので、ファームの SETTING_MODE とは連動しない。

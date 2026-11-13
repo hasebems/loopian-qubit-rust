@@ -8,7 +8,7 @@
 //!   約 71 分で一周するので、時間の差は `wrapping_sub` で求める
 //! - キー毎の状態は、呼び出し側が用意した `[ElectrodeState]`（ファームは配列、PC は Vec）に持つ
 
-/// 調整パラメータ（doc/touch_baseline.md §3.11）。既定値は設計書の仮の値
+/// 調整パラメータ（doc/touch_baseline.md §3.10）。既定値は設計書の仮の値
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Params {
     /// 平滑化の移動平均のサンプル数（1..=MAX_SMOOTH_SAMPLES）

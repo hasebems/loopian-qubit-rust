@@ -1,9 +1,9 @@
 //! 記録（.qlog）を touch_algo に通し、キー毎の結果と、タッチの解析のイベントを表示する（GUI を使わない）
-//! 解析のイベントは、記録の中のファームのイベントと並べて出す（doc/touch_analysis.md §7.4）。
+//! 解析のイベントは、記録の中のファームのイベントと並べて出す（doc/touch_analysis.md §8）。
 //! ファームと同じ条件にするには、間引きを 10000 にする
 //!
 //! 実行: `cd tools/qubit_etude && cargo run --example replay_algo -- <記録.qlog> [間引き µs（既定 8000、0 で間引かない）]`
-//! PC アプリと同じ AlgoRunner を使う。パラメータは既定値（doc/touch_baseline.md §3.11）
+//! PC アプリと同じ AlgoRunner を使う。パラメータは既定値（doc/touch_baseline.md §3.10）
 use std::path::PathBuf;
 
 use qubit_etude::algo::AlgoRunner;

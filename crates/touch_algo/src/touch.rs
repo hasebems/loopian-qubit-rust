@@ -35,17 +35,17 @@ const INIT_VAL: f32 = 100.0; // Invalid location initially
 const RELEASE_WAITING_US: u32 = 50_000;
 /// 1 周期に取る区間の数の上限。超えたら depth の小さい区間を捨てる
 const MAX_CANDIDATES: usize = 16;
-/// 近い区間をまとめる距離（doc/touch_analysis.md §3.7.2）。隣り合う区間の position の差がこれ以内なら、
+/// 近い区間をまとめる距離（doc/touch_analysis.md §3.7.1）。隣り合う区間の position の差がこれ以内なら、
 /// 1 本のタッチとしてまとめる。今まで 2 本だったとき・新しく触れたときに使う。
 /// §3.7 の初めの値は 6 電極だったが、区間で探すと遠すぎたので 4 にした（2026-11-13）
 pub const MERGE_DISTANCE: f32 = 4.0;
-/// 1 本だったタッチを分ける距離（§3.7.2）。今まで 1 本だったときは、これより離れるまで 1 本のまま。
+/// 1 本だったタッチを分ける距離（§3.7.1）。今まで 1 本だったときは、これより離れるまで 1 本のまま。
 /// MERGE_DISTANCE との差がヒステリシスになる
 pub const SPLIT_DISTANCE: f32 = 7.0;
 /// 前の周期の指を数える範囲を、2 つの区間の position の外側へ広げる幅（電極）
 const MERGE_COUNT_MARGIN: f32 = 1.0;
 
-/// 電極の並び: 数と、リングかどうか（doc/touch_analysis.md §6.1 の 3・4）
+/// 電極の並び: 数と、リングかどうか（doc/touch_analysis.md §3.6）
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layout {
     pub(crate) pads: u16,
@@ -284,7 +284,7 @@ where
     }
     /// 電極 center からの相対位置 lo..=hi の電極の output から、(position, depth) を求める。
     /// 重心は center からの相対位置で計算し、リングでは 0 以上電極数未満に巡回させる。
-    /// リングでなければ範囲外の電極は 0 なので、重心に効かない（doc/touch_analysis.md §6.1 の 3）。
+    /// リングでなければ範囲外の電極は 0 なので、重心に効かない（doc/touch_analysis.md §3.6）。
     /// output がすべて 0 なら None
     fn window_centroid(&self, center: i32, lo: i32, hi: i32) -> Option<(f32, i16)> {
         let mut sum: i32 = 0;
@@ -335,7 +335,7 @@ where
         // 1: output が SEGMENT_THRESHOLD を超える電極が続く区間を探し、区間毎に position と depth を求める
         let count = self.scan_segments(&mut candidates);
 
-        // 2: 近い区間を 1 本のタッチにまとめ、depth の大きい順に並べる（§3.7.2）
+        // 2: 近い区間を 1 本のタッチにまとめ、depth の大きい順に並べる（§3.7.1）
         let count = self.merge_segments(&mut candidates, count);
         candidates[..count].sort_unstable_by(|a, b| b.depth.cmp(&a.depth));
         self.touch_count = count;
@@ -409,7 +409,7 @@ where
                 depth,
             })
     }
-    /// 近い区間を 1 本のタッチにまとめ、まとめた後の数を返す（doc/touch_analysis.md §3.7.2）。
+    /// 近い区間を 1 本のタッチにまとめ、まとめた後の数を返す（doc/touch_analysis.md §3.7.1）。
     /// 電極の順に、まとめた候補と次の区間の position の差が `merge_limit` 以内ならまとめる。
     /// まとめた候補の depth・position は、範囲（間の SEGMENT_THRESHOLD 以下の電極も含む）の output から求め直す。
     /// リングでは、最後の候補と最初の候補（つなぎ目をまたいで隣り合う）も比べる
@@ -446,7 +446,7 @@ where
     }
     /// 区間 a・b（position。b は a から右へ測る）をまとめる距離。2 つの position の間（外側へ MERGE_COUNT_MARGIN 広げる）に
     /// 前の周期の指が 1 本だけあれば、今まで 1 本だったとして SPLIT_DISTANCE。
-    /// 2 本以上、または 1 本も無ければ MERGE_DISTANCE（§3.7.2）
+    /// 2 本以上、または 1 本も無ければ MERGE_DISTANCE（§3.7.1）
     fn merge_limit(&self, a: f32, b: f32) -> f32 {
         let layout = self.layout();
         let span = layout.ahead(a, b);
@@ -624,7 +624,7 @@ mod tests {
         assert!(!tracker.is_any_touched());
     }
 
-    /// 1 つの電極だけが突出していても（指が電極の真上を強く押した）、タッチになる（§6.1 の 10）
+    /// 1 つの電極だけが突出していても（指が電極の真上を強く押した）、タッチになる（§3.4）
     #[test]
     fn dominant_single_electrode_is_a_touch() {
         let mut tracker = TouchTracker::new([0, 0, 0, 0, 30, 200, 30, 0, 0, 0, 0, 0u16], false);
@@ -661,7 +661,7 @@ mod tests {
     }
 
     /// SEGMENT_THRESHOLD 以下の電極で区切られても、近ければ（MERGE_DISTANCE 以内）1 つにまとめ、
-    /// 間の電極も含めて depth・position を求め直す。離れていれば別の候補になる（§3.7.2）
+    /// 間の電極も含めて depth・position を求め直す。離れていれば別の候補になる（§3.7.1）
     #[test]
     fn close_segments_are_merged() {
         // 電極 3 と 5（間の 4 は 5 で区間に入らない）: 合計 55、重心 (3×20 + 4×5 + 5×30) / 55
@@ -679,7 +679,7 @@ mod tests {
         );
     }
 
-    /// 1 本だった指は SPLIT_DISTANCE を超えるまで分けない（§3.7.2）
+    /// 1 本だった指は SPLIT_DISTANCE を超えるまで分けない（§3.7.1）
     #[test]
     fn one_finger_splits_only_beyond_split_distance() {
         let mut tracker = TouchTracker::new([0u16; 12], false);
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(tracker.touch_count(), 2);
     }
 
-    /// 2 本だった指は MERGE_DISTANCE 以内に近づくまでまとめない（§3.7.2）
+    /// 2 本だった指は MERGE_DISTANCE 以内に近づくまでまとめない（§3.7.1）
     #[test]
     fn two_fingers_merge_only_within_merge_distance() {
         let mut tracker = TouchTracker::new([0u16; 12], false);
@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(tp.get_location(), 155.0);
     }
 
-    /// リングでない構成では、両端の電極は隣り合わない（§6.1 の 4）
+    /// リングでない構成では、両端の電極は隣り合わない（§3.6）
     #[test]
     fn edges_are_not_neighbors_without_ring() {
         // 電極 0〜1 の区間。反対の端（電極 10・11）は SEGMENT_THRESHOLD 以下なので区間にならない
@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(candidates([10u16; 12], true).len(), 1);
     }
 
-    /// リングでは、つなぎ目の近くの position も 0 以上電極数未満になる（§6.1 の 3）
+    /// リングでは、つなぎ目の近くの position も 0 以上電極数未満になる（§3.6）
     #[test]
     fn ring_position_wraps_at_seam() {
         let mut tracker = TouchTracker::new([0u16; 12], true);

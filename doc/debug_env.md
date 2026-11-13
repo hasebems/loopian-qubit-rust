@@ -165,7 +165,7 @@ loop {
 
 最大の理由は、**アルゴリズムのコードをファームと PC で共有できる** こと。
 
-- `touch_baseline.md` §4.2 の `ElectrodeSignal` は、I2C に触れない純粋な計算として設計している
+- `touch_baseline.md` §3.11 の `ElectrodeSignal` は、I2C に触れない純粋な計算として設計している
 - これを `no_std` の小さなクレート（`touch_algo`）に切り出し、ファームと PC アプリの両方から使う
 - PC で調整したアルゴリズムが、そのままファームで動く。移植の手間も、移植時のずれも無い
 - 固定小数点・飽和演算・整数の桁あふれなど、ファーム特有の振る舞いも PC 上で同じように再現できる
@@ -269,7 +269,7 @@ loopian_qubit/
     - ノイズ除去（§3.3: 3 点メディアン、`SMOOTH_SAMPLES` の移動平均）
     - 初期取得（§3.5）、追従規則 R1〜R5（§3.6）、固着からの回復（§3.7）
     - noise_floor（既定値 `NOISE_FLOOR_DEFAULT`）、output = max(0, delta − noise_floor)
-    - onset（立ち上がり開始時刻）も入れていたが、廃止した（2026-10-03 決定、`touch_baseline.md` §3.8）。速さは `QubitTouch` の側で計測する。`touch_algo` と PC アプリからも削除した（同日）
+    - onset（立ち上がり開始時刻）も入れていたが、廃止した（2026-10-03 決定、`touch_baseline.md` §1.4 方針 4）。速さは解析の層（`doc/touch_analysis.md` §4.2）で計測する。`touch_algo` と PC アプリからも削除した（同日）
     - 設定画面での校正（§3.7 Calibrating）。きっかけは下記の PC アプリのスイッチ
     - A/B 比較は次の版に回す
 - **校正のきっかけ**: PC アプリに「設定画面（校正）」のスイッチを置き、オンにした瞬間に Calibrating に入り、オフで Running に戻る。ファームの実際の `SETTING_MODE` とは連動しない（PC のアルゴリズムは実機とは別に動くため）。スイッチの操作は記録（`.qlog`）には残らないので、再生のときは見ながら手で操作する
@@ -545,7 +545,7 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 - **`crates/touch_algo`**（no_std、依存なし）: `ElectrodeSignal<K>` と `Params`・`ElectrodeState`・`State`
     - キー毎の状態は呼び出し側が `K: AsRef<[ElectrodeState]> + AsMut<[ElectrodeState]>` で渡す（ファームは `[ElectrodeState; N]`、PC は `Vec<ElectrodeState>`）。PC はキー数を実行時に知るため
     - `process(now_us, raw, valid, calibrating)` を 1 スキャン毎に呼ぶ。結果は `keys()` の各 `ElectrodeState` から `filtered()`・`baseline()`・`delta()`・`output()`・`noise_floor()`・`onset_us()` で読む
-    - `Params::DEFAULT` は `touch_baseline.md` §3.11 の値。hi/lo ずれの増加量（200）も `hi_lo_jump` としてパラメータにしていたが、ファームの読み直しに替えたので外した（2026-10-02）
+    - `Params::DEFAULT` は `touch_baseline.md` §3.10 の値。hi/lo ずれの増加量（200）も `hi_lo_jump` としてパラメータにしていたが、ファームの読み直しに替えたので外した（2026-10-02）
     - 設計書から補ったこと
         - メディアンは 3 サンプルそろうまで最新の値を使う。移動平均もそろうまではある分で平均する
         - 静かさ（近傍）・大きく負の継続・固着の追跡は毎スキャン行い、基準値の更新（R1〜R5・校正）は `BASELINE_UPDATE_INTERVAL_MS` 毎に行う
@@ -564,7 +564,7 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
     - 右側の欄は「電極」「統計」「タッチ」のタブで切り替える（2026-11-08。それまでは縦に並べていて、イベントが出るたびに表示が動き見づらかった）
     - 「電極」タブに「アルゴリズム（touch_algo）」の欄: 有効化、間引き（間引かない / 8ms / 10ms、既定 8ms）、校正のスイッチと状態、キー毎の最後の baseline・delta・output・noise_floor、パラメータ（初期値は §3.11、「既定値に戻す」）
     - 下のバー表示に output を出す（2026-10-03 から常に output）
-    - その下に、タッチの position・depth を円で描くグラフ（2026-11-08。`doc/touch_analysis.md` §7.6）
+    - その下に、タッチの position・depth を円で描くグラフ（2026-11-08。`doc/touch_analysis.md` §7.1）
 - **確認用のプログラム** `examples/replay_algo.rs`（`cargo run --example replay_algo -- <記録.qlog> [間引き µs]`）: 記録をアルゴリズムに通し、キー毎の baseline・filtered の p-p・delta の範囲・output の最大・onset の回数を表示する
 - **実データでの確認**（段階 2 の確認で記録した約 5.6 秒、触れていない状態、既定のパラメータ）: 8ms に間引いても間引かなくても、初期取得の後の delta は −2〜+5、output は最大 1、onset の誤記録は無し、baseline の変化は 0〜2
 - まだしていないこと: 触れたときの記録での評価（シナリオ毎の記録を集めてから）、GUI の操作の確認、A/B 比較
@@ -583,14 +583,14 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 - テスト: 強い物（delta 60）は 30 秒まで動かず、その後 1 カウント/秒で上がって 0 になる。弱い物（delta 15）も回復する。揺れる指は回復しない
 - 統計のキー毎の表に「filtered p-p」の列を足した（`AlgoRunner::filtered_peak_to_peak`）。固着判定の `STUCK_VARIATION` は filtered の揺れで判断するので、raw の p-p では比べられないため。ほかの列は raw の値なので、見出しに「raw」を付けた。アルゴリズムを通していないときは「-」
 
-**段階 4（ファーム）**（2026-10-03。`touch_baseline.md` §4）
+**段階 4（ファーム）**（2026-10-03。`touch_baseline.md` §3.11）
 
 - `read_touch`: チップの基準値の読み取り（`set_reference()`、`reference_adjust`、12 スキャン毎の読み直し）を削除し、生値と読み取り成功フラグを `raw()` で返すだけにした。`valid` は `debug_stream` のときだけでなく常に持つ。段階 1 の `debug_raw()`・`debug_valid` は `raw()`・`valid` にまとめた。hi/lo ずれの読み直しは今までどおり
 - `at42qt`: `read_6key`・`read_1key` の `reference` 引数を削除し、Key Signal だけを読む
 - `touch_task`: `ElectrodeSignal<[ElectrodeState; TOTAL_QT_KEYS]>` を持ち、起動後 `TOUCH_STARTUP_SETTLE_MS`（500ms）の後から、解析と同じ周期（`analysis_divider()` フレームに 1 回）で `process()` を呼ぶ。`calibrating` には `SETTING_MODE` を渡す。output を `QubitTouch::set_value()` と `POINT0`〜`POINT5` に渡す。`ANALYSIS_TIME` は信号処理と解析を合わせた時間になった
-- `qtouch`: `Pad` の移動平均を外した（`MAX_MOVING_AVERAGE` = 1）。移動平均は 4 サンプルの合計で割っていなかったので、同じ感度になるよう `TOUCH_THRESHOLD` を 32 → 8 にし、`default_note_on_velocity()` も合わせた（`touch_baseline.md` §4.6）
+- `qtouch`: `Pad` の移動平均を外した（`MAX_MOVING_AVERAGE` = 1）。移動平均は 4 サンプルの合計で割っていなかったので、同じ感度になるよう `TOUCH_THRESHOLD` を 32 → 8 にし、`default_note_on_velocity()` も合わせた（`touch_baseline.md` §3.11）
 - `debug_stream` で送る FRAME の形式は変わらない
-- まだしていないこと: 実機での確認（`touch_baseline.md` §6.2 の F1〜F6）。96 キーの新しいハードウェアができてから行う（`hw96_check.md`）。2ms 周期での間隔の確認（§8）は行わない
+- まだしていないこと: 実機での確認（`touch_baseline.md` §4 の F1〜F6）。96 キーの新しいハードウェアができてから行う（`hw96_check.md`）。2ms 周期での間隔の確認（§8）は行わない
 
 ### 6.2 段階 3 以降の進め方（2026-10-03 決定）
 
@@ -599,11 +599,11 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 次の 3 つの段階で進める。前の段階が済んでから次に進む。
 
 1. **baseline 処理の確定**（PC、6 キー直結）
-    1. `touch_algo` と qubit_etude から onset を削除する（`touch_baseline.md` §3.8。速さは `QubitTouch` の側で測るため）— 2026-10-03 済み
-    2. `touch_baseline.md` §6.1 の項目（P1〜P9）を qubit_etude の画面で確かめる（§6.2.2）。問題があればパラメータか規則を直す
+    1. `touch_algo` と qubit_etude から onset を削除する（`touch_baseline.md` §1.4 方針 4。速さは解析の層で測るため）— 2026-10-03 済み
+    2. PC での確認項目（P1〜P9。2026-10-03 済み。`touch_baseline.md` から削除した）を qubit_etude の画面で確かめる（§6.2.2）。問題があればパラメータか規則を直す
 2. **ファームへの適用**（段階 4、実機）
-    1. ファームの `read_touch` のチップの基準値の読み取り（`set_reference()`、`reference_adjust`）を `touch_algo` に置き換える。変更の内容は `touch_baseline.md` §4・§5 — 2026-10-03 済み（§6.1 段階 4）
-    2. `touch_baseline.md` §6.2 の項目（F1〜F6）を実機で確かめる。演奏の結果（ノートの出方）での確認はここで行う。96 キーの新しいハードウェアができてから行う（`hw96_check.md` §1）
+    1. ファームの `read_touch` のチップの基準値の読み取り（`set_reference()`、`reference_adjust`）を `touch_algo` に置き換える。変更の内容は `touch_baseline.md` §3.11 — 2026-10-03 済み（§6.1 段階 4）
+    2. `touch_baseline.md` §4 の項目（F1〜F6）を実機で確かめる。演奏の結果（ノートの出方）での確認はここで行う。96 キーの新しいハードウェアができてから行う（`hw96_check.md` §1）
 3. **キャリブレーションが必要かの判定**（PC、6 キー直結）— 2026-10-18 中止。6 キーでの観察から、補正は行わず、各キーがほぼ同じ値を出す前提でタッチ処理（`QubitTouch`）に進む（§6.2.3 の「6 キーでの観察と判断」）。以下の項目は行わない（中止の前の計画として残す）
     1. qubit_etude に感度の測定（無タッチ記録・押下記録）を作る（§4.7）。センサー部を作り直したときの比較にも使う
     2. 触り方によるばらつきとキー同士の差を比べ、キー毎の感度の補正が必要かを判定する（§6.2.3）。センサー部が固まってから行う
@@ -612,9 +612,9 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 
 #### 6.2.2 baseline の確認の進め方（段階 1）
 
-- 確認項目は `touch_baseline.md` §6.1（P1〜P9）。PC で `touch_algo` の baseline・output を見て判断できるものだけにする
+- 確認項目は P1〜P9（2026-10-03 済み。`touch_baseline.md` から削除した）。PC で `touch_algo` の baseline・output を見て判断できるものだけにする
 - qubit_etude の画面で、ある程度目で確かめられれば十分とする。記録を残して後で比べるほどの厳密さは求めない（2026-10-03）。間引きは最終構成に近い 8ms にする
-- ノートの出方・音が切れないこと・ゴーストノートなど、演奏の結果で判断する項目は段階 2（`touch_baseline.md` §6.2）で確かめる。段階 1 の時点のファームはまだチップの基準値を使っていたので、段階 1 では確かめられない
+- ノートの出方・音が切れないこと・ゴーストノートなど、演奏の結果で判断する項目は段階 2（`touch_baseline.md` §4）で確かめる。段階 1 の時点のファームはまだチップの基準値を使っていたので、段階 1 では確かめられない
 
 #### 6.2.3 キー毎の感度の補正（キャリブレーション）
 
@@ -639,7 +639,7 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 
 **本体のモードか、PC からの校正か**（未決）: 係数は個体でほぼ決まるので、本体にキャリブレーションモードを作らず、qubit_etude で測って計算した係数を USB でフラッシュに書き込む方法もある。本体の画面での案内が要らない代わりに、通常のファームにも係数を受け取る口（SysEx など）が要る。本体だけで校正し直す必要があるか（会場で温度・湿度が変わるなど）で決める。どちらにしても、設定画面の校正（触らない）となぞる校正（触る）は指への注文が逆なので、同じ状態のまま両方は行えない
 
-**係数の保存**: 感度は個体ごとにほぼ固定なので、測った係数はフラッシュに保存し、電源を切っても残す（`touch_baseline.md` §7 の「noise_floor の保存」と合わせて扱う）
+**係数の保存**: 感度は個体ごとにほぼ固定なので、測った係数はフラッシュに保存し、電源を切っても残す（noise_floor は保存せず、起動時に自動で測ることにした。`touch_baseline.md` §3.12）
 
 **補正が必要かの判定**（§6.2.1 の段階 3。PC、qubit_etude、6 キー直結）
 

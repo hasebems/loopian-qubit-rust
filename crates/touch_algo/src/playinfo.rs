@@ -148,7 +148,7 @@ impl Voice {
         history_time_us: [0; HISTORY_SIZE],
     };
     /// 新しいタッチで、履歴を今の位置で埋める。Voice は使い回すので、前のタッチの位置が残らないようにする
-    /// （doc/touch_analysis.md §6.3 の 3）。履歴が平らなので、動くまではビブラートにならない
+    /// （doc/touch_analysis.md §4.2「PlayInfo の流れ」）。履歴が平らなので、動くまではビブラートにならない
     fn reset_history(&mut self, location: f32, now_us: u32) {
         self.location_history = [location; HISTORY_SIZE];
         self.history_time_us = [now_us; HISTORY_SIZE];
@@ -749,7 +749,7 @@ mod tests {
         assert_eq!(run(11, true), (0, 0));
     }
 
-    /// 新しいタッチでは、前のタッチの位置の履歴が残らない（§6.3 の 3）
+    /// 新しいタッチでは、前のタッチの位置の履歴が残らない（§4.2「PlayInfo の流れ」）
     #[test]
     fn new_touch_clears_location_history() {
         let mut tracker = TouchTracker::new([0u16; 12], false);
