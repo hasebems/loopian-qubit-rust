@@ -1,9 +1,22 @@
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::I2C1;
-use embassy_time::{Duration, with_timeout};
+use embassy_time::{Duration, Instant, with_timeout};
+use portable_atomic::Ordering;
 
 use crate::constants;
 use crate::devices::{at42qt, pca9544};
+use crate::shared::{
+    I2C_DISCONNECT_TIME, I2C_FAIL_COUNT, I2C_READ_TIME, I2C_REREAD_COUNT, I2C_SELECT_TIME, TimeStat,
+};
+
+/// I2C の通信 1 回の結果を診断値に記録する: 成功なら時間（µs）、失敗なら回数（OLED の I2C 診断ページ）
+fn record_i2c(stat: &TimeStat, start: Instant, ok: bool) {
+    if ok {
+        stat.record(start.elapsed().as_micros() as u32);
+    } else {
+        I2C_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// 全キーの生値（Key Signal）を読む。基準値の管理・ノイズ除去は touch_algo が行う（doc/touch_baseline.md §4.3）
 pub struct ReadTouch {
@@ -107,6 +120,7 @@ impl ReadTouch {
         for ch in 0..(constants::TOTAL_CH as u8) {
             let dev = ch / constants::PCA9544_NUM_CHANNELS;
             let ch_in_dev = Self::convert_channel(ch);
+            let start = Instant::now();
             let selected = matches!(
                 with_timeout(
                     Duration::from_millis(Self::PCA_TIMEOUT_MS),
@@ -115,17 +129,21 @@ impl ReadTouch {
                 .await,
                 Ok(Ok(()))
             );
+            record_i2c(&I2C_SELECT_TIME, start, selected);
 
             let start_ch = (ch as usize) * constants::AT42QT_KEYS_PER_DEVICE;
             let mut raw_data = [0u16; constants::AT42QT_KEYS_PER_DEVICE];
             // 切り替えに失敗したチャネルは読まない（このチップのキーは読み取り失敗になる）
             let read_result = if selected {
-                with_timeout(
+                let start = Instant::now();
+                let result = with_timeout(
                     Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
                     at42.read_6key(i2c, &mut raw_data),
                 )
                 .await
-                .ok()
+                .ok();
+                record_i2c(&I2C_READ_TIME, start, matches!(result, Some(Ok(()))));
+                result
             } else {
                 None
             };
@@ -141,6 +159,7 @@ impl ReadTouch {
                     let old = self.raw_value[sid];
                     if old != 0 && raw.abs_diff(old) >= Self::HI_LO_REREAD_DIFF {
                         // hi/lo ずれの疑い。このキーだけ読み直す。失敗したら前回の値を使う
+                        I2C_REREAD_COUNT.fetch_add(1, Ordering::Relaxed);
                         raw = match with_timeout(
                             Duration::from_millis(Self::AT42_READ_TIMEOUT_MS),
                             at42.read_1key(i2c, key as u8),
@@ -148,7 +167,10 @@ impl ReadTouch {
                         .await
                         {
                             Ok(Ok(value)) => value,
-                            _ => old,
+                            _ => {
+                                I2C_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+                                old
+                            }
                         };
                     }
                     self.raw_value[sid] = raw;
@@ -157,12 +179,13 @@ impl ReadTouch {
             }
             // PCA9544のチャネルが最後のときに切断する
             if Self::is_last_channel(ch) {
-                with_timeout(
+                let start = Instant::now();
+                let result = with_timeout(
                     Duration::from_millis(Self::PCA_TIMEOUT_MS),
                     pca.disconnect(i2c, dev),
                 )
-                .await
-                .ok();
+                .await;
+                record_i2c(&I2C_DISCONNECT_TIME, start, matches!(result, Ok(Ok(()))));
             }
         }
     }

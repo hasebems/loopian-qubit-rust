@@ -82,7 +82,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `src/devices/`: I2C デバイスの最小ドライバ（`at42qt`, `pca9544`, `ssd1306`）。I2C を所有せず、呼び出し毎に `&mut I2C` を借用する
 - `src/touch/read_touch.rs`: PCA9544 の ch 切替と AT42QT の生値（Key Signal）の読み込み、hi/lo ずれの読み直し。チップの基準値は使わない。ch 順は `CH_CONVERSION`（`[0, 1, 2, 3]`、そのまま）で決まり、キー番号は読み取り順のまま（回転しない）
 - `src/touch/pressure.rs`: ADC の移動平均基準値（上昇 / 下降で追従率を変える）と CC11 変換テーブル。送る CC はパケットとして返し、送信はタスク側が行う
-- `src/ui/oled_display.rs`: OLED ページ描画（page 0–3 と 5（診断）を左右スイッチで巡回、4 は設定画面、10 以降はデモ）
+- `src/ui/oled_display.rs`: OLED ページ描画（page 0–3 と 5（診断）・6（I2C 診断）を左右スイッチで巡回、4 は設定画面、10 以降はデモ）
 - `src/ui/ringled.rs`: NeoPixel の描画ロジック
 - `src/debug_protocol.rs`: `debug_stream` のパケットの組み立て。PC 側の解釈は `tools/qubit_etude/src/protocol.rs` で、形式を変えるときは両方を直す
 - `tools/qubit_etude/`: PC アプリ（ホスト向けの独立したプロジェクト。`doc/debug_env.md` §4）
@@ -112,6 +112,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - ヒープ無し。配列は固定長、static は `StaticCell`（`make_static!` マクロ）で確保する
 - Core1 のスタックは `CORE1_STACK_SIZE` = 16KB（`TouchTracker`・`PlayInfo` が合わせて約 3.7KB あるため）、Core0 は `memory.x` の `_stack_size` = 8KB。大きな配列をタスク内のローカル変数に置くときはスタック量に注意する
 - 処理時間や周期超過は OLED の診断ページ（page 5）で確認できる。計測値は `shared.rs` の `SCAN_TIME` / `ANALYSIS_TIME` / `UI_DRAW_TIME`（`TimeStat`）、`PERIOD_OVERRUN`、`MIDI_TX_MAX_USED` / `MIDI_TX_OVERFLOW`
+- スキャン時間の内訳は I2C 診断ページ（page 6）で確認できる。I2C1 の通信 1 回の時間（`I2C_SELECT_TIME`・`I2C_READ_TIME`・`I2C_DISCONNECT_TIME`）と、hi/lo ずれの読み直し（`I2C_REREAD_COUNT`）・失敗（`I2C_FAIL_COUNT`）の回数
 - 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`・`playinfo.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
 - 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）

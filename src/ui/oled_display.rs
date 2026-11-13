@@ -15,7 +15,8 @@ use heapless::String;
 use crate::devices::ssd1306::OledBuffer;
 use crate::error;
 use crate::shared::{
-    AD_VALUE0, AD_VALUE1, AD_VALUE2, AD_VALUE3, ANALYSIS_TIME, DEBUG_VALUE, MIDI_TX_MAX_USED,
+    AD_VALUE0, AD_VALUE1, AD_VALUE2, AD_VALUE3, ANALYSIS_TIME, DEBUG_VALUE, I2C_DISCONNECT_TIME,
+    I2C_FAIL_COUNT, I2C_READ_TIME, I2C_REREAD_COUNT, I2C_SELECT_TIME, MIDI_TX_MAX_USED,
     MIDI_TX_OVERFLOW, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4, POINT5, PRESSURE,
     SCAN_TIME, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3, UI_DRAW_TIME,
 };
@@ -24,8 +25,8 @@ use crate::shared::{
 pub const SETTING_PAGE: u8 = 4;
 /// 起動時の校正中の表示の点滅: counter（ui_task の 100ms 毎）がこの数進む毎に点灯・消灯を切り替える（0.5 秒）
 const CALIBRATING_BLINK_TICKS: u32 = 5;
-/// 通常時に左右スイッチで巡回するページ（5: 診断ページ）
-const NORMAL_PAGES: [u8; 5] = [0, 1, 2, 3, 5];
+/// 通常時に左右スイッチで巡回するページ（5: 診断ページ、6: I2C 診断ページ）
+const NORMAL_PAGES: [u8; 6] = [0, 1, 2, 3, 5, 6];
 
 /// 右スイッチで進む次のページ
 pub fn next_page(page: u8) -> u8 {
@@ -171,6 +172,7 @@ impl GraphicsDisplay {
             3 => display3(buffer, pacer).await,
             4 => display4(buffer, counter, pacer).await,
             5 => display_diag(buffer, pacer).await,
+            6 => display_i2c_diag(buffer, pacer).await,
             _ => {
                 // デモのページは開発用なので同期のまま描き、描く前に 1 回だけ譲る
                 pacer.yield_now().await;
@@ -385,6 +387,54 @@ async fn display_diag(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
         buffer,
         pacer,
         &Text::new(&text, Point::new(0, 60), style_small),
+    )
+    .await;
+}
+
+/// I2C 診断ページ（page 6）: I2C1 の通信 1 回の時間（µs、最小・平均・最大）と、読み直し・失敗の回数。
+/// スキャン時間の内訳を見るため（doc/hw96_check.md §2.1）。設定画面に入るとリセットされる
+async fn display_i2c_diag(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
+    use core::sync::atomic::Ordering;
+    buffer.clear();
+
+    let style_small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let mut text: String<32> = String::new();
+
+    let _ = write!(text, "I2C us min/avg/max");
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 8), style_small),
+    )
+    .await;
+
+    for (label, stat, y) in [
+        ("Sel", &I2C_SELECT_TIME, 18),
+        ("Rd ", &I2C_READ_TIME, 28),
+        ("Dis", &I2C_DISCONNECT_TIME, 38),
+    ] {
+        let (min, avg, max) = stat.get();
+        text.clear();
+        let _ = write!(text, "{}{:>5}/{:>5}/{:>5}", label, min, avg, max);
+        draw(
+            buffer,
+            pacer,
+            &Text::new(&text, Point::new(0, y), style_small),
+        )
+        .await;
+    }
+
+    text.clear();
+    let _ = write!(
+        text,
+        "Rr {} Fail {}",
+        I2C_REREAD_COUNT.load(Ordering::Relaxed),
+        I2C_FAIL_COUNT.load(Ordering::Relaxed)
+    );
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 50), style_small),
     )
     .await;
 }

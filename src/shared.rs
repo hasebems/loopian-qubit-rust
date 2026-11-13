@@ -55,7 +55,7 @@ pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false); // touch_task (TouchT
 pub static TOUCH_CALIBRATING: AtomicBool = AtomicBool::new(true);
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-//      診断用: 各タスク → OLED の診断ページ (page 5)
+//      診断用: 各タスク → OLED の診断ページ (page 5・6)
 //      最小・最大と回数は、設定画面に入ったときに reset_diagnostics() でリセットする
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 /// 処理時間（us）の最小・平均・最大。書き手は 1 つのタスクに限る
@@ -110,6 +110,13 @@ pub static PERIOD_OVERRUN: AtomicU32 = AtomicU32::new(0);
 // MIDI_TX の最大使用数とあふれた回数: queue_midi (touch_task, pressure_task)
 pub static MIDI_TX_MAX_USED: AtomicU32 = AtomicU32::new(0);
 pub static MIDI_TX_OVERFLOW: AtomicU32 = AtomicU32::new(0);
+// I2C1 の通信 1 回の時間（成功したものだけ）: touch_task (read_touch のスキャン) → OLED の I2C 診断ページ (page 6)。
+// スキャン時間の内訳を見るため（doc/hw96_check.md §2.1）
+pub static I2C_SELECT_TIME: TimeStat = TimeStat::new(); // PCA9544 の ch の選択
+pub static I2C_READ_TIME: TimeStat = TimeStat::new(); // AT42QT1070 の 6 キーの読み取り
+pub static I2C_DISCONNECT_TIME: TimeStat = TimeStat::new(); // PCA9544 の切断
+pub static I2C_REREAD_COUNT: AtomicU32 = AtomicU32::new(0); // hi/lo ずれの疑いで 1 キーを読み直した回数
+pub static I2C_FAIL_COUNT: AtomicU32 = AtomicU32::new(0); // 選択・読み取り・切断・読み直しの失敗（タイムアウトを含む）の回数
 
 /// 診断用の最小・最大と回数をリセットする
 pub fn reset_diagnostics() {
@@ -119,6 +126,11 @@ pub fn reset_diagnostics() {
     PERIOD_OVERRUN.store(0, Ordering::Relaxed);
     MIDI_TX_MAX_USED.store(0, Ordering::Relaxed);
     MIDI_TX_OVERFLOW.store(0, Ordering::Relaxed);
+    I2C_SELECT_TIME.reset();
+    I2C_READ_TIME.reset();
+    I2C_DISCONNECT_TIME.reset();
+    I2C_REREAD_COUNT.store(0, Ordering::Relaxed);
+    I2C_FAIL_COUNT.store(0, Ordering::Relaxed);
 }
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
