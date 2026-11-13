@@ -115,4 +115,4 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - スキャン時間の内訳は I2C 診断ページ（page 6）で確認できる。I2C1 の通信 1 回の時間（`I2C_SELECT_TIME`・`I2C_READ_TIME`・`I2C_DISCONNECT_TIME`）と、hi/lo ずれの読み直し（`I2C_REREAD_COUNT`）・失敗（`I2C_FAIL_COUNT`）の回数
 - 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`・`playinfo.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
-- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）
+- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）、`doc/hw96_firmware.md`（96 キーのハードの 2 回目の改修に合わせたファームの対応。ハードの完成後に着手）
