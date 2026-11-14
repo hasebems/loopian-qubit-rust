@@ -9,7 +9,8 @@ use crate::touch;
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //      Pressure Task (Core0): ADC (GP26/27/28) の連続サンプリング、圧力の計算、
-//      CC11 (Expression) の送信（動作モードは無く、常に送る。2026-11-13）
+//      Bow Pressure（CC80）の送信（圧力センサをつなぐまでは送らない。2026-11-14。
+//      Expression（CC11）は touch_task が depth から送る）
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #[embassy_executor::task]
 pub async fn pressure_task(
@@ -74,7 +75,7 @@ pub async fn pressure_task(
         );
         adc_counter = adc_counter.wrapping_add(1);
 
-        // CC11 を送信キューに入れる（最初の 1 回は初期値）
-        touch::pressure::pressure_cc11_if_needed(&mut pressure_midi, queue_midi);
+        // Bow Pressure（CC80）を送信キューに入れる（最初の 1 回は初期値）
+        touch::pressure::bow_pressure_cc_if_needed(&mut pressure_midi, queue_midi);
     }
 }

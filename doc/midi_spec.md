@@ -197,3 +197,16 @@ expression 変化速度
 
 
 
+
+
+## QUBIT での割り当て（2026-11-14）
+
+SWAM の Expression と Bow Pressure は別のパラメータ。
+
+| SWAM のパラメータ | 弓の何に当たるか | 主に変わるもの | QUBIT で送るもの | MIDI |
+|---|---|---|---|---|
+| Expression | 弓の速さ | 音の大きさ（ダイナミクス）。送らないと音が出ない | タッチの depth（発音中で最大の指、1〜127。指が無いとき 10） | CC11（`touch_task` が送る） |
+| Bow Pressure | 弓が弦に掛ける重さ | 音色（低いと Flautando、高いと Scratch） | 圧力センサ（ADC） | CC80（`pressure_task` が送る。SWAM の MIDI Learn で割り当てる。センサをつなぐまでは送らない） |
+
+- Note On のベロシティは、SWAM では主に弓圧のアクセント（Bow Pressure Accent）に効き、音量にはそのまま比例しない。QUBIT のベロシティは、depth の立ち上がりの速さから決める（`doc/touch_analysis.md` §4.2）
+- 詳しくは `doc/touch_analysis.md` §4.3

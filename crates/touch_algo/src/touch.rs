@@ -31,8 +31,9 @@ pub const CLOSE_RANGE: f32 = 3.0; // 同じタッチと見做される 10msec �
 
 const INIT_VAL: f32 = 100.0; // Invalid location initially
 /// 指を最後に見つけてからこの時間（µs）を超えたら、離れたとみなす。それまでは保持する
-/// （前は 5 周期。10ms 毎なら、6 周期目に離れたとする今と同じ）
-const RELEASE_WAITING_US: u32 = 50_000;
+/// 2026-11-14 に 50ms → 20ms（Note Off を早くするため。区間で探すようになってから途切れが減った。
+/// doc/touch_analysis.md §3.5）。10ms 毎の解析では、見失ってから 3 周期目（30ms 後）に離れたとする
+const RELEASE_WAITING_US: u32 = 20_000;
 /// 1 周期に取る区間の数の上限。超えたら depth の小さい区間を捨てる
 const MAX_CANDIDATES: usize = 16;
 /// 近い区間をまとめる距離（doc/touch_analysis.md §3.7.1）。隣り合う区間の position の差がこれ以内なら、
@@ -570,7 +571,7 @@ mod tests {
     }
 
     /// 指を保持する時間は実時間で数える（§3.8）: 最後に見つけてから RELEASE_WAITING_US を超えたら離れる。
-    /// 解析の間隔が 10ms でも 30ms でも、離れたとするのは最後に見つけてから 50ms を超えた最初の解析
+    /// 解析の間隔が 10ms でも 30ms でも、離れたとするのは最後に見つけてから 20ms を超えた最初の解析
     #[test]
     fn release_waits_real_time() {
         fn released_after(period_us: u32) -> u32 {
@@ -588,10 +589,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(released_after(10_000), 60_000);
-        assert_eq!(released_after(30_000), 60_000);
-        assert_eq!(released_after(20_000), 60_000);
-        assert_eq!(released_after(5_000), 55_000);
+        assert_eq!(released_after(10_000), 30_000);
+        assert_eq!(released_after(30_000), 30_000);
+        assert_eq!(released_after(20_000), 40_000);
+        assert_eq!(released_after(5_000), 25_000);
     }
 
     /// 電極 4〜6 に 1 本の指を置くと、depth・position が出て Started になり、

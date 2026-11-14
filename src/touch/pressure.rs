@@ -7,16 +7,23 @@ pub const PRESSURE_BASELINE_WINDOW: usize = 512;
 const ADJUSTMENT_TABLE: [u32; 4] = [256, 256, 256, 0]; // x/256
 const BASELINE_RISE_TRACK_PERCENT: u32 = 10; // 100に近いほど基準値がサンプルの上昇に追従しやすくなり、ドリフト耐性が下がる
 const BASELINE_FALL_TRACK_PERCENT: u32 = 50; // 100に近いほど基準値がサンプルの下降に追従しやすくなり、復帰が速くなる
-const PRESSURE_SENSITIVITY: u32 = 6; // Pressure生値を割って、EXP_PRESSURE_TABLEのインデックスに変換するための係数
-const EXP_MIN_VALUE: u8 = 40; // この値を最小値、127を最大値として、Expの値は変化する
-const EXP_SEND_DEADBAND: u8 = 4; // この値未満の変化は送信せず、ジッタ由来の細かい更新を抑える
-const EXP_MAX_STEP: u8 = 2; // 1回の送信での変化量を制限し、急激な増減を段階的に追従させる
-const MIDI_CC_EXPRESSION: u8 = 11;
+const PRESSURE_SENSITIVITY: u32 = 6; // Pressure生値を割って、BOW_PRESSURE_TABLEのインデックスに変換するための係数
+// 圧力は Bow Pressure（SWAM の弓圧。音色を決める）として CC80 で送る（2026-11-14）。
+// Expression（CC11。弓速で、主に音量を決める）は touch_algo の PlayInfo が depth から作り、touch_task が送る
+// （doc/touch_analysis.md §4.3）
+/// 圧力センサを ADC につないだら true にする。2026-11-14 時点ではつないでいないので、CC80 は送らない
+/// （圧力から送ると変な値が出る。ユーザー）
+const BOW_PRESSURE_ENABLED: bool = false;
+const BOW_PRESSURE_MIN_VALUE: u8 = 40; // この値を最小値、127を最大値として、CC80の値は変化する
+const BOW_PRESSURE_SEND_DEADBAND: u8 = 4; // この値未満の変化は送信せず、ジッタ由来の細かい更新を抑える
+const BOW_PRESSURE_MAX_STEP: u8 = 2; // 1回の送信での変化量を制限し、急激な増減を段階的に追従させる
+/// Bow Pressure の CC 番号（SWAM には既定の割り当てが無いので、MIDI Learn で Bow Pressure に割り当てる）
+const MIDI_CC_BOW_PRESSURE: u8 = 80;
 const MIDI_CC_INPUT_CH: u8 = 0x0b;
 const MIDI_CC_STATUS: u8 = 0xb0 | MIDI_CH_VIOLIN;
-const EXP_INDEX_MAX: usize = 100;
-const EXP_PRESSURE_TABLE: [u8; EXP_INDEX_MAX + 1] = [
-    // 100段階の圧力を 100段階のCC11に変換するためのテーブル
+const BOW_PRESSURE_INDEX_MAX: usize = 100;
+const BOW_PRESSURE_TABLE: [u8; BOW_PRESSURE_INDEX_MAX + 1] = [
+    // 100段階の圧力を 100段階のCCに変換するためのテーブル（CC11 に使っていたものをそのまま使う）
     0, 4, 8, 11, 14, 17, 19, 22, 24, 27, 29, 31, 33, 34, 36, 38, 40, 41, 43, 44, 45, 47, 48, 49, 51,
     52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 67, 68, 69, 70, 71, 71, 72, 73,
     73, 74, 75, 76, 76, 77, 77, 78, 79, 79, 80, 81, 81, 82, 82, 83, 83, 84, 85, 85, 86, 86, 87, 87,
@@ -25,59 +32,67 @@ const EXP_PRESSURE_TABLE: [u8; EXP_INDEX_MAX + 1] = [
 ];
 
 pub struct PressureMidiState {
-    last_sent_cc11: u8,
-    initialized: bool, // CC11 の初期値を送ったか
+    last_sent: u8,
+    initialized: bool, // 初期値を送ったか
 }
 
 impl PressureMidiState {
     pub const fn new() -> Self {
         Self {
-            last_sent_cc11: EXP_MIN_VALUE,
+            last_sent: BOW_PRESSURE_MIN_VALUE,
             initialized: false,
         }
     }
 
-    pub fn next_cc11_to_send(&mut self) -> Option<u8> {
-        let target = pressure_to_cc11(PRESSURE.load(Ordering::Relaxed));
-        let delta = target as i16 - self.last_sent_cc11 as i16;
+    fn next_to_send(&mut self) -> Option<u8> {
+        let target = pressure_to_cc(PRESSURE.load(Ordering::Relaxed));
+        let delta = target as i16 - self.last_sent as i16;
         // 目標値との差が小さい間は送信せず、ジッタ由来の細かい更新を抑える。
-        if delta.unsigned_abs() < EXP_SEND_DEADBAND as u16 {
+        if delta.unsigned_abs() < BOW_PRESSURE_SEND_DEADBAND as u16 {
             return None;
         }
 
         // 1回あたりの変化量を制限し、急激な増減を段階的に追従させる。
-        let step = delta.clamp(-(EXP_MAX_STEP as i16), EXP_MAX_STEP as i16);
-        let candidate = (self.last_sent_cc11 as i16 + step) as u8;
+        let step = delta.clamp(
+            -(BOW_PRESSURE_MAX_STEP as i16),
+            BOW_PRESSURE_MAX_STEP as i16,
+        );
+        let candidate = (self.last_sent as i16 + step) as u8;
         // 送信予定値を次回比較の基準として保持する。
-        self.last_sent_cc11 = candidate;
+        self.last_sent = candidate;
         Some(candidate)
     }
 }
 
-pub fn pressure_to_cc11(pressure: u32) -> u8 {
-    let index = (pressure / PRESSURE_SENSITIVITY).min(EXP_INDEX_MAX as u32) as usize;
-    let variable_range = (127 - EXP_MIN_VALUE) as u32;
-    let scaled = (EXP_PRESSURE_TABLE[index] as u32 * variable_range) / 100;
-    (scaled + EXP_MIN_VALUE as u32).min(127) as u8
+pub fn pressure_to_cc(pressure: u32) -> u8 {
+    let index = (pressure / PRESSURE_SENSITIVITY).min(BOW_PRESSURE_INDEX_MAX as u32) as usize;
+    let variable_range = (127 - BOW_PRESSURE_MIN_VALUE) as u32;
+    let scaled = (BOW_PRESSURE_TABLE[index] as u32 * variable_range) / 100;
+    (scaled + BOW_PRESSURE_MIN_VALUE as u32).min(127) as u8
 }
 
 fn control_change_packet(controller: u8, value: u8) -> MidiPacket {
     [MIDI_CC_INPUT_CH, MIDI_CC_STATUS, controller, value]
 }
 
-/// 送るべき CC11 を決め、パケットを send に渡す。動作モードは無く、常に送る（2026-11-13）。
-/// 最初の 1 回は初期値（EXP_MIN_VALUE）を送る。SWAM は CC11 を送らないと音が出ないため
-/// （前は Violin モードに入ったときに、All Sound Off と一緒に送っていた）
-pub fn pressure_cc11_if_needed(
+/// 送るべき Bow Pressure（CC80）を決め、パケットを send に渡す。最初の 1 回は初期値（BOW_PRESSURE_MIN_VALUE）。
+/// BOW_PRESSURE_ENABLED が false（圧力センサをつないでいない）なら何も送らない
+pub fn bow_pressure_cc_if_needed(
     pressure_midi: &mut PressureMidiState,
     mut send: impl FnMut(MidiPacket),
 ) {
+    if !BOW_PRESSURE_ENABLED {
+        return;
+    }
     if !pressure_midi.initialized {
         pressure_midi.initialized = true;
-        pressure_midi.last_sent_cc11 = EXP_MIN_VALUE;
-        send(control_change_packet(MIDI_CC_EXPRESSION, EXP_MIN_VALUE));
-    } else if let Some(cc11_value) = pressure_midi.next_cc11_to_send() {
-        send(control_change_packet(MIDI_CC_EXPRESSION, cc11_value));
+        pressure_midi.last_sent = BOW_PRESSURE_MIN_VALUE;
+        send(control_change_packet(
+            MIDI_CC_BOW_PRESSURE,
+            BOW_PRESSURE_MIN_VALUE,
+        ));
+    } else if let Some(value) = pressure_midi.next_to_send() {
+        send(control_change_packet(MIDI_CC_BOW_PRESSURE, value));
     }
 }
 

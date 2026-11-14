@@ -64,6 +64,22 @@ pub const VELOCITY_MIN: u8 = 10;
 pub const VELOCITY_FLICK: u8 = 90;
 /// はじいたときに、表の値と VELOCITY_FLICK の差をこの数で割る（表の 10〜110 が 70〜95 になる）
 pub const FLICK_SPREAD_DIV: i32 = 4;
+/// Expression（CC11。SWAM では弓速で、主に音量を決める。doc/touch_analysis.md §4.3）は depth から作る（2026-11-14）。
+/// 発音中の指のうち、ならした depth が最大のものを 1〜127 に制限して送る。変換テーブルは後で決める
+pub const MIDI_CC_EXPRESSION: u8 = 11;
+/// 発音中の指が無いときの Expression
+pub const EXPRESSION_IDLE: u8 = 10;
+/// depth をならす 1 次の LPF の係数（y += α (depth − y)）。10ms 毎の解析で時定数は約 15ms。
+/// 細かいちらつきだけを取る。境目の電極（key5 など）のゆっくりした揺れ（数十〜数百 ms）は通る
+const EXPRESSION_LPF_ALPHA: f32 = 0.5;
+/// 前に送った値との差がこれ未満なら送らない（MIDI を送りすぎない）。端（1・127・EXPRESSION_IDLE）は必ず送る
+const EXPRESSION_DEADBAND: u8 = 2;
+
+/// 離す速さ（doc/touch_analysis.md §4.2「離す速さ」）: 発音中の depth の平均に対して、depth がこの割合（‰）を
+/// 割った時刻から、RELEASE_END_PERMILLE を割った時刻までを、離す時間とする（2026-11-14、ユーザー）。
+/// まだ MIDI には出さない（何に割り当てるかは後で決める）
+pub const RELEASE_START_PERMILLE: i32 = 800;
+pub const RELEASE_END_PERMILLE: i32 = 500;
 /// 前の解析の時刻が分からない（最初の解析）・離れすぎているときに、前の解析の時刻とみなす間隔（µs）
 const NOMINAL_PERIOD_US: u32 = 10_000;
 /// 前の解析からこれより離れていたら、前の解析の時刻を使わない（NOMINAL_PERIOD_US とみなす）
@@ -176,6 +192,11 @@ struct Voice {
     peak_time_us: u32,  // その最大の depth を測った周期の時刻（はじいたときの速さを求める）
     prev_depth: i16,    // 測定中の、前に depth を測った周期の depth（下がったかを見る・補間に使う）
     prev_time_us: u32,  // その周期の時刻
+    hold_sum: u32,                   // 発音中、離し始める前の depth の合計（平均を求める）
+    hold_count: u32,                 // その周期の数
+    release_start_us: Option<u32>,   // depth が平均の RELEASE_START_PERMILLE を割った時刻（補間）
+    release_us: Option<u32>,         // 測った離す時間（µs）。新しい指で None に戻す
+    expr_depth: f32, // 発音中の、LPF でならした depth（Expression を作る）。見失った周期は 0 に向かう
     velocity: u8,        // Note On のベロシティ（つなぎ目を越えたときの Note On も同じ値を使う）
     history_idx: usize,  // Store the last index for each touch point
     location_history: [f32; HISTORY_SIZE], // Store past locations for each possible note
@@ -192,6 +213,11 @@ impl Voice {
         peak_time_us: 0,
         prev_depth: 0,
         prev_time_us: 0,
+        hold_sum: 0,
+        hold_count: 0,
+        release_start_us: None,
+        release_us: None,
+        expr_depth: 0.0,
         velocity: VELOCITY_MAX,
         history_idx: 0,
         location_history: [0f32; HISTORY_SIZE],
@@ -220,6 +246,10 @@ impl Voice {
         self.rise_start_us = cross_time(prev_us, 0, now_us, depth, TOUCH_ON_DEPTH);
         self.max_depth = 0;
         self.peak_time_us = now_us;
+        self.hold_sum = 0;
+        self.hold_count = 0;
+        self.release_start_us = None;
+        self.release_us = None;
         self.prev_depth = 0;
         self.prev_time_us = prev_us;
     }
@@ -252,6 +282,40 @@ impl Voice {
     /// はじいた（それまでの最大が FLICK_DEPTH を超えている）なら、そのベロシティを返す
     fn onset_lost(&mut self) -> Option<u8> {
         (self.max_depth > FLICK_DEPTH).then(|| self.flick_velocity())
+    }
+    /// 発音中に、この周期の depth で離す速さを測る（doc/touch_analysis.md §4.2「離す速さ」）。
+    /// 指を見失った周期（`Track::None`）は depth 0 として呼ぶ（区間が消えたので下がったとみなす）
+    /// - 離し始める前: depth を平均に足す。平均の RELEASE_START_PERMILLE を割ったら、割った時刻（補間）を覚える
+    /// - 離し始めた後: RELEASE_END_PERMILLE を割ったら、割った時刻（補間）との差を離す時間にする。
+    ///   RELEASE_START_PERMILLE 以上に戻ったら（離しかけて戻した）、測り直す
+    fn measure_release(&mut self, depth: i16, now_us: u32) {
+        self.expr_depth += EXPRESSION_LPF_ALPHA * (depth.max(0) as f32 - self.expr_depth);
+        let (d0, t0) = (self.prev_depth, self.prev_time_us);
+        self.prev_depth = depth;
+        self.prev_time_us = now_us;
+        if self.hold_count == 0 {
+            if depth > 0 {
+                self.hold_sum = depth as u32;
+                self.hold_count = 1;
+            }
+            return;
+        }
+        let avg = (self.hold_sum / self.hold_count) as i32;
+        let start = (avg * RELEASE_START_PERMILLE / 1000) as i16;
+        let end = (avg * RELEASE_END_PERMILLE / 1000) as i16;
+        // 下がって th を割った時刻: depth の符号を反転して、上がって超えた時刻として補間する
+        let fall = |th: i16| cross_time(t0, -d0, now_us, -depth, -th);
+        if depth >= start {
+            self.release_start_us = None;
+            self.release_us = None;
+            self.hold_sum = self.hold_sum.saturating_add(depth as u32);
+            self.hold_count += 1;
+            return;
+        }
+        let started = *self.release_start_us.get_or_insert_with(|| fall(start));
+        if self.release_us.is_none() && depth < end {
+            self.release_us = Some(fall(end).wrapping_sub(started));
+        }
     }
     /// はじいたときのベロシティ（doc/touch_analysis.md §4.2「はじいたときのベロシティ」）。
     /// 最大の depth まで上がった速さのまま NOTE_ON_DEPTH まで上がったとみなした時間を立ち上がりの時間として
@@ -339,6 +403,7 @@ where
     vibrato: u8,                       // ビブラートの強さ (0-127)
     vibrato_enabled: bool, // ビブラートを検出して CC を出すか。2026-11-13 から既定では止めている（コードは残す）
     last_update_us: Option<u32>, // 前の解析の時刻（立ち上がりの時間の補間に使う）
+    last_expression: Option<u8>, // 最後に送った Expression。None はまだ送っていない
 }
 
 impl<F> PlayInfo<F>
@@ -352,11 +417,17 @@ where
             vibrato: 0,
             vibrato_enabled: false,
             last_update_us: None,
+            last_expression: None,
         }
     }
     /// ビブラートの強さ（0-127）。最後に検出した値で、触れていないときも残る
     pub fn vibrato(&self) -> u8 {
         self.vibrato
+    }
+    /// 指 i（TouchPoint の id）について、最後に測った離す時間（µs。doc/touch_analysis.md §4.2「離す速さ」）。
+    /// 新しい指で None に戻る。Note Off の後も、次の指まで残る
+    pub fn release_us(&self, i: usize) -> Option<u32> {
+        self.voices.get(i).and_then(|v| v.release_us)
     }
     /// ビブラートの検出（CC1・CC19）を動かすか。既定は止めている
     pub fn set_vibrato_enabled(&mut self, enabled: bool) {
@@ -381,6 +452,7 @@ where
             return;
         }
         self.perform_notes(touch, layout, prev_us);
+        self.send_expression(false);
         if self.vibrato_enabled {
             self.update_vibrato(touch, layout);
         }
@@ -417,10 +489,15 @@ where
                 }
                 (Track::Followed, VoiceState::Sounding) => {
                     voice.push_history(location, now_us);
+                    voice.measure_release(tp.get_intensity(), now_us);
                     self.note_follow(i, location, layout);
                     None
                 }
                 (Track::None, VoiceState::Onset) if tp.is_touched() => voice.onset_lost(),
+                (Track::None, VoiceState::Sounding) if tp.is_touched() => {
+                    voice.measure_release(0, now_us);
+                    None
+                }
                 _ => None,
             };
             if let Some(velocity) = velocity {
@@ -444,6 +521,9 @@ where
         voice.note = note;
         voice.velocity = velocity;
         voice.state = VoiceState::Sounding;
+        voice.expr_depth = voice.prev_depth.max(0) as f32;
+        // SWAM は Note On の時点の Expression でアタックを決めることがあるので、Note On の前に送る
+        self.send_expression(true);
         if let Some(note) = note {
             self.send_note_on(i, note.saturating_add(NOTE_OFFSET), velocity, location);
         }
@@ -490,6 +570,34 @@ where
             (self.midi_callback)(STATUS_NOTE_OFF | i as u8, midi_note, 0x40, location);
         }
         self.voices[i].note = None;
+    }
+    /// 今の Expression（doc/touch_analysis.md §4.3）: 発音中の指のうち、ならした depth が最大のものを
+    /// 1〜127 に制限する。発音中の指が無ければ EXPRESSION_IDLE
+    fn expression(&self) -> u8 {
+        self.voices
+            .iter()
+            .filter(|v| v.state == VoiceState::Sounding)
+            .map(|v| v.expr_depth)
+            .fold(None, |m: Option<f32>, d| Some(m.map_or(d, |m| m.max(d))))
+            .map_or(EXPRESSION_IDLE, |d| (d + 0.5).clamp(1.0, 127.0) as u8)
+    }
+    /// Expression が変わったら CC11 を送る。前に送った値との差が EXPRESSION_DEADBAND 未満なら送らない。
+    /// ただし端の値（1・127・EXPRESSION_IDLE）に変わったときと、force（Note On の直前）のときは、変わっていれば送る
+    fn send_expression(&mut self, force: bool) {
+        let value = self.expression();
+        let send = match self.last_expression {
+            None => true,
+            Some(last) if last == value => false,
+            Some(last) => {
+                force
+                    || last.abs_diff(value) >= EXPRESSION_DEADBAND
+                    || matches!(value, 1 | 127 | EXPRESSION_IDLE)
+            }
+        };
+        if send {
+            (self.midi_callback)(STATUS_CC, MIDI_CC_EXPRESSION, value, 0.0);
+            self.last_expression = Some(value);
+        }
     }
     fn send_note_on(&self, i: usize, midi_note: u8, velocity: u8, location: f32) {
         (self.midi_callback)(STATUS_NOTE_ON | i as u8, midi_note, velocity, location);
@@ -565,7 +673,17 @@ mod tests {
         play.update(tracker);
     }
 
+    /// Note のイベントと、CC11（Expression）以外の CC を記録する。Expression は `expression_logger` で見る
     fn logger(log: &Log) -> impl Fn(u8, u8, u8, f32) + '_ {
+        |status, note, velocity, _location| {
+            if !(status == STATUS_CC && note == MIDI_CC_EXPRESSION) {
+                log.borrow_mut().push((status, note, velocity))
+            }
+        }
+    }
+
+    /// すべてのイベント（CC11 を含む）を記録する
+    fn expression_logger(log: &Log) -> impl Fn(u8, u8, u8, f32) + '_ {
         |status, note, velocity, _location| log.borrow_mut().push((status, note, velocity))
     }
 
@@ -854,6 +972,127 @@ mod tests {
         assert_eq!(cc, 2);
         // 電極 11 の上（position 11.0 = 電極数 − 1）では出さない
         assert_eq!(run(11, true), (0, 0));
+    }
+
+    /// 離す速さ: 発音中の平均（100）の 80% を割った時刻から 50% を割った時刻までを、補間して測る。
+    /// 100 → 75 の間で 80 を割るのは 8ms 後、次の 75 → 25 の間で 50 を割るのは 5ms 後なので、離す時間は 7ms。
+    /// 80% 以上の depth は平均に入る（離し始める前の値として）
+    #[test]
+    fn release_time_is_measured() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        for v in [100, 100, 100, 100, 75] {
+            step(&mut tracker, &mut play, &[(4, v)]);
+        }
+        assert_eq!(play.release_us(0), None);
+        step(&mut tracker, &mut play, &[(4, 25)]);
+        assert_eq!(play.release_us(0), Some(7_000));
+        // 離れた後も、次の指まで残る
+        for _ in 0..5 {
+            step(&mut tracker, &mut play, &[]);
+        }
+        assert_eq!(play.release_us(0), Some(7_000));
+        step(&mut tracker, &mut play, &[(4, 100)]);
+        assert_eq!(play.release_us(0), None);
+    }
+
+    /// 50% を割る前に指を見失ったら、その周期の depth を 0 として補間する。
+    /// 100 → 0 の間で、80 を割るのは 2ms 後、50 を割るのは 5ms 後なので、離す時間は 3ms
+    #[test]
+    fn release_time_when_lost() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        for v in [100, 100, 100, 100] {
+            step(&mut tracker, &mut play, &[(4, v)]);
+        }
+        step(&mut tracker, &mut play, &[]);
+        assert_eq!(play.release_us(0), Some(3_000));
+    }
+
+    /// 離しかけて戻したら（80% を割った後、80% 以上に戻った）、測り直す
+    #[test]
+    fn release_restarts_when_pressed_again() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        for v in [100, 100, 100, 70, 100, 100, 40] {
+            step(&mut tracker, &mut play, &[(4, v)]);
+            if v == 100 {
+                assert_eq!(play.voices[0].release_start_us, None);
+            }
+        }
+        // 70 の後に 100 に戻ったので、最後の 100 → 40 の 1 周期で 80% と 50% を割った
+        // （平均は 100: 80 を割るのは 3.3ms 後、50 を割るのは 8.3ms 後で、離す時間は 5ms）
+        assert_eq!(play.release_us(0), Some(8_333 - 3_333));
+        assert_eq!(log.borrow().len(), 1); // Note On だけ（音は切れていない）
+    }
+
+    /// Expression: 最初の解析で EXPRESSION_IDLE を送る。Note On の直前に、その周期の depth（1〜127）を送る。
+    /// 発音中は LPF でならした depth を送り、離れたら EXPRESSION_IDLE に戻す
+    #[test]
+    fn expression_follows_depth() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(expression_logger(&log));
+        step(&mut tracker, &mut play, &[]);
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[(STATUS_CC, MIDI_CC_EXPRESSION, EXPRESSION_IDLE)]
+        );
+        log.borrow_mut().clear();
+        step(&mut tracker, &mut play, &[(4, 80)]);
+        // CC11 が Note On より先
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[
+                (STATUS_CC, MIDI_CC_EXPRESSION, 80),
+                (STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_MAX)
+            ]
+        );
+        log.borrow_mut().clear();
+        // 80 → 100: LPF（α 0.5）で 90、95 … と近づく
+        step(&mut tracker, &mut play, &[(4, 100)]);
+        step(&mut tracker, &mut play, &[(4, 100)]);
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[
+                (STATUS_CC, MIDI_CC_EXPRESSION, 90),
+                (STATUS_CC, MIDI_CC_EXPRESSION, 95)
+            ]
+        );
+        // 1 未満にはならず、127 を超えない
+        log.borrow_mut().clear();
+        for _ in 0..10 {
+            step(&mut tracker, &mut play, &[(4, 300)]);
+        }
+        assert_eq!(log.borrow().last(), Some(&(STATUS_CC, MIDI_CC_EXPRESSION, 127)));
+        // 離すと 0 に向かい、Note Off の後に EXPRESSION_IDLE
+        log.borrow_mut().clear();
+        for _ in 0..10 {
+            step(&mut tracker, &mut play, &[]);
+        }
+        let events = log.borrow();
+        let off = events.iter().position(|e| e.0 == STATUS_NOTE_OFF).unwrap();
+        assert!(events[..off].iter().all(|e| e.0 == STATUS_CC && e.2 < 127));
+        assert_eq!(events.last(), Some(&(STATUS_CC, MIDI_CC_EXPRESSION, EXPRESSION_IDLE)));
+    }
+
+    /// Expression は、発音中の指のうち depth が最大のもの
+    #[test]
+    fn expression_uses_strongest_finger() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 24], false);
+        let mut play = PlayInfo::new(expression_logger(&log));
+        for _ in 0..5 {
+            step(&mut tracker, &mut play, &[(2, 60), (16, 110)]);
+        }
+        assert_eq!(play.expression(), 110);
+        for _ in 0..10 {
+            step(&mut tracker, &mut play, &[(2, 60)]);
+        }
+        assert_eq!(play.expression(), 60);
     }
 
     /// 新しいタッチでは、前のタッチの位置の履歴が残らない（§4.2「PlayInfo の流れ」）

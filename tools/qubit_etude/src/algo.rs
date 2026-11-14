@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 
 use touch_algo::electrode::{ElectrodeSignal, ElectrodeState, Params, State};
 use touch_algo::playinfo::{
-    PlayInfo, STATUS_CC, STATUS_NOTE_MOVED, STATUS_NOTE_OFF, STATUS_NOTE_ON,
+    MIDI_CC_EXPRESSION, PlayInfo, STATUS_CC, STATUS_NOTE_MOVED, STATUS_NOTE_OFF, STATUS_NOTE_ON,
 };
 use touch_algo::touch::{MAX_TOUCH_POINTS, TouchTracker};
 
@@ -70,6 +70,10 @@ thread_local! {
 }
 
 fn on_touch_event(status: u8, note: u8, velocity: u8, location: f32) {
+    // Expression（CC11）は depth が変わる度に出るので、イベントの一覧には入れない（一覧が埋まって見づらくなるため）
+    if status == STATUS_CC && note == MIDI_CC_EXPRESSION {
+        return;
+    }
     PENDING_EVENTS.with_borrow_mut(|e| e.push((status, note, velocity, location)));
 }
 

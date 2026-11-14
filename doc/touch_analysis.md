@@ -89,7 +89,7 @@ position = Σ (k × output[k]) / depth
 
 - **触れ始め**: 区間の depth が `TOUCH_ON_DEPTH`（10、「より大きい」）を超え、近くに追跡中の指が無ければ、新しい指にする（`Started`）。山の電極 1 つの output では決めない。指が 2 つの電極のちょうど間にあると output が割れて山が小さくなり、触れる場所で感度が変わるため
 - **続き**: 追跡中の指の近く（`CLOSE_RANGE` = 3 電極以内）に区間があれば、depth によらず同じ指が続いているとする（`Followed`）。区間は output > k で決まるので、OFF のしきい値は k の所にあることになり、ON のしきい値との差がヒステリシスになる
-- **途切れ**: 近くに区間が無いときは、最後に見つけてから `RELEASE_WAITING_US`（50ms）の間だけ指を保持し、それを超えたら離れたとする（`Released`）。保持している周期（`Track::None` で `is_touched()` が true）の depth・position は、最後に見つけた周期の値のまま。演奏情報の層は、この周期の depth を履歴に入れない（§4.2）
+- **途切れ**: 近くに区間が無いときは、最後に見つけてから `RELEASE_WAITING_US`（20ms。2026-11-14 に 50ms から短くした。§4.2「Note Off」）の間だけ指を保持し、それを超えたら離れたとする（`Released`）。保持している周期（`Track::None` で `is_touched()` が true）の depth・position は、最後に見つけた周期の値のまま。演奏情報の層は、この周期の depth を履歴に入れない（§4.2）
 - 区間で探せば、見つけられない周期は、depth が本当にほぼ 0 の周期だけになる。ゆっくり離すときの depth の下がり方は、`Followed` の間にすべて見える
 - 検出のしきい値は低めにする。演奏情報の層は depth の立ち上がりから触れる速さを求める（§4.2）ので、立ち上がりの始めから depth を渡したい
 - 同じ指を同じ TouchPoint に保つ仕組みは、タッチの層に置く。検出が途切れて Released → Started になると、演奏情報の層からは別の指に見え、速さの計測や位置の履歴がやり直しになるため
@@ -157,7 +157,7 @@ position = Σ (k × output[k]) / depth
 - **ベロシティで変えたいのは音量ではなく、音の立ち上がり（アタック）**（2026-11-13、ユーザー）
 - **チャタリングへの効き目**: Note On を出す前に消えた短い反応は、Note On にならない。抑えられるのはノートの揺れで、指の追跡の揺れは §3.5 のとおりタッチの層で抑える
 - **Note On の後は、しばらく音程を変えない**: Note On を出してから一定の時間は、position が動いてもノートを変えない（Move しない）。触れ始めの指の揺れでノートが動かないようにするため（入れていない。手順 3。実際の演奏で問題が起きたら対応する。§9）
-- **Note Off**: 離すときの遅さ（depth の下がり方）を検出し、速く離したか、ゆっくり離したかを区別したい（求め方は決めていない。今は `Released` の周期に Note Off を出す。実際の演奏で問題が起きたら対応する。§9）
+- **Note Off**: `Released` の周期に出す。音が消えるタイミングを早くするため、保持の時間を短くした（下記「Note Off のタイミング」）。離す速さは測っておき、何に使うかは後で決める（下記「離す速さ」）
 
 #### Note On の出し方（2026-11-13 決定、2026-11-14 改め・実装）
 
@@ -228,7 +228,7 @@ position = Σ (k × output[k]) / depth
 その他の決まり（2026-11-13 のまま）:
 
 - 時間は実時間で数える（§3.8）。指を保持している周期（`Track::None`）も数える
-- 「はじく」の Note On は、`Released` を待たずに下がり始めた周期に出す（`Released` は指を失ってから 50ms 後なので、待つと遅れる）。Note Off は `Released` の周期に出す。「はじく」か「かすっただけ」かは、最大の depth が `FLICK_DEPTH` を超えたかどうかで決める（ユーザーの判断）
+- 「はじく」の Note On は、`Released` を待たずに下がり始めた周期に出す（`Released` は指を失ってから 20〜30ms 後なので、待つと遅れる）。Note Off は `Released` の周期に出す。「はじく」か「かすっただけ」かは、最大の depth が `FLICK_DEPTH` を超えたかどうかで決める（ユーザーの判断）
 - 下がり始め: depth が前の周期より下がった瞬間（幅は持たせない）。指を見失った周期（`Track::None` で触れている）も、下がったとみなす
 - 上限の時間: `NOTE_ON_TIMEOUT_US` = 300ms
 - `NOTE_ON_DEPTH`・`FLICK_DEPTH` はどちらも「より大きい」で比べる
@@ -250,6 +250,29 @@ position = Σ (k × output[k]) / depth
 - Move の Note On は `VELOCITY_MOVE`（50）で固定（2026-11-13、ユーザー）。つなぎ目を越えたときは、その指の Note On のベロシティ
 - 動作モード（Piano / Violin）は 2026-11-13 に無くした（ユーザー）。Violin の形（電極 `ELECTRODES_PER_NOTE` = 2 つで 1 ノート、ch 2、ノート 0 = `NOTE_OFFSET` 55）だけにし、Piano の処理は後で足す
 - ノートを変えるのは、今のノートから position が `HISTERESIS`（0.7 電極）を越えて離れたとき
+
+#### Note Off のタイミング（2026-11-14 決定・実装）
+
+**保持の時間 `RELEASE_WAITING_US` を 50ms → 20ms にした（ユーザー）。** 指を見失ってから 20ms を超えた最初の解析（10ms 毎なら 3 周期目、30ms 後）で `Released` になり、Note Off を出す。
+
+- 記録 `qubit_20261114_090248.qlog` で測った、離すときの内訳（50ms のとき）: depth が最大の 90% を割ってから指を見失うまで約 30〜80ms（depth は 10ms 毎に 20〜25 ずつ下がり、最後の 2〜3 周期は 6〜20 の小さな尾）、見失ってから Note Off まで 39〜49ms（保持の時間）。合わせて約 60〜130ms
+- 他の要因: 信号処理の遅れ（メディアン 3 点と移動平均 2 点で約 15ms。触れるときも同じだけ遅れる）、チップの測定周期（8ms）と、指が遠ざかっても少しの間は容量が残ること
+- 20ms にした結果（`replay_algo` 相当、間引き 10ms）: Note Off が 20〜35ms（多くは 29〜30ms）早くなった。Note On の件数（13 件）は変わらず、途切れによる Note Off・Note On の出直しは出なかった
+- depth の下がり方で Note Off を出す（指を見失う前に出す）案も考えた。音の消え方は Note Off より前に決まる話なので、Note Off のベロシティで伝えるのでは遅い（ユーザー）。消え方は CC11（Expression。今は圧力から送っている）で作るか、先に Note Off を出して音源のリリースで伸ばすか、を後で考える
+
+#### 離す速さ（2026-11-14 決定・実装。MIDI にはまだ出さない）
+
+**発音中の depth の平均に対して、depth が 80%（`RELEASE_START_PERMILLE`）を割った時刻から 50%（`RELEASE_END_PERMILLE`）を割った時刻までを、離す時間とする（ユーザー）。** 何の MIDI に割り当てるかは後で決める。それまでは `PlayInfo::release_us(指の id)` で読めるようにしておく。
+
+- 平均: Note On の後の `Followed` の周期で、80% を割るまでの depth の平均（Note On の周期そのものは入れない）。80% 以上の depth は、離し始める前の値として平均に入れる
+- 割った時刻は、Note On と同じく前後の周期の depth を直線でつないで補間する（`cross_time` を、depth の符号を反転して使う）。離すとき depth は 10ms 毎に 20〜25 ずつ下がるので、80% → 50% は 1〜2 周期で通り過ぎる。補間しないと差が出ない
+- 50% を割る前に指を見失ったら（`Track::None`）、その周期の depth を 0 として補間する
+- 80% を割った後に 80% 以上に戻ったら（離しかけて戻した）、測り直す
+- 50% を割るのは指を見失うより前なので、Note Off を出す時点では値が決まっている。新しい指（`Started`）で None に戻し、Note Off の後も次の指まで残す
+- 測るのは発音中だけ。Note On の前（測定中）に離したもの（かすっただけ・はじく）は測らない
+- 実装: `Voice::measure_release`。`Voice` に平均の合計と数（`hold_sum`・`hold_count`）、80% を割った時刻（`release_start_us`）、離す時間（`release_us`）を足した。発音中は `prev_depth`・`prev_time_us` も更新する
+- テスト: `release_time_is_measured`（7ms）、`release_time_when_lost`（見失った周期で 3ms）、`release_restarts_when_pressed_again`
+- 記録 `qubit_20261114_090248.qlog`（間引き 10ms）: ゆっくり押して長く触れた音で 13〜22ms、タップで 6〜10ms。離し方で差が出ている
 
 #### `PlayInfo` の流れ（2026-11-13 実装）
 
@@ -278,6 +301,33 @@ position = Σ (k × output[k]) / depth
 3. 音程を変えない時間を入れる — 入れていない。実際の演奏で、触れ始めにノートが動いて困ったら入れる
 4. `NOTE_ON_DEPTH` を 50 にし、立ち上がりの時間を補間で求め、ベロシティの表を改める — 2026-11-14 済み
 5. はじいたときのベロシティを、最大の depth まで上がった速さで決める — 2026-11-14 済み
+6. 保持の時間を 20ms にし、離す速さを測る — 2026-11-14 済み（離す速さを何の MIDI に出すかは未決）
+
+### 4.3 Expression と Bow Pressure（2026-11-14 決定・実装）
+
+SWAM の Violin では、Expression（CC11）は弓の速さで主に音量を、Bow Pressure は弓が弦に掛ける重さで主に音色（低いと Flautando、高いと Scratch）を決める。別のパラメータである（`doc/midi_spec.md`）。**depth を Expression に、ADC の圧力を Bow Pressure に割り当てる（ユーザー）。** 指で触れる強さ・広さが音量、物理的に押す力が弓の重さになる。指を離すと depth が下がって Expression が下がるので、音の消え方が Note Off の前に決まる（§4.2「Note Off のタイミング」の課題への答えにもなる）。
+
+QUBIT の「圧力センサ」（`pressure_task`・`PRESSURE`）は、前は CC11（Expression）を送っていた。名前は似ているが、SWAM の Bow Pressure とは別のもの。
+
+**Expression（depth → CC11）**: `PlayInfo` が作り、`touch_task`（Core1）が `MIDI_TX` に入れる（Note On と同じ経路）。
+
+- 使う指: 発音中の指のうち、depth が最大のもの（ユーザー。最後に Note On した指より、こちらがよい）
+- 値: ならした depth を 1〜127 に制限して、そのまま使う。変換テーブルは後で決める（ユーザー）
+- 発音中の指が無いとき: `EXPRESSION_IDLE`（10）（ユーザー）
+- ならし方: depth に 1 次の LPF（`EXPRESSION_LPF_ALPHA` = 0.5。10ms 毎の解析で時定数は約 15ms）。指を見失った周期（`Track::None`）は 0 に向かう
+    - 記録 `qubit_20261114_090248.qlog` では、押している間の depth の周期毎の変化は平均 1〜1.5 で、key5 の上でも細かいノイズは見えなかった。全体の揺れ（p-p 20〜24）は、押し込んでいく間のゆっくりした変化（演奏そのもの）
+    - key5 などの境目の電極のゆっくりした揺れ（数十〜数百 ms、`doc/touch_baseline.md` §3.12）は、この LPF では通る。消すには時定数を数百 ms にする必要があり、Expression が指に遅れ、離すときの消え方も鈍る。音で気になったら考える
+- 送り方: 前に送った値との差が `EXPRESSION_DEADBAND`（2）未満なら送らない。端の値（1・127・`EXPRESSION_IDLE`）に変わったときは送る
+- 順番: Note On の周期は、CC11 を Note On より先に送る（SWAM は Note On の時点の Expression でアタックを決めることがある。そのときの値は、その周期の depth）。CC11 を `pressure_task`（Core0）が Atomic を読んで送る形も考えたが、Note On より最大 10ms 遅れて届くことがあるので、`MIDI_TX` に入れることにした（ユーザー）
+- 最初の解析で `EXPRESSION_IDLE` を送る（SWAM は CC11 を送らないと音が出ない）
+- 記録 `qubit_20261114_090248.qlog`（20.6 秒）を通すと、CC11 は 206 件（平均 10 件/秒。depth が変わっている間は最大 100 件/秒）。どの Note On も、直前に CC11（53〜55 など）が出ている
+- 実装: `PlayInfo::expression`・`send_expression`、`Voice::expr_depth`（発音中に `measure_release` で更新）。テスト: `expression_follows_depth`・`expression_uses_strongest_finger`。qubit_etude のイベントの一覧には CC11 を入れない（数が多く、一覧が埋まるため）
+
+**Bow Pressure（ADC → CC80）**: `pressure_task`（Core0）が、今までの CC11 と同じ計算（基準値・変換テーブル・送らない幅・1 回の変化量の上限）で CC80 を送る（`src/touch/pressure.rs`）。
+
+- CC 番号: 80（ユーザー）。SWAM には Bow Pressure の既定の CC が無いので、MIDI Learn で割り当てる
+- 圧力センサを ADC につなぐまでは送らない（`BOW_PRESSURE_ENABLED` = false）。つないだら true にする
+- 前の一時対応（CC11 を 100 に固定する `EXP_FIXED_VALUE`）は、CC11 を depth から送るようにしたので消した
 
 ## 5. 層の分け方（2026-11-08）
 
@@ -286,7 +336,7 @@ depth・position の層（§3）はノートを知らない。演奏情報の層
 | 層 | ファイル・型 | 持つもの |
 |---|---|---|
 | depth・position | `touch.rs` の `TouchTracker` | 電極の output、`TouchPoint`（指毎）: position・depth・最後に見つけた時刻・この周期の追跡の結果 `Track`（`Started`・`Followed`・`Released`・`None`） |
-| 演奏情報 | `playinfo.rs` の `PlayInfo` | コールバック、`Voice`（指毎）: 状態・鳴らしているノート・測定中の最大の depth と前の周期の depth・Note On のベロシティ・位置の履歴（ビブラート用） |
+| 演奏情報 | `playinfo.rs` の `PlayInfo` | コールバック、`Voice`（指毎）: 状態・鳴らしているノート・測定中の最大の depth と前の周期の depth・Note On のベロシティ・離す速さ（発音中の平均・80% を割った時刻・離す時間）・位置の履歴（ビブラート用） |
 
 - `PlayInfo` が `TouchTracker` から読むのは、指毎の `track()`・`get_location()`・`last_location()`・`get_intensity()` と、電極の並び（電極数・リングか）と `now_us()` だけ
 - 離れた後も `TouchPoint` は最後の position を残す（`last_location()`。Note Off のコールバックの location に使う）。`get_location()` は、触れていなければ 100.0 を返す
@@ -299,7 +349,7 @@ depth・position の層（§3）はノートを知らない。演奏情報の層
 
 1. **noise_floor の大きい電極（おそれ）**: output は `delta − noise_floor` なので、noise_floor の大きい電極（etude の key5 は 13、他は 1〜2）は、同じように触れても output が小さい。position がその電極から離れる向きにずれ、depth も小さくなる。output が k 以下に落ちると区間が 2 つに分かれる（§3.7.1 の距離以内ならまとまる）
 2. **電極による感度の違い（おそれ）**: noise_floor の他に、電極の大きさ・配線の長さ・チップ毎の違いで、同じ触れ方でも delta の大きさが電極で違う可能性がある。position の偏りになる。96 電極の基板で確かめる
-3. **離れてから 50ms は同じタッチ（確実）**: 離れても `RELEASE_WAITING_US` の間は TouchPoint が残るので、その間に `CLOSE_RANGE`（3 電極）以内を叩き直すと、新しいタッチにならない。同じ電極を叩き直すと Note On が出ない（連打が抜ける）。近くの電極を叩くと Move になる
+3. **離れてから 20ms は同じタッチ（確実）**: 離れても `RELEASE_WAITING_US` の間は TouchPoint が残るので、その間に `CLOSE_RANGE`（3 電極）以内を叩き直すと、新しいタッチにならない。同じ電極を叩き直すと Note On が出ない（連打が抜ける）。近くの電極を叩くと Move になる
 4. **結び付けが貪欲法（おそれ）**: 候補を depth の大きい順に、その時点で最も近い TouchPoint に結び付ける。2 本の指が近づいたとき入れ替わることがある。§3.7 の距離以内の指はまとめるので、起きうるのはそれより離れた指どうしだけ
 5. **TouchPoint が空いていないとき（確実）**: 4 個とも使っている（離れるのを待っているものを含む）と、新しい候補は何も言わずに捨てられる（depth の大きい順に渡すので、捨てられるのは弱いほう）
 
@@ -328,7 +378,8 @@ depth・position の層（§3）はノートを知らない。演奏情報の層
 演奏情報（§4.2）。次の 3 つは、実際の演奏で問題が起きたら対応する（2026-11-14、ユーザー）:
 
 - 音程を変えない時間（手順 3）を入れるか、入れるなら長さ。その時間が終わったとき、position がノートから離れていたらどう動かすか（一度に今の position のノートへ Move するか）。つなぎ目を越えたとき（§4.1）も音程を変えないか
-- 離すときの遅さの求め方と、その使い方（Note Off のベロシティにするかなど）。depth が下がっていく間に、タッチの層が「離れた」と言う前に求められるなら、Note Off を遅らせずに済む。`RELEASE_WAITING_US`（50ms）を短くするかも一緒に決める（区間で探すようにしたので途切れは減り、短くできる見込み）
+- 離す速さ（§4.2「離す速さ」。測る仕組みはある）を何に使うか。音の消え方は Note Off より前に決まるので、Note Off のベロシティでは遅い。Expression が depth に付いて下がるようになった（§4.3）ので、それで足りるかを先に確かめる。足りなければ、先に Note Off を出して音源のリリースで伸ばす（SWAM なら String Resonance などに CC を割り当てる）、などを考える
+- Expression（§4.3）の、depth から CC11 への変換テーブル。境目の電極のゆっくりした揺れが音で気になるか
 - 1 本 ↔ 2 本の変化（§3.7.1 でも残るもの）: 2 本になった瞬間、続いている指の position が跳ぶのを Move にするか（分かれた直後はしばらく Move しない、など。音程を変えない時間を、指の数が変わった後にも使う）。1 本になった瞬間、どちらのノートを残すか（先に鳴っていたほう、など）、残らなかった指の Note Off をいつ出すか、残った指が真ん中に跳ぶのを Move にするか
 
 演奏情報の値:
