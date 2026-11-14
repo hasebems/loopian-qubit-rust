@@ -96,7 +96,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 
 - 動作モード（Piano / Violin）は 2026-11-13 に無くした。今は Violin の形だけで、Piano の処理は後で足す
 - ノートと CC11 は ch 2 (`MIDI_CH_VIOLIN` = 1)。電極 2 つで 1 ノート（`ELECTRODES_PER_NOTE`）、ノート 0 は `NOTE_OFFSET`（55）。SWAM Solo Strings 向けで、Expression (CC11) を送らないと音が出ない（`doc/midi_spec.md`）ので、起動後に CC11 の初期値を送り、その後は圧力から常に送る
-- ベロシティは音量ではなく音の立ち上がりを変えるもの。Note On までの時間で決める（`doc/touch_analysis.md` §4.2）。Move の Note On は `VELOCITY_MOVE`（50）で固定
+- ベロシティは音量ではなく音の立ち上がりを変えるもの。depth が 0 から `NOTE_ON_DEPTH`（50）まで上がる時間（前後の周期で補間）を、表（10ms 以下 110・25ms で 70・100ms で 30・300ms 以上 10）でベロシティにする。はじいたときは、最大の depth まで上がった速さで表から求め、90 の方へ 1/4 に縮める（`doc/touch_analysis.md` §4.2）。Move の Note On は `VELOCITY_MOVE`（50）で固定
 - ビブラート（CC1・CC19）の検出は、コードは残して止めている（`PlayInfo::set_vibrato_enabled`）
 - 左右スイッチの同時押しで設定画面（page 4、`SETTING_MODE=true`）に入り、エラーコードと診断値（最小・最大・回数）もクリアされる。設定画面で設定する項目は今は無い。設定画面にいる間はタッチ・圧力の基準値補正（タッチは `touch_algo` の校正: 基準値の速い追従と noise_floor の計測）を行うので、センサーに触れないこと
 
