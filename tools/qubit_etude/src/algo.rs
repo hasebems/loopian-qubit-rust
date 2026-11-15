@@ -13,7 +13,8 @@ use std::collections::VecDeque;
 
 use touch_algo::electrode::{ElectrodeSignal, ElectrodeState, Params, State};
 use touch_algo::playinfo::{
-    MIDI_CC_EXPRESSION, PlayInfo, STATUS_CC, STATUS_NOTE_MOVED, STATUS_NOTE_OFF, STATUS_NOTE_ON,
+    MIDI_CC_EXPRESSION, MIDI_CC_VIBRATO_DEPTH, MIDI_CC_VIBRATO_RATE, PlayInfo, STATUS_CC,
+    STATUS_NOTE_MOVED, STATUS_NOTE_OFF, STATUS_NOTE_ON,
 };
 use touch_algo::touch::{MAX_TOUCH_POINTS, TouchTracker};
 
@@ -31,6 +32,14 @@ const RING_KEYS: usize = 96;
 
 /// 解析 1 回分の、タッチポイント毎の (position, depth)。触れていなければ None
 pub type TouchSnapshot = [Option<(f32, i16)>; MAX_TOUCH_POINTS];
+
+/// 解析が最後に出した演奏の値（doc/touch_analysis.md §4.4）。まだ出ていなければ None
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlayValues {
+    pub vibrato_rate: Option<u8>,  // Vibrato Rate（CC19）
+    pub vibrato_depth: Option<u8>, // Vibrato Depth（CC1）。ビブラートが終わると 0
+    pub move_velocity: Option<u8>, // Move の Note On のベロシティ（低いほどポルタメント）
+}
 
 /// 解析（PlayInfo）が出したイベント
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -287,6 +296,36 @@ impl AlgoRunner {
         }
     }
 
+    /// 時刻 t1 までに解析が最後に出した、Vibrato Rate・Depth と Move のベロシティ。
+    /// Move は、同じ時刻・同じ指の MOVED の直前に出た Note On（`PlayInfo::move_note` の順）
+    pub fn play_values(&self, t1: u64) -> PlayValues {
+        let mut v = PlayValues::default();
+        let end = self.touch_events.partition_point(|e| e.time_us <= t1);
+        for i in (0..end).rev() {
+            let e = self.touch_events[i];
+            match e.status & 0xf0 {
+                STATUS_CC if e.note == MIDI_CC_VIBRATO_RATE => {
+                    v.vibrato_rate.get_or_insert(e.velocity);
+                }
+                STATUS_CC if e.note == MIDI_CC_VIBRATO_DEPTH => {
+                    v.vibrato_depth.get_or_insert(e.velocity);
+                }
+                STATUS_NOTE_MOVED if v.move_velocity.is_none() && i > 0 => {
+                    let on = self.touch_events[i - 1];
+                    if on.status == (STATUS_NOTE_ON | (e.status & 0x0f)) && on.time_us == e.time_us
+                    {
+                        v.move_velocity = Some(on.velocity);
+                    }
+                }
+                _ => {}
+            }
+            if v.vibrato_rate.is_some() && v.vibrato_depth.is_some() && v.move_velocity.is_some() {
+                break;
+            }
+        }
+        v
+    }
+
     /// 時刻 [t0, t1] に入る結果の添字の範囲
     pub fn range(&self, t0: u64, t1: u64) -> std::ops::Range<usize> {
         let start = self.time_us.partition_point(|&t| t < t0);
@@ -418,6 +457,46 @@ mod tests {
         let i = runner.time_us.partition_point(|&t| t < 4_200_000);
         assert!(runner.touches[i][0].is_some());
         assert!(runner.touches.back().unwrap()[0].is_none());
+    }
+
+    /// play_values: t1 までの最後の値を拾う。Move は MOVED の直前の Note On で、普通の Note On は拾わない
+    #[test]
+    fn play_values_picks_last_values() {
+        let mut runner = AlgoRunner::new();
+        let ev = |time_us, status, note, velocity| TouchEvent {
+            time_us,
+            status,
+            note,
+            velocity,
+            location: 0.0,
+        };
+        runner.touch_events.extend([
+            ev(10, STATUS_NOTE_ON, 60, 100),
+            ev(20, STATUS_NOTE_ON | 1, 61, 30),
+            ev(20, STATUS_NOTE_MOVED | 1, 60, 0x40),
+            ev(30, STATUS_CC, MIDI_CC_VIBRATO_RATE, 52),
+            ev(30, STATUS_CC, MIDI_CC_VIBRATO_DEPTH, 40),
+            ev(40, STATUS_CC, MIDI_CC_VIBRATO_DEPTH, 0),
+            ev(50, STATUS_NOTE_ON, 62, 90),
+        ]);
+        assert_eq!(runner.play_values(5), PlayValues::default());
+        assert_eq!(
+            runner.play_values(15),
+            PlayValues {
+                move_velocity: None,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            runner.play_values(35),
+            PlayValues {
+                vibrato_rate: Some(52),
+                vibrato_depth: Some(40),
+                move_velocity: Some(30),
+            }
+        );
+        assert_eq!(runner.play_values(100).vibrato_depth, Some(0));
+        assert_eq!(runner.play_values(100).move_velocity, Some(30));
     }
 
     #[test]

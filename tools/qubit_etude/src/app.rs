@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{Bar, BarChart, HLine, Legend, Line, LineStyle, Plot, PlotBounds, PlotPoints};
 use touch_algo::electrode::{Params, State};
+use touch_algo::playinfo::{VIBRATO_DEPTH_PER_ELECTRODE, VIBRATO_RATE_PER_HZ};
 use touch_algo::touch::MAX_TOUCH_POINTS;
 
 use qubit_etude::algo::{self, AlgoRunner};
@@ -976,6 +977,22 @@ impl EtudeApp {
                     ui.end_row();
                 }
             });
+        // 演奏の値（doc/touch_analysis.md §4.4）: 表示範囲の終わりまでに、解析が最後に出した値
+        ui.add_space(6.0);
+        ui.label(RichText::new("演奏の値（表示範囲の終わりまでに最後に出した値）").strong());
+        let values = self.algo.play_values(t1);
+        egui::Grid::new("play_values").show(ui, |ui| {
+            play_value_row(ui, "Vibrato Speed", values.vibrato_rate, |v| {
+                format!("CC19={v}  {:.1}Hz", v as f32 / VIBRATO_RATE_PER_HZ)
+            });
+            play_value_row(ui, "Vibrato Depth", values.vibrato_depth, |v| {
+                format!("CC1={v}  {:.2}電極", v as f32 / VIBRATO_DEPTH_PER_ELECTRODE)
+            });
+            play_value_row(ui, "Portamento", values.move_velocity, |v| {
+                format!("Move vel={v}")
+            });
+        });
+        ui.add_space(6.0);
         ui.label(RichText::new("イベント（PC の解析、表示範囲、新しい順）").strong());
         let events: Vec<_> = self
             .algo
@@ -1284,6 +1301,35 @@ fn bar_plot(ui: &mut egui::Ui, name: &str, bars: Vec<Bar>, keys: Range<usize>, s
                 plot_ui.bar_chart(BarChart::new(name, bars).width(0.8))
             });
     });
+}
+
+/// タッチタブの演奏の値の棒の大きさ
+const PLAY_BAR_SIZE: egui::Vec2 = egui::vec2(160.0, 14.0);
+
+/// タッチタブの演奏の値の 1 行: 名前、MIDI の値（0〜127）を横向きの棒、値の説明。値が無ければ「---」
+fn play_value_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    value: Option<u8>,
+    describe: impl Fn(u8) -> String,
+) {
+    ui.label(name);
+    let (rect, _) = ui.allocate_exact_size(PLAY_BAR_SIZE, egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+    if let Some(v) = value {
+        let mut fill = rect;
+        fill.set_width(rect.width() * v.min(127) as f32 / 127.0);
+        painter.rect_filled(fill, 2.0, ui.visuals().selection.bg_fill);
+    }
+    painter.rect_stroke(
+        rect,
+        2.0,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    ui.label(value.map_or("---".to_string(), describe));
+    ui.end_row();
 }
 
 /// バー表示とタッチの表示の縦軸の幅。2 つのグラフの横軸（キー）の位置をそろえるため、同じにする
