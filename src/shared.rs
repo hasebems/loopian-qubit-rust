@@ -48,7 +48,7 @@ pub static PRESSURE: AtomicU32 = AtomicU32::new(0); // 圧力計算結果: press
 // 設定画面にいる（タッチ・圧力の基準値を補正中。センサーに触れない前提）
 // ui_task → touch_task (touch_algo の校正), pressure_task, ringled
 pub static SETTING_MODE: AtomicBool = AtomicBool::new(false);
-pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用: touch_task (PlayInfo のビブラート) → OLED (page 1)
+pub static DEBUG_VALUE: AtomicU32 = AtomicU32::new(0); // デバッグ用: touch_task (Vibrato Speed。Hz ×10、ビブラートでなければ 0。doc/touch_analysis.md §4.4) → OLED (page 1)
 pub static ANY_TOUCH: AtomicBool = AtomicBool::new(false); // touch_task (TouchTracker) → pressure_task
 // 起動時の校正中（チップの起動待ち・touch_algo の初期取得と noise_floor の自動計測。doc/touch_baseline.md §3.12）。
 // 起動時は true で、一度 false にしたら戻さない: touch_task → OLED (page 0)

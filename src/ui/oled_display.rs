@@ -259,7 +259,8 @@ async fn display1(buffer: &mut OledBuffer, counter: u32, pacer: &mut DrawPacer) 
 
     let vib = DEBUG_VALUE.load(core::sync::atomic::Ordering::Relaxed);
     text1.clear();
-    let _ = write!(text1, "Vibrato: {}", vib);
+    // Vibrato Speed（Hz ×10）。ビブラートでなければ 0（doc/touch_analysis.md §4.4）
+    let _ = write!(text1, "Vibrato: {}.{}Hz", vib / 10, vib % 10);
     draw(
         buffer,
         pacer,

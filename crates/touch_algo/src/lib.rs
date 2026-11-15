@@ -9,5 +9,6 @@
 #![no_std]
 
 pub mod electrode;
+pub mod motion;
 pub mod playinfo;
 pub mod touch;

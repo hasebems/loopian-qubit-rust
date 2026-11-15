@@ -162,7 +162,8 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 }
 
 /// 解析の結果を共有状態に書く: タッチ位置 ×100（未タッチは 10000）→ ringled_task・OLED、
-/// 触れているか → pressure_task、ビブラート → OLED（page 1。触れていないときは 0）
+/// 触れているか → pressure_task、Vibrato Speed（Hz ×10。ビブラートでなければ 0）→ OLED（page 1。
+/// doc/touch_analysis.md §4.4）
 fn publish_touch_state<F, P>(
     tracker: &touch_algo::touch::TouchTracker<P>,
     play: &touch_algo::playinfo::PlayInfo<F>,
@@ -176,10 +177,9 @@ fn publish_touch_state<F, P>(
             slot.store((tp.get_location() * 100.0) as i32, Ordering::Relaxed);
         }
     }
-    let touched = tracker.is_any_touched();
-    ANY_TOUCH.store(touched, Ordering::Relaxed);
-    let vibrato = if touched { play.vibrato() } else { 0 };
-    DEBUG_VALUE.store(vibrato as u32, Ordering::Relaxed);
+    ANY_TOUCH.store(tracker.is_any_touched(), Ordering::Relaxed);
+    let vibrato = play.vibrato_hz().map_or(0, |hz| (hz * 10.0 + 0.5) as u32);
+    DEBUG_VALUE.store(vibrato, Ordering::Relaxed);
 }
 
 /// 最後のスキャンの生値を DEBUG_FRAMES に入れる（待たない）。あふれたら捨てて数える

@@ -15,6 +15,7 @@
 //! - 動作モード（Piano / Violin）は 2026-11-13 に無くした。今は Violin の形（電極 2 つで 1 ノート）だけ。
 //!   Piano の処理は後で足す
 
+use crate::motion::Motion;
 use crate::touch::{Layout, MAX_TOUCH_POINTS, TOUCH_ON_DEPTH, TouchTracker, Track};
 
 // =========================================================
@@ -84,14 +85,33 @@ pub const RELEASE_END_PERMILLE: i32 = 500;
 const NOMINAL_PERIOD_US: u32 = 10_000;
 /// 前の解析からこれより離れていたら、前の解析の時刻を使わない（NOMINAL_PERIOD_US とみなす）
 const MAX_PERIOD_US: u32 = 50_000;
-/// Move（指が動いてノートが変わった）の Note On のベロシティ。固定（2026-11-13、ユーザー）
+// ポルタメント（doc/touch_analysis.md §4.4。2026-11-15）
+// Move（指が動いてノートが変わった）の Note On のベロシティを、動く速さ（`Motion::move_speed`。反転・止まった点と
+// 500ms 前の新しい方からの、動いた距離 ÷ 時間、電極/s）で決める。SWAM は、重ねた次のノートのベロシティが低いとポルタメント、高いとレガート。
+// 速く動いたら高く、ゆっくり動いたら低くする。表は SWAM で鳴らして決める（今の値は仮）
+/// 動く速さがこれ以下で VELOCITY_MOVE_SLOW（電極/s。1 半音 = 2 電極を 1 秒で動く速さ。motion::MOVE_MIN_SPEED と同じ）。
+/// SWAM のポルタメントがよく効くのは 1〜10 くらいの低いところ（2026-11-15、ユーザー）。
+/// 2026-11-15 に 4 → 2（VELOCITY_MOVE_SLOW を 1 にしたら 1 が出やすくなったので、全体を速めにした。ユーザー）
+pub const MOVE_SLOW_SPEED: f32 = 2.0;
+/// 2026-11-15 に 20 → 1（ユーザー）
+pub const VELOCITY_MOVE_SLOW: u8 = 1;
+/// 動く速さがこれ以上で VELOCITY_MOVE_FAST（電極/s。1 半音を 100ms で動く速さ）。その間は直線。
+/// 2026-11-15 に 40 → 25（速い方があまり出なかった。ユーザー。動いていない周期の時間も入れるようにして、
+/// 速さが全体に低く出るようになった分もある）→ 20（全体を速めに。ユーザー）
+pub const MOVE_FAST_SPEED: f32 = 20.0;
+pub const VELOCITY_MOVE_FAST: u8 = 110;
+/// 動く速さが分からない（MOVE_MIN_SPEED より速い周期が無かった）ときの Move のベロシティ。
+/// 2026-11-13〜15 はこの値で固定していた
 pub const VELOCITY_MOVE: u8 = 50;
 
-const HISTORY_SIZE: usize = 128; // Number of past locations
-const FEW_HZ_MIN: f32 = 1.5;
-const FEW_HZ_MAX: f32 = 8.0;
-const OSC_MIN_PEAK_TO_PEAK: f32 = 0.3;
-const OSC_DEADBAND: f32 = 0.1;
+// ビブラート（doc/touch_analysis.md §4.4。2026-11-15）。検出は `motion.rs`
+pub const MIDI_CC_VIBRATO_DEPTH: u8 = 1;
+pub const MIDI_CC_VIBRATO_RATE: u8 = 19;
+/// Vibrato Rate（CC19）= 周波数（Hz）× この数（1.5〜8Hz が 15〜80。以前の検出と同じ。仮）
+pub const VIBRATO_RATE_PER_HZ: f32 = 10.0;
+/// Vibrato Depth（CC1）= 山と谷の差（電極）× この数（0.3 電極で 19、1 電極（半音の半分）で 64、2 電極で 127。仮）
+pub const VIBRATO_DEPTH_PER_ELECTRODE: f32 = 64.0;
+
 
 const NEW_NOTE: u8 = 0xff;
 const TOUCH_POINT_ERROR: u8 = 0xfe;
@@ -181,7 +201,7 @@ enum VoiceState {
     Sounding, // 発音中: Note On を出した
 }
 
-/// 指 1 本の演奏情報（状態、鳴らしているノート、ビブラートを見るための位置の履歴）。添字は TouchPoint の id と同じ
+/// 指 1 本の演奏情報（状態、鳴らしているノート、ベロシティ・離す速さ・Expression を求める値）。添字は TouchPoint の id と同じ
 #[derive(Clone, Copy, Debug)]
 struct Voice {
     note: Option<u8>, // 鳴らしているノート（0〜ノートの数−1、NOTE_OFFSET を足す前）。None は鳴らしていない
@@ -198,9 +218,7 @@ struct Voice {
     release_us: Option<u32>,         // 測った離す時間（µs）。新しい指で None に戻す
     expr_depth: f32, // 発音中の、LPF でならした depth（Expression を作る）。見失った周期は 0 に向かう
     velocity: u8,        // Note On のベロシティ（つなぎ目を越えたときの Note On も同じ値を使う）
-    history_idx: usize,  // Store the last index for each touch point
-    location_history: [f32; HISTORY_SIZE], // Store past locations for each possible note
-    history_time_us: [u32; HISTORY_SIZE], // location_history の各サンプルの時刻（ビブラートの周波数を求める）
+    motion: Motion,      // 指の動き: ビブラートと、動く速さ（ポルタメント。doc/touch_analysis.md §4.4）
 }
 
 impl Voice {
@@ -219,28 +237,13 @@ impl Voice {
         release_us: None,
         expr_depth: 0.0,
         velocity: VELOCITY_MAX,
-        history_idx: 0,
-        location_history: [0f32; HISTORY_SIZE],
-        history_time_us: [0; HISTORY_SIZE],
+        motion: Motion::INITIAL,
     };
-    /// 新しいタッチで、履歴を今の位置で埋める。Voice は使い回すので、前のタッチの位置が残らないようにする
-    /// （doc/touch_analysis.md §4.2「PlayInfo の流れ」）。履歴が平らなので、動くまではビブラートにならない
-    fn reset_history(&mut self, location: f32, now_us: u32) {
-        self.location_history = [location; HISTORY_SIZE];
-        self.history_time_us = [now_us; HISTORY_SIZE];
-        self.history_idx = 0;
-    }
-    fn push_history(&mut self, location: f32, now_us: u32) {
-        self.location_history[self.history_idx] = location;
-        self.history_time_us[self.history_idx] = now_us;
-        self.history_idx = (self.history_idx + 1) % HISTORY_SIZE;
-    }
     /// 新しい指: 測定中から始める。prev_us は前の解析の時刻で、そのときの depth は 0 とみなす
     /// （区間が無いか、TOUCH_ON_DEPTH 以下だった）。depth が上がり始めた時刻を、前の解析とこの周期の間で
     /// TOUCH_ON_DEPTH を超えた時刻として補間する。検出した周期を起点にすると、検出したときに depth が
     /// 大きかったものほど速く見えてしまうため（doc/touch_analysis.md §4.2「立ち上がりの時間の求め方」）
-    fn start_onset(&mut self, location: f32, depth: i16, prev_us: u32, now_us: u32) {
-        self.reset_history(location, now_us);
+    fn start_onset(&mut self, depth: i16, prev_us: u32, now_us: u32) {
         self.state = VoiceState::Onset;
         self.onset_start_us = now_us;
         self.rise_start_us = cross_time(prev_us, 0, now_us, depth, TOUCH_ON_DEPTH);
@@ -327,66 +330,6 @@ impl Voice {
         let diff = onset_velocity(rise_us as u32) as i32 - VELOCITY_FLICK as i32;
         (VELOCITY_FLICK as i32 + diff / FLICK_SPREAD_DIV) as u8
     }
-    fn detect_few_hz_round_trip_hz(&self) -> Option<f32> {
-        // 新規起動直後の0埋めや静止状態を除外
-        let mut min_v = f32::INFINITY;
-        let mut max_v = f32::NEG_INFINITY;
-        let mut sum = 0.0;
-        // location_history全体を走査して、最小値・最大値・平均値を計算する
-        for i in 0..HISTORY_SIZE {
-            let idx = (self.history_idx + i) % HISTORY_SIZE;
-            let v = self.location_history[idx];
-            min_v = min_v.min(v);
-            max_v = max_v.max(v);
-            sum += v;
-        }
-
-        let peak_to_peak = max_v - min_v;
-        if !peak_to_peak.is_finite() || peak_to_peak < OSC_MIN_PEAK_TO_PEAK {
-            return None;
-        }
-
-        let mean = sum / HISTORY_SIZE as f32;
-        let deadband = OSC_DEADBAND.max(peak_to_peak * 0.08);
-        let mut state: i8 = 0; // -1: below mean, +1: above mean
-        let mut crossings: u16 = 0;
-
-        for i in 0..HISTORY_SIZE {
-            let idx = (self.history_idx + i) % HISTORY_SIZE;
-            let centered = self.location_history[idx] - mean;
-            let next_state = if centered > deadband {
-                1
-            } else if centered < -deadband {
-                -1
-            } else {
-                state
-            };
-
-            // state が0から非0に、あるいは非0から反転する crossing を数える
-            if state != 0 && next_state != state {
-                crossings = crossings.saturating_add(1);
-            }
-            state = next_state;
-        }
-
-        if crossings < 2 {
-            return None;
-        }
-
-        // 履歴の長さ: 最も古いサンプル（次に書く位置）から最も新しいサンプルまでの実時間
-        let oldest = self.history_time_us[self.history_idx];
-        let newest = self.history_time_us[(self.history_idx + HISTORY_SIZE - 1) % HISTORY_SIZE];
-        let duration_sec = newest.wrapping_sub(oldest) as f32 / 1_000_000.0;
-        if duration_sec <= 0.0 {
-            return None;
-        }
-        let freq_hz = crossings as f32 / (2.0 * duration_sec);
-        if (FEW_HZ_MIN..=FEW_HZ_MAX).contains(&freq_hz) {
-            Some(freq_hz)
-        } else {
-            None
-        }
-    }
 }
 
 // =========================================================
@@ -400,10 +343,10 @@ where
 {
     midi_callback: F,                  // MIDI callback function
     voices: [Voice; MAX_TOUCH_POINTS], // 指毎の演奏情報
-    vibrato: u8,                       // ビブラートの強さ (0-127)
-    vibrato_enabled: bool, // ビブラートを検出して CC を出すか。2026-11-13 から既定では止めている（コードは残す）
     last_update_us: Option<u32>, // 前の解析の時刻（立ち上がりの時間の補間に使う）
     last_expression: Option<u8>, // 最後に送った Expression。None はまだ送っていない
+    vibrato_hz: Option<f32>,     // 今のビブラートの速さ（Hz）。ビブラートでなければ None
+    last_vibrato: Option<(u8, u8)>, // 最後に送った (Vibrato Depth, Vibrato Rate)。None はまだ送っていない
 }
 
 impl<F> PlayInfo<F>
@@ -414,28 +357,24 @@ where
         PlayInfo {
             midi_callback: cb,
             voices: [Voice::INITIAL; MAX_TOUCH_POINTS],
-            vibrato: 0,
-            vibrato_enabled: false,
             last_update_us: None,
             last_expression: None,
+            vibrato_hz: None,
+            last_vibrato: None,
         }
     }
-    /// ビブラートの強さ（0-127）。最後に検出した値で、触れていないときも残る
-    pub fn vibrato(&self) -> u8 {
-        self.vibrato
+    /// 今のビブラートの速さ（Hz。OLED の表示用）。ビブラートと判定している発音中の指が無ければ None
+    pub fn vibrato_hz(&self) -> Option<f32> {
+        self.vibrato_hz
     }
     /// 指 i（TouchPoint の id）について、最後に測った離す時間（µs。doc/touch_analysis.md §4.2「離す速さ」）。
     /// 新しい指で None に戻る。Note Off の後も、次の指まで残る
     pub fn release_us(&self, i: usize) -> Option<u32> {
         self.voices.get(i).and_then(|v| v.release_us)
     }
-    /// ビブラートの検出（CC1・CC19）を動かすか。既定は止めている
-    pub fn set_vibrato_enabled(&mut self, enabled: bool) {
-        self.vibrato_enabled = enabled;
-    }
 
     /// 1 周期分。`TouchTracker::update` の後に呼ぶ。指毎の `Track` で状態を進めて Note On/Off を出し、
-    /// 続けてビブラートを更新する
+    /// 続けて Expression とビブラートを送る
     pub fn update<P>(&mut self, touch: &TouchTracker<P>)
     where
         P: AsRef<[u16]> + AsMut<[u16]>,
@@ -453,9 +392,7 @@ where
         }
         self.perform_notes(touch, layout, prev_us);
         self.send_expression(false);
-        if self.vibrato_enabled {
-            self.update_vibrato(touch, layout);
-        }
+        self.send_vibrato(touch, layout);
     }
 
     /// 追跡の結果（Track）で、指毎の状態（VoiceState）を進め、Note On/Off を出す（doc/touch_analysis.md §4.2）。
@@ -467,7 +404,9 @@ where
     /// | 測定中 | Followed | `Voice::onset` で Note On を出すか決める。出したら発音中へ |
     /// | 測定中 | None（保持） | 指を見失った: 下がったとみなし、はじいたなら Note On |
     /// | 測定中 | Released | 何も出さずに待機へ（かすっただけ） |
-    /// | 発音中 | Followed | ノートが変わったら Move（つなぎ目では cross_seam） |
+    /// | 発音中 | Followed | ノートが変わったら Move（つなぎ目では cross_seam）。ビブラートの間は変えない |
+    ///
+    /// 指の動き（`Motion`）は、指を見つけた周期（Started・Followed）に更新する。保持している周期は終わりだけ見る
     /// | 発音中 | Released | Note Off → 待機 |
     fn perform_notes<P>(&mut self, touch: &TouchTracker<P>, layout: Layout, prev_us: u32)
     where
@@ -480,21 +419,23 @@ where
             let voice = &mut self.voices[i];
             let velocity = match (tp.track(), voice.state) {
                 (Track::Started, _) => {
-                    voice.start_onset(location, tp.get_intensity(), prev_us, now_us);
+                    voice.motion.start(location, now_us);
+                    voice.start_onset(tp.get_intensity(), prev_us, now_us);
                     voice.onset(tp.get_intensity(), now_us)
                 }
                 (Track::Followed, VoiceState::Onset) => {
-                    voice.push_history(location, now_us);
+                    voice.motion.update(location, layout, now_us);
                     voice.onset(tp.get_intensity(), now_us)
                 }
                 (Track::Followed, VoiceState::Sounding) => {
-                    voice.push_history(location, now_us);
+                    voice.motion.update(location, layout, now_us);
                     voice.measure_release(tp.get_intensity(), now_us);
                     self.note_follow(i, location, layout);
                     None
                 }
                 (Track::None, VoiceState::Onset) if tp.is_touched() => voice.onset_lost(),
                 (Track::None, VoiceState::Sounding) if tp.is_touched() => {
+                    voice.motion.hold(now_us);
                     voice.measure_release(0, now_us);
                     None
                 }
@@ -528,8 +469,13 @@ where
             self.send_note_on(i, note.saturating_add(NOTE_OFFSET), velocity, location);
         }
     }
-    /// 同じ指が続いている: ノートが変わったら、Move かつなぎ目を越えたかで分ける
+    /// 同じ指が続いている: ノートが変わったら、Move かつなぎ目を越えたかで分ける。
+    /// ビブラートと判定している間は、ノートを変えない（doc/touch_analysis.md §4.4）。終わったら、
+    /// 次の周期から今の position でまた判定する（ずれていれば Move）
     fn note_follow(&mut self, i: usize, location: f32, layout: Layout) {
+        if self.voices[i].motion.is_vibrato() {
+            return;
+        }
         let Some(crnt) = self.voices[i].note else {
             return;
         };
@@ -551,10 +497,15 @@ where
         }
         self.voices[i].note = Some(updated);
     }
-    /// Move: 次のノートの Note On（ベロシティは VELOCITY_MOVE で固定）を出して、前のノートの Note Off（MOVED）を出す
+    /// Move: 次のノートの Note On を出して、前のノートの Note Off（MOVED）を出す。音が重なるので、SWAM では
+    /// レガートかポルタメントになる。ベロシティは動く速さで決める（`move_velocity`。doc/touch_analysis.md §4.4）。
+    /// 前のノートの Note Off のベロシティも、Note On と同じ値にする（2026-11-15、ユーザー）。SWAM が、Move の
+    /// ベロシティを 64（前は Note Off を 0x40 で出していた）と表示し、ポルタメントもかからなかったため。
+    /// SWAM が後に来た Note Off のベロシティを見ているらしい（Note Off Velocity の設定を OFF にしても同じ）
     fn move_note(&self, i: usize, from: u8, to: u8, location: f32) {
-        self.send_note_on(i, to, VELOCITY_MOVE, location);
-        (self.midi_callback)(STATUS_NOTE_MOVED | i as u8, from, 0x40, location);
+        let velocity = move_velocity(self.voices[i].motion.move_speed());
+        self.send_note_on(i, to, velocity, location);
+        (self.midi_callback)(STATUS_NOTE_MOVED | i as u8, from, velocity, location);
     }
     /// つなぎ目を越えた（doc/touch_analysis.md §4.1）: Move はせず、前のノートの Note Off を出してから、
     /// 越えた先のノートの Note On を、その指の Note On のベロシティで出す。
@@ -602,47 +553,62 @@ where
     fn send_note_on(&self, i: usize, midi_note: u8, velocity: u8, location: f32) {
         (self.midi_callback)(STATUS_NOTE_ON | i as u8, midi_note, velocity, location);
     }
-
-    /// ビブラート。リングのつなぎ目の上（position が電極数 − 1 以上。96 電極では 95 以上）に指がある間は、
-    /// 検出した値を出さない（doc/touch_analysis.md §4.1）
-    fn update_vibrato<P>(&mut self, touch: &TouchTracker<P>, layout: Layout)
+    /// ビブラート（doc/touch_analysis.md §4.4）: 発音中でビブラートと判定している指のうち、ならした depth が
+    /// 最大のものの速さと深さを、Vibrato Rate（CC19）・Vibrato Depth（CC1）にして、変わったら送る（Rate が先）。
+    /// そういう指がいなくなったら、Depth を 0 にする。
+    /// その指がリングのつなぎ目の上（position が電極数 − 1 以上）にいる間は送らない（§4.1）
+    fn send_vibrato<P>(&mut self, touch: &TouchTracker<P>, layout: Layout)
     where
         P: AsRef<[u16]> + AsMut<[u16]>,
     {
         let seam = (layout.pads - 1) as f32;
-        let mut touched = false;
-        let mut on_seam = false;
-        let mut few_hz_detected: Option<f32> = None;
-
-        for (tp, voice) in touch.touch_points().iter().zip(self.voices.iter()) {
-            if tp.is_touched() {
-                touched = true;
-                if layout.ring && tp.get_location() >= seam {
-                    on_seam = true;
-                }
-                if few_hz_detected.is_none() {
-                    few_hz_detected = voice.detect_few_hz_round_trip_hz();
-                }
+        let strongest = self
+            .voices
+            .iter()
+            .zip(touch.touch_points().iter())
+            .filter(|(v, _)| v.state == VoiceState::Sounding)
+            .filter_map(|(v, tp)| v.motion.vibrato().map(|vib| (v.expr_depth, vib, tp.get_location())))
+            .fold(None, |m: Option<(f32, (f32, f32), f32)>, x| match m {
+                Some(m) if m.0 >= x.0 => Some(m),
+                _ => Some(x),
+            });
+        let Some((_, (hz, swing), location)) = strongest else {
+            self.vibrato_hz = None;
+            if let Some((depth, rate)) = self.last_vibrato
+                && depth != 0
+            {
+                (self.midi_callback)(STATUS_CC, MIDI_CC_VIBRATO_DEPTH, 0, 0.0);
+                self.last_vibrato = Some((0, rate));
             }
+            return;
+        };
+        self.vibrato_hz = Some(hz);
+        if layout.ring && location >= seam {
+            return;
         }
-
-        if touched {
-            let vib = few_hz_detected.map_or(0, |hz| (hz * 10.0) as u32).min(127) as u8;
-            if !on_seam && vib != self.vibrato {
-                let dpt = (vib * 2).min(48);
-                (self.midi_callback)(
-                    STATUS_CC, 1,   // CC number for vibrato
-                    dpt, // CC value for pitch bend (centered at 64)
-                    0.0, // location is not relevant for vibrato command
-                );
-                (self.midi_callback)(
-                    STATUS_CC, 19, // CC number for vibrato
-                    vib, 0.0, // location is not relevant for vibrato command
-                );
-                self.vibrato = vib;
-            }
+        let rate = (hz * VIBRATO_RATE_PER_HZ + 0.5).clamp(1.0, 127.0) as u8;
+        let depth = (swing * VIBRATO_DEPTH_PER_ELECTRODE + 0.5).clamp(1.0, 127.0) as u8;
+        let last = self.last_vibrato;
+        if last.map(|l| l.1) != Some(rate) {
+            (self.midi_callback)(STATUS_CC, MIDI_CC_VIBRATO_RATE, rate, 0.0);
         }
+        if last.map(|l| l.0) != Some(depth) {
+            (self.midi_callback)(STATUS_CC, MIDI_CC_VIBRATO_DEPTH, depth, 0.0);
+        }
+        self.last_vibrato = Some((depth, rate));
     }
+}
+
+/// Move のベロシティ（doc/touch_analysis.md §4.4）: 動く速さ（電極/s）が MOVE_SLOW_SPEED 以下で
+/// VELOCITY_MOVE_SLOW、MOVE_FAST_SPEED 以上で VELOCITY_MOVE_FAST、その間は直線（四捨五入）。
+/// 速さが分からなければ VELOCITY_MOVE
+fn move_velocity(speed: Option<f32>) -> u8 {
+    let Some(speed) = speed else {
+        return VELOCITY_MOVE;
+    };
+    let r = ((speed - MOVE_SLOW_SPEED) / (MOVE_FAST_SPEED - MOVE_SLOW_SPEED)).clamp(0.0, 1.0);
+    let span = (VELOCITY_MOVE_FAST - VELOCITY_MOVE_SLOW) as f32;
+    (VELOCITY_MOVE_SLOW as f32 + span * r + 0.5) as u8
 }
 
 #[cfg(test)]
@@ -813,7 +779,8 @@ mod tests {
         );
     }
 
-    /// 指を動かしてノートが変わると、新しいノートの Note On（VELOCITY_MOVE）と古いノートの MOVED が出る
+    /// 指を動かしてノートが変わると、新しいノートの Note On と古いノートの MOVED が出る。
+    /// 1 周期で 2 電極（200 電極/s）動いたので、ベロシティは VELOCITY_MOVE_FAST。MOVED も同じベロシティ
     #[test]
     fn moving_finger_changes_note() {
         let log: Log = RefCell::new(Vec::new());
@@ -825,8 +792,8 @@ mod tests {
             log.borrow().as_slice(),
             &[
                 (STATUS_NOTE_ON, 2 + NOTE_OFFSET, VELOCITY_MAX),
-                (STATUS_NOTE_ON, 3 + NOTE_OFFSET, VELOCITY_MOVE),
-                (STATUS_NOTE_MOVED, 2 + NOTE_OFFSET, 0x40)
+                (STATUS_NOTE_ON, 3 + NOTE_OFFSET, VELOCITY_MOVE_FAST),
+                (STATUS_NOTE_MOVED, 2 + NOTE_OFFSET, VELOCITY_MOVE_FAST)
             ]
         );
     }
@@ -909,8 +876,8 @@ mod tests {
         assert_eq!(
             log.borrow()[3..],
             [
-                (STATUS_NOTE_ON, 1 + NOTE_OFFSET, VELOCITY_MOVE),
-                (STATUS_NOTE_MOVED, NOTE_OFFSET, 0x40)
+                (STATUS_NOTE_ON, 1 + NOTE_OFFSET, VELOCITY_MOVE_FAST),
+                (STATUS_NOTE_MOVED, NOTE_OFFSET, VELOCITY_MOVE_FAST)
             ]
         );
     }
@@ -928,50 +895,6 @@ mod tests {
         assert_eq!(note_from_location(47, 94.4, layout), Ok(47));
         // 今のノート 0 から、つなぎ目の向こうに 0.4 ノート（95.2 / 2 = 47.6）はヒステリシスの中
         assert_eq!(note_from_location(0, 95.2, layout), Ok(0));
-    }
-
-    /// ビブラート: 既定では止めている。動かすと、つなぎ目の上（position が電極数 − 1 以上）では
-    /// 検出した値を出さない（§4.1）
-    #[test]
-    fn vibrato_is_held_on_seam() {
-        // 3Hz・振幅 0.5 の揺れを位置の履歴に入れてから、1 周期解析する
-        fn run(center: usize, enabled: bool) -> (u8, usize) {
-            let log: Log = RefCell::new(Vec::new());
-            let mut tracker = TouchTracker::new([0u16; 12], true);
-            let mut play = PlayInfo::new(logger(&log));
-            play.set_vibrato_enabled(enabled);
-            step(&mut tracker, &mut play, &finger(center, 12));
-            let base = tracker.touch_point(0).unwrap().get_location();
-            // 10ms 毎のサンプルで、最も新しいものが今の時刻になるようにする（次の step で書くのは添字 0）
-            let now = tracker.now_us();
-            let voice = &mut play.voices[0];
-            voice.history_idx = 0;
-            for (k, t) in voice.history_time_us.iter_mut().enumerate() {
-                *t = now.wrapping_sub((HISTORY_SIZE - 1 - k) as u32 * PERIOD_US);
-            }
-            for (k, h) in voice.location_history.iter_mut().enumerate() {
-                // no_std の f32 に sin が無いので、三角波で代わりにする
-                let tri = (k as f32 * PERIOD_US as f32 / 1_000_000.0 * 3.0 * 2.0) % 2.0;
-                *h = base
-                    + 0.5
-                        * (if tri < 1.0 {
-                            tri * 2.0 - 1.0
-                        } else {
-                            3.0 - tri * 2.0
-                        });
-            }
-            step(&mut tracker, &mut play, &finger(center, 12));
-            let cc = log.borrow().iter().filter(|e| e.0 == STATUS_CC).count();
-            (play.vibrato(), cc)
-        }
-        // 止めている間は出さない
-        assert_eq!(run(5, false), (0, 0));
-        // つなぎ目から離れた所では検出して CC を出す
-        let (vib, cc) = run(5, true);
-        assert!(vib > 0);
-        assert_eq!(cc, 2);
-        // 電極 11 の上（position 11.0 = 電極数 − 1）では出さない
-        assert_eq!(run(11, true), (0, 0));
     }
 
     /// 離す速さ: 発音中の平均（100）の 80% を割った時刻から 50% を割った時刻までを、補間して測る。
@@ -1095,16 +1018,109 @@ mod tests {
         assert_eq!(play.expression(), 60);
     }
 
-    /// 新しいタッチでは、前のタッチの位置の履歴が残らない（§4.2「PlayInfo の流れ」）
+    /// position x（小数）の指（電極 12 個）: x の前後の電極に、x からの距離で減る output を置く
+    /// （重心がほぼ x になる）。電極の番号は 12 で巡回させる（リングのつなぎ目の上）
+    fn blob(x: f32) -> Vec<(usize, u16)> {
+        let c = x as usize + 12;
+        (c - 2..=c + 3)
+            .filter_map(|k| {
+                let w = 1.0 - (k as f32 - 12.0 - x).abs() / 2.0;
+                (w > 0.0).then(|| (k % 12, (80.0 * w) as u16))
+            })
+            .collect()
+    }
+
+    /// 三角波（中心 center、山と谷の差 swing、周波数 hz）の、t（µs）での値
+    fn tri(center: f32, swing: f32, hz: f32, t_us: u32) -> f32 {
+        let phase = (t_us as f32 / 1_000_000.0 * hz) % 1.0;
+        let x = if phase < 0.5 { phase * 4.0 - 1.0 } else { 3.0 - phase * 4.0 };
+        center + swing / 2.0 * x
+    }
+
+    /// ゆっくり（5 電極/s）動かしてノートが変わると、Move のベロシティは低い（ポルタメント寄り）
     #[test]
-    fn new_touch_clears_location_history() {
+    fn slow_move_has_low_velocity() {
+        let log: Log = RefCell::new(Vec::new());
         let mut tracker = TouchTracker::new([0u16; 12], false);
-        let mut play = PlayInfo::new(|_, _, _, _| {});
-        step(&mut tracker, &mut play, &finger(2, 12));
-        for _ in 0..10 {
-            step(&mut tracker, &mut play, &[]);
+        let mut play = PlayInfo::new(logger(&log));
+        let mut x = 4.0;
+        for _ in 0..60 {
+            step(&mut tracker, &mut play, &blob(x));
+            x += 5.0 * PERIOD_US as f32 / 1e6;
         }
-        step(&mut tracker, &mut play, &finger(8, 12));
-        assert!(play.voices[0].location_history.iter().all(|&l| l == 8.0));
+        let moves: Vec<u8> = log
+            .borrow()
+            .iter()
+            .filter(|e| e.0 == STATUS_NOTE_ON)
+            .skip(1)
+            .map(|e| e.2)
+            .collect();
+        assert!(!moves.is_empty());
+        assert!(moves.iter().all(|&v| v < 40), "{moves:?}");
+        let log = log.borrow();
+        for w in log.windows(2).filter(|w| w[1].0 == STATUS_NOTE_MOVED) {
+            assert_eq!(w[0].0, STATUS_NOTE_ON);
+            assert_eq!(w[1].2, w[0].2, "MOVED のベロシティは直前の Note On と同じ");
+        }
+    }
+
+    /// Move のベロシティの表
+    #[test]
+    fn move_velocity_table() {
+        assert_eq!(move_velocity(None), VELOCITY_MOVE);
+        assert_eq!(move_velocity(Some(0.0)), VELOCITY_MOVE_SLOW);
+        assert_eq!(move_velocity(Some(MOVE_SLOW_SPEED)), VELOCITY_MOVE_SLOW);
+        assert_eq!(move_velocity(Some(11.0)), 56);
+        assert_eq!(move_velocity(Some(MOVE_FAST_SPEED)), VELOCITY_MOVE_FAST);
+        assert_eq!(move_velocity(Some(1000.0)), VELOCITY_MOVE_FAST);
+    }
+
+    /// ビブラート: 大きく（ヒステリシスを越える ±1.6 電極）揺らしても、ビブラートと判定した後はノートを変えず、
+    /// CC19（Rate）→ CC1（Depth）を送る。指を止めると終わって Depth 0 を送る
+    #[test]
+    fn vibrato_holds_note_and_sends_cc() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        let mut play = PlayInfo::new(logger(&log));
+        let mut t = 0;
+        for _ in 0..100 {
+            step(&mut tracker, &mut play, &blob(tri(4.0, 3.2, 5.0, t)));
+            t += PERIOD_US;
+        }
+        let hz = play.vibrato_hz().expect("ビブラート");
+        assert!((hz - 5.0).abs() < 0.6, "hz = {hz}");
+        let events = log.borrow().clone();
+        let first_rate = events
+            .iter()
+            .position(|e| *e == (STATUS_CC, MIDI_CC_VIBRATO_RATE, e.2))
+            .expect("CC19");
+        assert_eq!(events[first_rate + 1].0, STATUS_CC);
+        assert_eq!(events[first_rate + 1].1, MIDI_CC_VIBRATO_DEPTH);
+        assert!(
+            events[first_rate..].iter().all(|e| e.0 == STATUS_CC),
+            "ビブラートの間にノートが変わった: {events:?}"
+        );
+        // 止める: 山と谷の間隔（100ms）の 2 倍を過ぎたら終わり、Depth 0
+        for _ in 0..30 {
+            step(&mut tracker, &mut play, &blob(4.0));
+        }
+        assert_eq!(play.vibrato_hz(), None);
+        assert!(log.borrow().contains(&(STATUS_CC, MIDI_CC_VIBRATO_DEPTH, 0)));
+    }
+
+    /// リングのつなぎ目の上（position が電極数 − 1 以上）でのビブラートは、CC を送らない（§4.1）
+    #[test]
+    fn vibrato_is_held_on_seam() {
+        let log: Log = RefCell::new(Vec::new());
+        let mut tracker = TouchTracker::new([0u16; 12], true);
+        let mut play = PlayInfo::new(logger(&log));
+        let mut t = 0;
+        for _ in 0..100 {
+            // 11.2〜11.8 で揺らす（いつもつなぎ目の上）
+            step(&mut tracker, &mut play, &blob(tri(11.5, 0.6, 5.0, t)));
+            t += PERIOD_US;
+        }
+        assert!(play.vibrato_hz().is_some());
+        assert!(!log.borrow().iter().any(|e| e.0 == STATUS_CC));
     }
 }
