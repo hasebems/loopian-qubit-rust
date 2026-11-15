@@ -89,15 +89,16 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `crates/touch_algo/`: タッチの計算。no_std で、ファーム（`touch_task`）と PC アプリが同じコードを使う。電極 1 つの単位は electrode、指 1 本の単位は touch と呼ぶ（`doc/touch_analysis.md` §7）
     - `electrode.rs`: 電極毎の信号処理（ノイズ除去・基準値、`doc/touch_baseline.md` §3）。`ElectrodeSignal`、パラメータは `Params::DEFAULT`
     - `touch.rs`: depth・position の層。電極の output から指 1 本の depth（output の合計）と position（重心）を求め、追跡する（最大 4 点。`doc/touch_analysis.md` §3）。`TouchTracker`。ノートは知らない。`MAX_TOUCH_POINTS` もここにあり、`constants.rs` が再公開する
-    - `playinfo.rs`: 演奏情報の層。`TouchTracker` の結果（指毎の position・depth・`Track`）から、ノート変換・Note On/Off・Move・リングのつなぎ目の扱い・ベロシティ・ビブラートを決める（§4）。`PlayInfo`。指毎に状態（待機 → 測定中 → 発音中）を持ち、Note On は depth が `NOTE_ON_DEPTH` に届いた・はじいた・上限の時間が過ぎた、のどれかで出す（§4.2）。発音中は離す速さ（平均の 80% → 50% の時間、`PlayInfo::release_us`）を測る。MIDI にはまだ出さない。電極の output は見ない。MIDI 出力はコールバック経由
+    - `motion.rs`: 指 1 本の動き（`Motion`）。position の差分から、ビブラート（山と谷）と動く速さ（Move のベロシティ）を求める（§4.4）。`playinfo.rs` が指毎に持つ
+    - `playinfo.rs`: 演奏情報の層。`TouchTracker` の結果（指毎の position・depth・`Track`）から、ノート変換・Note On/Off・Move・リングのつなぎ目の扱い・ベロシティ・ビブラート・ポルタメントを決める（§4）。`PlayInfo`。指毎に状態（待機 → 測定中 → 発音中）を持ち、Note On は depth が `NOTE_ON_DEPTH` に届いた・はじいた・上限の時間が過ぎた、のどれかで出す（§4.2）。発音中は離す速さ（平均の 80% → 50% の時間、`PlayInfo::release_us`）を測る。MIDI にはまだ出さない。電極の output は見ない。MIDI 出力はコールバック経由
     - 共有状態（`TOUCH0-3`・`ANY_TOUCH`・`DEBUG_VALUE`）は `touch_task` が両方の結果を読んで書く（2 つの層の分け方は `doc/touch_analysis.md` §5）
 
 ## MIDI
 
 - 動作モード（Piano / Violin）は 2026-11-13 に無くした。今は Violin の形だけで、Piano の処理は後で足す
 - ノートと CC は ch 2 (`MIDI_CH_VIOLIN` = 1)。電極 2 つで 1 ノート（`ELECTRODES_PER_NOTE`）、ノート 0 は `NOTE_OFFSET`（55）。SWAM Solo Strings 向けで、Expression (CC11) を送らないと音が出ない（`doc/midi_spec.md`）。Expression（CC11、弓速）は `PlayInfo` が depth（発音中で最大の指、1〜127、指が無いとき 10）から作り、`touch_task` が Note On の前に送る。圧力センサは Bow Pressure（CC80、弓圧）に割り当てる（`doc/touch_analysis.md` §4.3）
-- ベロシティは音量ではなく音の立ち上がりを変えるもの。depth が 0 から `NOTE_ON_DEPTH`（50）まで上がる時間（前後の周期で補間）を、表（10ms 以下 110・25ms で 70・100ms で 30・300ms 以上 10）でベロシティにする。はじいたときは、最大の depth まで上がった速さで表から求め、90 の方へ 1/4 に縮める（`doc/touch_analysis.md` §4.2）。Move の Note On は `VELOCITY_MOVE`（50）で固定
-- ビブラート（CC1・CC19）の検出は、コードは残して止めている（`PlayInfo::set_vibrato_enabled`）
+- ベロシティは音量ではなく音の立ち上がりを変えるもの。depth が 0 から `NOTE_ON_DEPTH`（50）まで上がる時間（前後の周期で補間）を、表（10ms 以下 110・25ms で 70・100ms で 30・300ms 以上 10）でベロシティにする。はじいたときは、最大の depth まで上がった速さで表から求め、90 の方へ 1/4 に縮める（`doc/touch_analysis.md` §4.2）。Move の Note On のベロシティは動く速さで決める（ゆっくりほど低く、SWAM でポルタメントになる。`doc/touch_analysis.md` §4.4）
+- ビブラート（CC1 Depth・CC19 Rate）は、position の山と谷から求める（1.5〜8Hz、山と谷の差 0.3 電極以上、1 往復で判定。`doc/touch_analysis.md` §4.4）。ビブラートの間はノートを変えない。OLED page 1 の Vibrato に速さ（Hz）を出す
 - 左右スイッチの同時押しで設定画面（page 4、`SETTING_MODE=true`）に入り、エラーコードと診断値（最小・最大・回数）もクリアされる。設定画面で設定する項目は今は無い。設定画面にいる間はタッチ・圧力の基準値補正（タッチは `touch_algo` の校正: 基準値の速い追従と noise_floor の計測）を行うので、センサーに触れないこと
 
 ## エラー処理の約束事
@@ -110,7 +111,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 ## コーディング上の注意
 
 - ヒープ無し。配列は固定長、static は `StaticCell`（`make_static!` マクロ）で確保する
-- Core1 のスタックは `CORE1_STACK_SIZE` = 16KB（`TouchTracker`・`PlayInfo` が合わせて約 3.7KB あるため）、Core0 は `memory.x` の `_stack_size` = 8KB。大きな配列をタスク内のローカル変数に置くときはスタック量に注意する
+- Core1 のスタックは `CORE1_STACK_SIZE` = 16KB（`TouchTracker`・`PlayInfo` は 96 キーで合わせて約 0.9KB。2026-11-15 にビブラートの位置の履歴を消して約 4.6KB から減った）、Core0 は `memory.x` の `_stack_size` = 8KB。大きな配列をタスク内のローカル変数に置くときはスタック量に注意する
 - 処理時間や周期超過は OLED の診断ページ（page 5）で確認できる。計測値は `shared.rs` の `SCAN_TIME` / `ANALYSIS_TIME` / `UI_DRAW_TIME`（`TimeStat`）、`PERIOD_OVERRUN`、`MIDI_TX_MAX_USED` / `MIDI_TX_OVERFLOW`
 - スキャン時間の内訳は I2C 診断ページ（page 6）で確認できる。I2C1 の通信 1 回の時間（`I2C_SELECT_TIME`・`I2C_READ_TIME`・`I2C_DISCONNECT_TIME`）と、hi/lo ずれの読み直し（`I2C_REREAD_COUNT`）・失敗（`I2C_FAIL_COUNT`）の回数
 - 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`・`playinfo.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
