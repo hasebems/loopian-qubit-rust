@@ -116,3 +116,9 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`・`playinfo.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
 - 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）、`doc/hw96_firmware261114.md`（96 キーのハードの 2 回目の改修に合わせたファームの対応。ハードの完成後に着手）
+
+## 不具合の扱い
+
+- 信頼性の高い製品を出すプロジェクトではないので、再現させられる問題だけを、解決すべき問題として扱う（2026-11-19、ユーザー）
+- まれにしか起きない・再現できない現象は、原因を調べず、解決すべき問題や未完了の項目にも挙げない。起きたことの記録（日時・記録ファイル・見えた症状）だけを `doc/` に残す
+- 「原因が分かった」と言えるのは、条件を作ると現象が出て、その条件を外すと出なくなることを確かめたとき。古い記録から推測するだけでは解明にならない
