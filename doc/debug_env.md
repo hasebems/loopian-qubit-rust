@@ -252,10 +252,10 @@ loopian_qubit/
 - cargo の設定は実行したディレクトリから探されるので、PC アプリは `cd tools/qubit_etude && cargo run` で実行する。リポジトリ直下から `--manifest-path` で指定すると、組み込み向けのターゲットが効いて失敗する
 - `tools/qubit_etude/Cargo.toml` には空の `[workspace]` を書き、直下のファームとは独立したプロジェクトにする。`Cargo.lock` と `target/` は `tools/qubit_etude/` の下に別にできる
 - rust-analyzer（VSCode）は `.vscode/settings.json` で `rust-analyzer.cargo.target` を thumbv8m に固定している。PC アプリ側も解析させるには `rust-analyzer.linkedProjects` などの設定が要る。今は設定しておらず、PC アプリのコードは VSCode で正しく解析されない（§6.1）。必要になったら設定を考える
-- 直下での `cargo fmt` / `cargo clippy` は PC アプリに触れない。PC アプリと `touch_algo` のチェックは、今は CI に入れていない（PC アプリの確認は手元で `cargo clippy`・`cargo test` を行う）
+- 直下での `cargo fmt` / `cargo clippy` は PC アプリに触れない。PC アプリと `touch_algo` のチェックは、今は CI に入れていない（PC アプリの確認は手元で `cargo clippy`・`cargo test` を行う）。PC アプリ（qubit_etude）は CI に入れない（2026-11-19、ユーザー）
 - `touch_algo` はファームのビルド（thumbv8m）と PC アプリのビルド（ホスト）の両方で通るようにする。`embassy_time::Instant` には依存せず、時刻は `u32` の µs で受け取る
 - ワークスペースにはしない（ターゲットが違うため）。それぞれが `touch_algo` を path 依存で使う
-- `flake.nix` は変えていない（macOS では追加のものは要らない）。Linux で PC アプリをビルドするときは、`pkg-config`・`libudev` と X11 / Wayland のライブラリを足す
+- macOS では追加のものは要らない。Linux で PC アプリをビルドするときは、`pkg-config`・`libudev` と X11 / Wayland のライブラリが要る
 
 ### 4.6 段階 3 の実装方針（2026-10-01 決定・最初の版を実装。記録は §6.1）
 
@@ -537,8 +537,8 @@ PC アプリの `.qlog` のヘッダの形式（§4.3）と、PC アプリ・`to
 - **まだしていないこと**
     - GUI の操作の確認（ボタン・ダイアログ・グラフの表示）は、実機をつないで行う
     - Note のイベントは、センサーに触れないと出ないので、GUI での実験のときに確かめる
-    - CI には入れていない。VSCode の rust-analyzer は `.vscode/settings.json` でターゲットを thumbv8m に固定しているので、PC アプリのコードは正しく解析されない（§4.5）。必要になったら設定を考える
-    - `flake.nix` は変えていない。Linux でビルドするには、serialport のために `pkg-config` と `libudev`、eframe のために X11 / Wayland のライブラリが要る
+    - CI には入れていない（入れないと決めた。§4.5）。VSCode の rust-analyzer は `.vscode/settings.json` でターゲットを thumbv8m に固定しているので、PC アプリのコードは正しく解析されない（§4.5）。必要になったら設定を考える
+    - Linux でビルドするには、serialport のために `pkg-config` と `libudev`、eframe のために X11 / Wayland のライブラリが要る
 
 **PC アプリ（段階 3 の最初の版）**（2026-10-01）
 

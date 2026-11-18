@@ -29,7 +29,6 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `build.rs` が `memory.x` を OUT_DIR にコピーし、`BUILD_DATE` と `BUILD_VERSION`（`Cargo.toml` の version）を環境変数として埋め込む。起動画面（OLED page 0）に表示される
 - リンカの引数（`--nmagic`・`-Tlink.x`・`-Map=output.map`）も `build.rs` から渡す（`cargo:rustc-link-arg-bins`）。`.cargo/config.toml` の rustflags には `target-cpu` だけを置く。rustflags で渡すと、新しい cargo（nightly）でリンカに届かずリンクに失敗したため
 - リンク時に `output.map` を生成する（git 管理外）
-- 開発環境は `flake.nix` + direnv（`.envrc`）でも用意できる（stable Rust + picotool）
 
 ## ハードウェア構成
 

@@ -85,7 +85,7 @@ cargo run --release --features no_pca9544,debug_stream   # デバッグ環境（
 cargo clippy --all-features -- --deny=warnings
 ```
 
-feature フラグと PC アプリの起動方法の一覧は `doc/build.md`。開発環境は `flake.nix` + direnv でも用意できる。
+feature フラグと PC アプリの起動方法の一覧は `doc/build.md`。
 
 ## デバッグ環境
 
