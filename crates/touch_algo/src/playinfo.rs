@@ -21,7 +21,11 @@ use crate::touch::{Layout, MAX_TOUCH_POINTS, TOUCH_ON_DEPTH, TouchTracker, Track
 // =========================================================
 //      Constants
 // =========================================================
-pub const HISTERESIS: f32 = 0.7; // Hysteresis value for touch point detection
+/// ノートを変えるヒステリシス（ノートの単位。1 ノート = 電極 ELECTRODES_PER_NOTE 個）。今のノートの中心から
+/// これを越えて離れたらノートを変える。境目（0.5）から 0.1 ノート = 0.2 電極の余裕で、指を止めたときの
+/// 揺れ（key5 の上で p-p 0.19 電極）では変わらない。2026-11-21 に 0.7 から下げた（ユーザー）。
+/// 0.7（境目から 0.4 電極）では、隣のノートへ移る軽やかさが失われていたため
+pub const HISTERESIS: f32 = 0.6;
 
 // MIDI
 /// 電極この数で 1 ノート（Violin の形。指を電極 2 つ分動かすと半音 1 つ変わる）
@@ -1075,7 +1079,7 @@ mod tests {
         assert_eq!(move_velocity(Some(1000.0)), VELOCITY_MOVE_FAST);
     }
 
-    /// ビブラート: 大きく（ヒステリシスを越える ±1.6 電極）揺らしても、ビブラートと判定した後はノートを変えず、
+    /// ビブラート: 大きく（ヒステリシス（1.2 電極）を越える ±1.6 電極）揺らしても、ビブラートと判定した後はノートを変えず、
     /// CC19（Rate）→ CC1（Depth）を送る。指を止めると終わって Depth 0 を送る
     #[test]
     fn vibrato_holds_note_and_sends_cc() {
