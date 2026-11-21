@@ -46,20 +46,8 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
     // タッチの解析は 2 つの層: depth・position（TouchTracker）→ 演奏情報（PlayInfo）。doc/touch_analysis.md §5
     let mut tracker = TouchTracker::new([0u16; TOTAL_QT_KEYS], TOUCH_RING);
-    let mut play = PlayInfo::new(|status, note, velocity, _location| {
-        // MIDIコールバック: タッチイベントをMIDIパケットに変換して送信キューに入れる
-        let status = status & 0xf0; // コマンド部分
-        // デバッグ用: PC に Note のイベントを送る
-        #[cfg(feature = "debug_stream")]
-        queue_note_event(status, note, velocity, _location);
-        // 動作モードは無い（2026-11-13）。ノートは MIDI_CH_VIOLIN で送る
-        let status = if status == STATUS_NOTE_MOVED {
-            0x80 | MIDI_CH_VIOLIN // 移動イベントはNote Offとして扱う
-        } else {
-            status | MIDI_CH_VIOLIN
-        };
-        queue_midi([status >> 4, status, note, velocity]);
-    });
+    // debug_stream では作り直すことがあるので、コールバックは名前のある関数にする
+    let mut play = PlayInfo::new(on_play_event as PlayCallback);
 
     // スキャン周期。debug_stream では PC のコマンドで変わるので、毎周期確かめる
     let mut period_us = scan_period_us();
@@ -79,6 +67,9 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     let analysis_tolerance = Duration::from_micros(ANALYSIS_TOLERANCE_US as u64);
     // None は、まだ解析していない（最初の解析のフレームから数え始める）
     let mut next_analysis_at: Option<Instant> = None;
+    // debug_stream: 前のフレームで PC にフレームを送っていたか。送り始めたフレームで解析をやり直すため
+    #[cfg(feature = "debug_stream")]
+    let mut was_streaming = false;
 
     // Task Loop
     loop {
@@ -91,6 +82,31 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
             ticker = Ticker::every(period);
         }
 
+        // debug_stream: PC がフレームの送信を始めた（start）フレームから、信号処理と解析を起動直後の状態に戻す
+        // （基準値の初期取得・noise_floor の計測からやり直す）。PC の解析（replay_algo）は記録の最初のフレームから
+        // 校正を始めるので、ファームの EVENT と比べられるようになる（doc/debug_env.md §5.2・doc/touch_analysis.md §8）。
+        // DEBUG_STREAMING はこのフレームで 1 回だけ読み、PC に送るかどうかにも同じ値を使う。
+        // 送る最初のフレームと、やり直した最初の解析のフレームを必ず同じにするため。
+        // チップ自身の校正（起動から TOUCH_STARTUP_SETTLE_MS）は済んでいるので待たない。
+        // 作り直すときの一時の値は、12 キーで約 1KB、96 キーで約 8KB（ElectrodeState が約 80 バイト）。
+        // 96 キーで debug_stream を使うときは、Core1 のスタック（CORE1_STACK_SIZE）に気を付ける
+        #[cfg(feature = "debug_stream")]
+        let streaming = {
+            let streaming = crate::shared::DEBUG_STREAMING.load(Ordering::Relaxed);
+            if streaming && !was_streaming {
+                // 鳴っているノートは Note Off が出なくなるので、先に All Notes Off を送る
+                queue_midi([0x0b, 0xb0 | MIDI_CH_VIOLIN, 123, 0]);
+                signal =
+                    ElectrodeSignal::new([ElectrodeState::INITIAL; TOTAL_QT_KEYS], Params::DEFAULT);
+                tracker = TouchTracker::new([0u16; TOTAL_QT_KEYS], TOUCH_RING);
+                play = PlayInfo::new(on_play_event as PlayCallback);
+                next_analysis_at = None;
+                TOUCH_CALIBRATING.store(true, Ordering::Relaxed);
+            }
+            was_streaming = streaming;
+            streaming
+        };
+
         // タッチセンサのスキャン
         read_touch
             .touch_sensor_scan(&pca, &mut at42, &mut i2c)
@@ -99,7 +115,7 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
 
         // デバッグ用: 生値を PC への送信キューに入れる（PC が start を送った後だけ）
         #[cfg(feature = "debug_stream")]
-        queue_debug_frame(&read_touch, frame, cycle_start);
+        queue_debug_frame(&read_touch, frame, cycle_start, streaming);
 
         // 信号処理と解析: TouchTracker・PlayInfo と touch_algo のパラメータは 10ms 毎（8〜10ms）に呼ばれる前提なので、
         // 前の解析から ANALYSIS_PERIOD_US（10ms）経ったフレームで行う。ANALYSIS_TOLERANCE_US まで早くてもよい
@@ -161,6 +177,23 @@ pub async fn touch_task(mut i2c: I2c<'static, I2C1, i2c::Async>) {
     }
 }
 
+type PlayCallback = fn(u8, u8, u8, f32);
+
+/// PlayInfo の MIDI コールバック: タッチイベントを MIDI パケットに変換して送信キューに入れる
+fn on_play_event(status: u8, note: u8, velocity: u8, _location: f32) {
+    let status = status & 0xf0; // コマンド部分
+    // デバッグ用: PC に Note のイベントを送る
+    #[cfg(feature = "debug_stream")]
+    queue_note_event(status, note, velocity, _location);
+    // 動作モードは無い（2026-11-13）。ノートは MIDI_CH_VIOLIN で送る
+    let status = if status == STATUS_NOTE_MOVED {
+        0x80 | MIDI_CH_VIOLIN // 移動イベントはNote Offとして扱う
+    } else {
+        status | MIDI_CH_VIOLIN
+    };
+    queue_midi([status >> 4, status, note, velocity]);
+}
+
 /// 解析の結果を共有状態に書く: タッチ位置 ×100（未タッチは 10000）→ ringled_task・OLED、
 /// 触れているか → pressure_task、Vibrato Speed（Hz ×10。ビブラートでなければ 0）→ OLED（page 1。
 /// doc/touch_analysis.md §4.4）
@@ -182,12 +215,18 @@ fn publish_touch_state<F, P>(
     DEBUG_VALUE.store(vibrato, Ordering::Relaxed);
 }
 
-/// 最後のスキャンの生値を DEBUG_FRAMES に入れる（待たない）。あふれたら捨てて数える
+/// 最後のスキャンの生値を DEBUG_FRAMES に入れる（待たない）。あふれたら捨てて数える。
+/// streaming は、このフレームで読んだ DEBUG_STREAMING（PC が start を送った後か）
 #[cfg(feature = "debug_stream")]
-fn queue_debug_frame(read_touch: &touch::read_touch::ReadTouch, seq: u32, scan_start: Instant) {
-    use crate::shared::{DEBUG_DROPPED, DEBUG_FRAMES, DEBUG_STREAMING, DebugFrame};
+fn queue_debug_frame(
+    read_touch: &touch::read_touch::ReadTouch,
+    seq: u32,
+    scan_start: Instant,
+    streaming: bool,
+) {
+    use crate::shared::{DEBUG_DROPPED, DEBUG_FRAMES, DebugFrame};
 
-    if !DEBUG_STREAMING.load(Ordering::Relaxed) {
+    if !streaming {
         return;
     }
     let (raw, valid) = read_touch.raw();
