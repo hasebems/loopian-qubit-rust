@@ -61,7 +61,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `ringled_task`: 20ms 毎に `TOUCH0-3` と `RINGLED_RX_BITS` を読んで NeoPixel を描画（書き込みのタイムアウトは 15ms）
 - `ui_task`: 100ms 毎にスイッチを判定してページを切り替え、OLED は 200ms 毎（5fps）に描画して I2C0 で転送。描画（1 画面 約 3ms）はテキスト 1 行・図形 1 つ毎に `yield_now` で他のタスクに順番を譲る（`DrawPacer`、`doc/task_architecture.md` §4.4.1）。診断ページの `Drw` は 1 回に Core0 を止めた最長の時間
 - `status_led_task`: 内蔵 LED（ハートビート / エラーコード）
-- `debug_stream_task`（`debug_stream` feature のみ）: `DEBUG_FRAMES` のタッチの生値を USB CDC で PC に送り、PC からのコマンドを受ける。この feature ではスキャン周期の既定が 2ms になり、PC の `period` コマンドで 2 / 5 / 10 / 20ms に変えられる。Note On/Off を EVENT として送る（`doc/debug_env.md`）
+- `debug_stream_task`（`debug_stream` feature のみ）: `DEBUG_FRAMES` のタッチの生値を USB CDC で PC に送り、PC からのコマンドを受ける。この feature ではスキャン周期の既定が 2ms になり、PC の `period` コマンドで 2 / 5 / 10 / 20ms に変えられる。Note On/Off を EVENT として送る。PC の `start` で FRAME を送り始めたフレームから、`touch_task` は信号処理と解析を起動直後の状態に戻す（PC の解析と比べるため。`doc/debug_env.md` §5.2）
 
 ### タスク間の受け渡し
 
@@ -114,8 +114,9 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - 処理時間や周期超過は OLED の診断ページ（page 5）で確認できる。計測値は `shared.rs` の `SCAN_TIME` / `ANALYSIS_TIME` / `UI_DRAW_TIME`（`TimeStat`）、`PERIOD_OVERRUN`、`MIDI_TX_MAX_USED` / `MIDI_TX_OVERFLOW`
 - スキャン時間の内訳は I2C 診断ページ（page 6）で確認できる。I2C1 の通信 1 回の時間（`I2C_SELECT_TIME`・`I2C_READ_TIME`・`I2C_DISCONNECT_TIME`）と、hi/lo ずれの読み直し（`I2C_REREAD_COUNT`）・失敗（`I2C_FAIL_COUNT`）の回数
 - 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`・`playinfo.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
+- 決まっていないこと（未決の仕様・仮の値・まだ確かめていないこと・未実装の機能・見つけて直していない問題）は `doc/not_yet.md` にだけ書き、関係する設計書の節を出典として添える。96 キーのハードを待っているものは `doc/hw96_check.md` にだけ書く。設計書には決まったこととその理由だけを書き、「未決事項」の節は作らない。決まったら not_yet（hw96_check）から消して、設計書に書く（2026-11-21、ユーザー。同じことを何か所にも書くと、直し忘れと確かめる手間が増えるため）
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
-- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること）、`doc/hw96_firmware261114.md`（96 キーのハードの 2 回目の改修に合わせたファームの対応。ハードの完成後に着手）
+- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/not_yet.md`（決まっていないことの一覧）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること・決めること）、`doc/hw96_firmware261114.md`（96 キーのハードの 2 回目の改修に合わせたファームの対応。ハードの完成後に着手）
 
 ## 不具合の扱い
 
