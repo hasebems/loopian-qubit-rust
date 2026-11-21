@@ -43,22 +43,22 @@ impl RingLed {
             // Make the dark part clearly off instead of keeping a constant floor brightness.
             let background_level = ((wave_shaped - 0.18) / 0.82).clamp(0.0, 1.0);
             let white = (background_level * 20.0).clamp(0.0, 255.0) as u8;
-            let mut white_out = 0;
+            let mut white_out = 0u8;
 
             let mut r = 0u8;
             let mut g = 0u8;
             let mut b = 0u8;
 
             if !work_mode_display {
-                // touch position: magenta glow around +/- 3 LEDs (circular wrap)
+                // タッチ位置: 前後 3 LED を白色 LED（RGBW の W）で光らせる（circular wrap）。
+                // 2026-11-21 にマゼンタ（R+B）から白色 LED に変えた（ユーザー）
                 for touch in touchkey_state.iter().flatten() {
                     let mut dist = (*touch - source_pos).abs();
                     dist = dist.min(num_leds_f - dist);
                     if dist <= 3.0 {
                         let intensity = 1.0 - dist / 3.0;
-                        let magenta = (220.0_f32 * intensity * intensity).clamp(0.0, 255.0) as u8;
-                        r = r.saturating_add(magenta);
-                        b = b.saturating_add(magenta);
+                        let level = (220.0_f32 * intensity * intensity).clamp(0.0, 255.0) as u8;
+                        white_out = white_out.saturating_add(level);
                     }
                 }
 
@@ -68,7 +68,7 @@ impl RingLed {
                     b = b.saturating_add(180);
                 }
 
-                if white > 0 && r == 0 && g == 0 && b == 0 {
+                if white > 0 && white_out == 0 && r == 0 && g == 0 && b == 0 {
                     let tint_strength = background_level * 14.0;
                     r = (background_tint_r * tint_strength).clamp(0.0, 255.0) as u8;
                     g = (background_tint_g * tint_strength).clamp(0.0, 255.0) as u8;
