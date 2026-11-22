@@ -38,11 +38,15 @@ const RELEASE_WAITING_US: u32 = 20_000;
 const MAX_CANDIDATES: usize = 16;
 /// 近い区間をまとめる距離（doc/touch_analysis.md §3.7.1）。隣り合う区間の position の差がこれ以内なら、
 /// 1 本のタッチとしてまとめる。今まで 2 本だったとき・新しく触れたときに使う。
-/// §3.7 の初めの値は 6 電極だったが、区間で探すと遠すぎたので 4 にした（2026-11-13）
-pub const MERGE_DISTANCE: f32 = 4.0;
+/// §3.7 の初めの値は 6 電極だったが、区間で探すと遠すぎたので 4 にした（2026-11-13）。
+/// 2026-11-22 に 1.5 に下げた（SPLIT_DISTANCE と一緒に。ユーザー）。区間の間には区間の外の電極が 1 つ以上あり、
+/// position の差は 2 電極以上になるので、これより近いことは無い。2 本だった指・新しく触れた指は、区間が
+/// 1 つにつながったときだけ 1 本になる
+pub const MERGE_DISTANCE: f32 = 1.5;
 /// 1 本だったタッチを分ける距離（§3.7.1）。今まで 1 本だったときは、これより離れるまで 1 本のまま。
-/// MERGE_DISTANCE との差がヒステリシスになる
-pub const SPLIT_DISTANCE: f32 = 7.0;
+/// MERGE_DISTANCE との差がヒステリシスになる。2026-11-22 に 7 から 3 に下げた（ユーザー）。
+/// 全音のレガートで、前の指を押さえたまま置いた次の指を、別の指として分けるため（§3.7.1）
+pub const SPLIT_DISTANCE: f32 = 3.0;
 /// 前の周期の指を数える範囲を、2 つの区間の position の外側へ広げる幅（電極）
 const MERGE_COUNT_MARGIN: f32 = 1.0;
 
@@ -661,22 +665,26 @@ mod tests {
         assert_eq!(tp.get_location(), 2.5);
     }
 
-    /// SEGMENT_THRESHOLD 以下の電極で区切られても、近ければ（MERGE_DISTANCE 以内）1 つにまとめ、
-    /// 間の電極も含めて depth・position を求め直す。離れていれば別の候補になる（§3.7.1）
+    /// SEGMENT_THRESHOLD 以下の電極で区切られても、1 本だった指の近く（SPLIT_DISTANCE 以内）なら 1 つにまとめ、
+    /// 間の電極も含めて depth・position を求め直す。新しく触れたときは MERGE_DISTANCE（2 電極より小さい）で
+    /// 比べるので、間に区間の外の電極があれば別の候補になる（§3.7.1）
     #[test]
     fn close_segments_are_merged() {
-        // 電極 3 と 5（間の 4 は 5 で区間に入らない）: 合計 55、重心 (3×20 + 4×5 + 5×30) / 55
-        let tracker = TouchTracker::new([0, 0, 0, 20, 5, 30, 0, 0, 0, 0, 0, 0u16], false);
+        // 1 本（電極 3〜5）が続いているところで、間の電極 4 が 5 に下がる: 合計 55、重心 (3×20 + 4×5 + 5×30) / 55
+        let mut tracker = TouchTracker::new([0u16; 12], false);
+        put_values(&mut tracker, &[(3, 20), (4, 20), (5, 30)]);
+        assert_eq!(tracker.touch_count(), 1);
+        tracker.set_value(4, 5);
         let mut temp = [Candidate::EMPTY; MAX_CANDIDATES];
         let n = tracker.scan_segments(&mut temp);
         assert_eq!(n, 2);
         assert_eq!(tracker.merge_segments(&mut temp, n), 1);
         assert_eq!(temp[0].depth, 55);
         assert!((temp[0].position - 230.0 / 55.0).abs() < 1e-4);
-        // 電極 1 と 9（8 電極離れている）は別
+        // 同じ output でも、新しく触れたときは別（電極 3 と 5、差 2）
         assert_eq!(
-            candidates([0, 20, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0], false),
-            [9.0, 1.0]
+            candidates([0, 0, 0, 20, 5, 30, 0, 0, 0, 0, 0, 0], false),
+            [5.0, 3.0]
         );
     }
 
@@ -684,35 +692,39 @@ mod tests {
     #[test]
     fn one_finger_splits_only_beyond_split_distance() {
         let mut tracker = TouchTracker::new([0u16; 12], false);
-        // 幅広く 1 本（電極 2〜9、position 5.5）
-        let wide: Vec<(usize, u16)> = (2..=9).map(|k| (k, 20)).collect();
+        // 幅広く 1 本（電極 2〜6、position 4）
+        let wide: Vec<(usize, u16)> = (2..=6).map(|k| (k, 20)).collect();
         put_values(&mut tracker, &wide);
         assert_eq!(tracker.touch_count(), 1);
-        // 2 と 8.5（差 6.5）: MERGE_DISTANCE は超えるが、1 本だったので 1 本のまま
-        put_values(&mut tracker, &[(2, 20), (8, 20), (9, 20)]);
+        // 2 と 4.5（差 2.5）: MERGE_DISTANCE は超えるが、1 本だったので 1 本のまま
+        put_values(&mut tracker, &[(2, 20), (4, 20), (5, 20)]);
         assert_eq!(tracker.touch_count(), 1);
         assert_eq!(tracker.touch_point(0).unwrap().track(), Track::Followed);
         assert!(!tracker.touch_point(1).unwrap().is_touched());
-        // 2 と 9.5（差 7.5）: SPLIT_DISTANCE を超えたので分ける
-        put_values(&mut tracker, &[(2, 20), (9, 20), (10, 20)]);
+        // 2 と 5.5（差 3.5）: SPLIT_DISTANCE を超えたので分ける
+        put_values(&mut tracker, &[(2, 20), (5, 20), (6, 20)]);
         assert_eq!(tracker.touch_count(), 2);
     }
 
-    /// 2 本だった指は MERGE_DISTANCE 以内に近づくまでまとめない（§3.7.1）
+    /// 2 本だった指は、MERGE_DISTANCE 以内に近づくまでまとめない（§3.7.1）。
+    /// MERGE_DISTANCE は 2 電極より小さいので、間に区間の外の電極がある間は 2 本のまま。区間がつながると 1 本
     #[test]
     fn two_fingers_merge_only_within_merge_distance() {
         let mut tracker = TouchTracker::new([0u16; 12], false);
-        // 1 と 9（差 8）: 2 本
-        put_values(&mut tracker, &[(1, 20), (9, 20)]);
+        // 2 と 7（差 5）: 2 本
+        put_values(&mut tracker, &[(2, 20), (7, 20)]);
         assert_eq!(tracker.touch_count(), 2);
-        // 2 と 8.5（差 6.5）: SPLIT_DISTANCE 以内だが、2 本だったので 2 本のまま
-        put_values(&mut tracker, &[(2, 20), (8, 20), (9, 20)]);
-        assert_eq!(tracker.touch_count(), 2);
-        // 3 と 8.5（差 5.5）: まだ 2 本
-        put_values(&mut tracker, &[(3, 20), (8, 20), (9, 20)]);
-        assert_eq!(tracker.touch_count(), 2);
-        // 4 と 8（差 4）: MERGE_DISTANCE 以内なのでまとめる
-        put_values(&mut tracker, &[(4, 20), (8, 20)]);
+        // 2 と 5.5（差 3.5）、2 と 4.5（差 2.5）、2 と 4（差 2）: SPLIT_DISTANCE 以内だが、2 本だったので 2 本のまま
+        for values in [
+            &[(2, 20), (5, 20), (6, 20)][..],
+            &[(2, 20), (4, 20), (5, 20)][..],
+            &[(2, 20), (4, 20)][..],
+        ] {
+            put_values(&mut tracker, values);
+            assert_eq!(tracker.touch_count(), 2, "{values:?}");
+        }
+        // 間の電極 3 が区間に入り、1 つの区間になる: 1 本
+        put_values(&mut tracker, &[(2, 20), (3, 20), (4, 20)]);
         assert_eq!(tracker.touch_count(), 1);
     }
 
@@ -812,13 +824,17 @@ mod tests {
             candidates([20, 3, 0, 0, 0, 0, 0, 0, 0, 0, 3, 20], false),
             [0.0, 11.0]
         );
-        // つなぎ目の両側の近い区間（電極 1 と 22。右回りに 3）は、つなぎ目をまたいでまとめる
-        let mut v = [0u16; 24];
-        v[1] = 20;
-        v[22] = 20;
-        let c = candidates(v, true);
-        assert_eq!(c.len(), 1);
-        assert!((c[0] - 23.5).abs() < 1e-4, "{c:?}");
+        // つなぎ目の両側の近い区間（電極 22 と 0。右回りに 2）は、1 本だった指の近くなら、つなぎ目をまたいでまとめる
+        let mut tracker = TouchTracker::new([0u16; 24], true);
+        put_values(&mut tracker, &[(22, 20), (23, 20), (0, 20)]);
+        assert_eq!(tracker.touch_count(), 1);
+        tracker.set_value(23, 5);
+        let mut temp = [Candidate::EMPTY; MAX_CANDIDATES];
+        let n = tracker.scan_segments(&mut temp);
+        assert_eq!(n, 2);
+        assert_eq!(tracker.merge_segments(&mut temp, n), 1);
+        assert_eq!(temp[0].depth, 45);
+        assert!((temp[0].position - (22.0 + (5.0 + 2.0 * 20.0) / 45.0)).abs() < 1e-4);
         // つなぎ目から離れた区間（電極 1 と 12）は別
         let mut v = [0u16; 24];
         v[1] = 20;
