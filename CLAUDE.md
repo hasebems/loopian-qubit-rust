@@ -34,16 +34,17 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 
 | 機能 | ピン / 周辺 | 備考 |
 |---|---|---|
-| I2C0 (400kHz) | SDA=GP0 (D6), SCL=GP1 (D7) | SSD1306 OLED (0x3C)。`ui_task` (Core0) が専有 |
+| I2C0 (400kHz) | SDA=GP0 (D6), SCL=GP1 (D7) | タッチセンサの 2 系統目（まだ使っていない。`doc/hw96_firmware261114.md` §5） |
 | I2C1 (400kHz) | SDA=GP6, SCL=GP7 | PCA9544 ×4 (0x70–0x73)。`touch_task` (Core1) が専有 |
 | タッチセンサ | PCA9544 の各 ch 先に AT42QT1070 (0x1B) | 4台×4ch=16個 ×6キー = 96キー |
+| PIO の I2C (400kHz) | SDA=GP3 (D10), SCL=GP4 (D9), PIO1 SM0 | SSD1306 OLED (0x3C)・PCF8574 (0x20、スイッチ)。`ui_task` (Core0) が専有 |
 | NeoPixel (RGBW) | GP5, PIO0 SM0 + DMA_CH0 | 96 LED のリング |
 | ADC (圧力センサ) | GP26/27/28, DMA_CH1 | 3ch |
-| スイッチ | GP2 (右), GP4 (左) | プルアップ、Low で押下 |
+| スイッチ | PCF8574 の P0 (左), P1 (右) | Low で押下。GP2 は空き |
 | 内蔵 LED | GP25 | Active Low。ハートビート / エラーコード表示 |
 | USB | USB MIDI (VID 0x1209 / PID 0x3691) | |
 
-回路図は `mcuboard_schematic.pdf`、I2C ロックアップの調査記録は `doc/i2c_problem260802.md`。OLED を I2C0 に移すハードウェア改修は `doc/hw_modify.md`（改修前の基板では OLED が表示されず、エラー 42 になる）。
+回路図は `mcuboard_schematic.pdf`、I2C ロックアップの調査記録は `doc/i2c_problem260802.md`。ハードウェアの改修は `doc/hw_modify.md`。この表は 2 回目の改修（§8: OLED とスイッチを PIO の I2C へ、I2C0 をセンサーへ）の後の基板のもので、`dual_i2c_touch` ブランチのファームはこの基板でしか OLED もスイッチも使えない（改修前の基板では、エラー 42・52 になる）。
 
 ## アーキテクチャ
 
@@ -59,13 +60,13 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `midi_rx_task`: USB MIDI を受信する。受信した Note On/Off を `RINGLED_RX_BITS` に反映する処理は、今は止めている（`SHOW_RX_NOTES` = false。動作モードを無くして Violin の形にしたため）
 - `pressure_task`: 10ms 毎に ADC 3ch をサンプリングし、`PRESSURE` を算出。Bow Pressure（CC80）を `MIDI_TX` へ（最初の 1 回は初期値）。圧力センサを ADC につなぐまでは送らない（`pressure.rs` の `BOW_PRESSURE_ENABLED` = false。2026-11-14）
 - `ringled_task`: 20ms 毎に `TOUCH0-3` と `RINGLED_RX_BITS` を読んで NeoPixel を描画（書き込みのタイムアウトは 15ms）
-- `ui_task`: 100ms 毎にスイッチを判定してページを切り替え、OLED は 200ms 毎（5fps）に描画して I2C0 で転送。描画（1 画面 約 3ms）はテキスト 1 行・図形 1 つ毎に `yield_now` で他のタスクに順番を譲る（`DrawPacer`、`doc/task_architecture.md` §4.4.1）。診断ページの `Drw` は 1 回に Core0 を止めた最長の時間
+- `ui_task`: 100ms 毎にスイッチを判定してページを切り替え、OLED は 200ms 毎（5fps）に描画して PIO の I2C で転送。スイッチは同じバスの PCF8574 から読み、読めなかった回は前回の状態のままとする（エラー 52）。描画（1 画面 約 3ms）はテキスト 1 行・図形 1 つ毎に `yield_now` で他のタスクに順番を譲る（`DrawPacer`、`doc/task_architecture.md` §4.4.1）。診断ページの `Drw` は 1 回に Core0 を止めた最長の時間
 - `status_led_task`: 内蔵 LED（ハートビート / エラーコード）
 - `debug_stream_task`（`debug_stream` feature のみ）: `DEBUG_FRAMES` のタッチの生値を USB CDC で PC に送り、PC からのコマンドを受ける。この feature ではスキャン周期の既定が 2ms になり、PC の `period` コマンドで 2 / 5 / 10 / 20ms に変えられる。Note On/Off を EVENT として送る。PC の `start` で FRAME を送り始めたフレームから、`touch_task` は信号処理と解析を起動直後の状態に戻す（PC の解析と比べるため。`doc/debug_env.md` §5.2）
 
 ### タスク間の受け渡し
 
-- 共有状態は `src/shared.rs` にまとめ、各項目に書き手と読み手をコメントで書く。基本は `portable_atomic` の Atomic（`Ordering::Relaxed`）で、各タスクは共有状態をポーリングして独立周期で動く（経緯は `doc/ringled_modify.md`）
+- 共有状態は `src/shared.rs` にまとめ、各項目に書き手と読み手をコメントで書く。基本は `portable_atomic` の Atomic（`Ordering::Relaxed`）で、各タスクは共有状態をポーリングして独立周期で動く（理由は `doc/task_architecture.md` §4.5）
 - 例外は MIDI 送信の `MIDI_TX`（容量 16 の `Channel`）。書き手は `touch_task`（Core1）と `pressure_task`（Core0）で、`tasks::midi::queue_midi` で `try_send` する（待たない。あふれたら捨ててエラー 22）
 - コアをまたぐのは `MIDI_TX` と Atomic だけ。タッチの生データはコアをまたがない
 - `TOUCH0-3` はタッチ位置 ×100（0–9999）、10000 は未タッチ
@@ -78,7 +79,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - `src/error.rs`: エラーコードの定数と `error::set` / `clear` / `get`
 - `src/tasks/`: タスク本体（ループ・周期・共有状態の読み書き）。計算や描画のロジックは `touch/`・`ui/` に置く
 - `src/constants.rs`: キー数・MIDI チャンネル・スキャン周期など。`etude`（12 キー）・`no_pca9544`（6 キー）feature でキー数が変わる
-- `src/devices/`: I2C デバイスの最小ドライバ（`at42qt`, `pca9544`, `ssd1306`）。I2C を所有せず、呼び出し毎に `&mut I2C` を借用する
+- `src/devices/`: I2C デバイスの最小ドライバ（`at42qt`, `pca9544`, `ssd1306`, `pcf8574`）。I2C を所有せず、呼び出し毎に `&mut I2C` を借用する。`pio_i2c` は PIO で動く I2C のマスター（embedded-hal-async の `I2c` を実装。NACK・打ち切りの後はバスを戻し、回数を page 6 の `UI bus Rcv` に出す）
 - `src/touch/read_touch.rs`: PCA9544 の ch 切替と AT42QT の生値（Key Signal）の読み込み、hi/lo ずれの読み直し。チップの基準値は使わない。ch 順は `CH_CONVERSION`（`[0, 1, 2, 3]`、そのまま）で決まり、キー番号は読み取り順のまま（回転しない）
 - `src/touch/pressure.rs`: ADC の移動平均基準値（上昇 / 下降で追従率を変える）と Bow Pressure（CC80）の変換テーブル。送る CC はパケットとして返し、送信はタスク側が行う
 - `src/ui/oled_display.rs`: OLED ページ描画（page 0–3 と 5（診断）・6（I2C 診断）を左右スイッチで巡回、4 は設定画面、10 以降はデモ）

@@ -54,7 +54,7 @@
 
 ### 3.3 PIO の資源
 
-- **PIO1 の SM0 を使う**。PIO0 は NeoPixel（SM0）が使っていて、`Common<PIO0>` は `ringled_task` に渡してしまうので、後から PIO0 に別のプログラムを載せにくい。I2C のプログラムは 30 命令前後あり、PIO の命令メモリ（32 語）の大半を使うので、別の PIO に置くほうが素直
+- **PIO1 の SM0 を使う**。PIO0 は NeoPixel（SM0）が使っていて、`Common<PIO0>` は `ringled_task` に渡してしまうので、後から PIO0 に別のプログラムを載せにくい。I2C のプログラム（19 命令）を PIO の命令メモリの先頭に置くので、別の PIO にするほうが素直。細かい動作は `src/devices/pio_i2c.rs` の先頭のコメントに書いた
 - `bind_interrupts!` に `PIO1_IRQ_0 => PioInterruptHandler<PIO1>` を足す
 - `main.rs`（Core0）で生成して `ui_task` に渡す。PIO の割り込みは Core0 で処理される（`ui_task` も Core0 なのでよい）
 - ピンは PIN_3（SDA）・PIN_4（SCL）。外付けのプルアップを前提にし、内蔵プルアップも有効にしておく（補助。400kHz では内蔵だけには頼らない）

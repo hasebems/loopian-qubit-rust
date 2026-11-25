@@ -6,10 +6,10 @@
 ## 1. 目的
 
 - OLED（SSD1306）を、タッチセンサと同じ I2C バス（I2C1）から外し、別の I2C バス（I2C0）に移す
-- OLED の転送がタッチのスキャンを止めないようにする（`doc/task_architecture.md` §2.2 の P1）
+- OLED の転送がタッチのスキャンを止めないようにする（`doc/task_architecture.md` §1）
 - I2C のロックアップ（`doc/i2c_problem260802.md`）が起きたときに、OLED が巻き込まれないようにする。エラーを表示できるので、原因の切り分けにも役立つ
 
-ファームウェア側の対応は `doc/task_architecture.md` の段階 3 で行う。
+ファームウェアのコア・タスク構成は `doc/task_architecture.md`。
 
 ## 2. 変更内容
 
