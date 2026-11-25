@@ -116,7 +116,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 - 感度などのチューニング値は各モジュール先頭の `const` にまとまっている（`pressure.rs`, `read_touch.rs`, `touch_algo` の `touch.rs`・`playinfo.rs`）と `touch_algo::electrode` の `Params::DEFAULT`。調整の意図を日本語コメントで残す
 - 決まっていないこと（未決の仕様・仮の値・まだ確かめていないこと・未実装の機能・見つけて直していない問題）は `doc/not_yet.md` にだけ書き、関係する設計書の節を出典として添える。96 キーのハードを待っているものは `doc/hw96_check.md` にだけ書く。設計書には決まったこととその理由だけを書き、「未決事項」の節は作らない。決まったら not_yet（hw96_check）から消して、設計書に書く（2026-11-21、ユーザー。同じことを何か所にも書くと、直し忘れと確かめる手間が増えるため）
 - `doc/` の Markdown は設計メモ・作業記録。`doc/_old/` は git 管理外の古い資料置き場（改修前の OLED ダブルバッファの説明 `double_buffering.md` など）
-- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/not_yet.md`（決まっていないことの一覧）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること・決めること）、`doc/hw96_firmware261114.md`（96 キーのハードの 2 回目の改修に合わせたファームの対応。ハードの完成後に着手）
+- 設計書: `doc/task_architecture.md`（コア・タスク構成）、`doc/hw_modify.md`（ハード改修）、`doc/debug_env.md`（デバッグ環境）、`doc/touch_baseline.md`（タッチの基準値）、`doc/touch_analysis.md`（タッチの解析: 複数のキーから 1 つのタッチを求め、演奏情報を取り出す）、`doc/not_yet.md`（決まっていないことの一覧）、`doc/hw96_check.md`（96 キーの新ハードウェアができてから確認すること・決めること）、`doc/hw96_firmware261114.md`（96 キーのハードの 2 回目の改修に合わせたファームの対応。I2C を 2 系統ともタッチに使う。進め方（ブランチ・実機で確かめる時期）は同書の冒頭と §2）
 
 ## 不具合の扱い
 
