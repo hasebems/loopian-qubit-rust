@@ -40,7 +40,7 @@ cd crates/touch_algo && cargo build && cargo test --target host-tuple  # 信号�
 | PIO の I2C (400kHz) | SDA=GP3 (D10), SCL=GP4 (D9), PIO1 SM0 | SSD1306 OLED (0x3C)・PCF8574 (0x20、スイッチ)。`ui_task` (Core0) が専有 |
 | NeoPixel (RGBW) | GP5, PIO0 SM0 + DMA_CH0 | 96 LED のリング |
 | ADC (圧力センサ) | GP26/27/28, DMA_CH1 | 3ch |
-| スイッチ | PCF8574 の P0 (左), P1 (右) | Low で押下。GP2 は空き |
+| スイッチ | PCF8574 の P6 (左), P7 (右) | Low で押下。GP2 は空き |
 | 内蔵 LED | GP25 | Active Low。ハートビート / エラーコード表示 |
 | USB | USB MIDI (VID 0x1209 / PID 0x3691) | |
 
