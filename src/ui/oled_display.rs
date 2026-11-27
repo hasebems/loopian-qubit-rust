@@ -18,7 +18,8 @@ use crate::shared::{
     AD_VALUE0, AD_VALUE1, AD_VALUE2, AD_VALUE3, ANALYSIS_TIME, DEBUG_VALUE, I2C_DISCONNECT_TIME,
     I2C_FAIL_COUNT, I2C_READ_TIME, I2C_REREAD_COUNT, I2C_SELECT_TIME, MIDI_TX_MAX_USED,
     MIDI_TX_OVERFLOW, PERIOD_OVERRUN, POINT0, POINT1, POINT2, POINT3, POINT4, POINT5, PRESSURE,
-    SCAN_TIME, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3, UI_DRAW_TIME,
+    SCAN_TIME, TOUCH_CALIBRATING, TOUCH0, TOUCH1, TOUCH2, TOUCH3, UI_BUS_RECOVERY_COUNT,
+    UI_DRAW_TIME,
 };
 
 /// 設定画面のページ番号
@@ -392,7 +393,7 @@ async fn display_diag(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
     .await;
 }
 
-/// I2C 診断ページ（page 6）: I2C1 の通信 1 回の時間（µs、最小・平均・最大）と、読み直し・失敗の回数。
+/// I2C 診断ページ（page 6）: I2C1 の通信 1 回の時間（µs、最小・平均・最大）と、読み直し・失敗の回数、OLED・スイッチのバスを戻した回数。
 /// スキャン時間の内訳を見るため（doc/hw96_check.md §2.1）。設定画面に入るとリセットされる
 async fn display_i2c_diag(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
     use core::sync::atomic::Ordering;
@@ -436,6 +437,20 @@ async fn display_i2c_diag(buffer: &mut OledBuffer, pacer: &mut DrawPacer) {
         buffer,
         pacer,
         &Text::new(&text, Point::new(0, 50), style_small),
+    )
+    .await;
+
+    // OLED・スイッチの PIO の I2C で、バスを戻した回数
+    text.clear();
+    let _ = write!(
+        text,
+        "UI bus Rcv {}",
+        UI_BUS_RECOVERY_COUNT.load(Ordering::Relaxed)
+    );
+    draw(
+        buffer,
+        pacer,
+        &Text::new(&text, Point::new(0, 60), style_small),
     )
     .await;
 }

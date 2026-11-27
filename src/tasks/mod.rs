@@ -17,8 +17,9 @@
 //! | touch_task          | Core1 | 10ms (debug_stream では 2ms) | touch.rs |
 //! | debug_stream_task   | Core0 | DEBUG_FRAMES / CDC 受信で起動 | debug_stream.rs（debug_stream feature） |
 //!
-//! I2C は 2 系統: I2C0 (GP0/GP1) は OLED で ui_task が、I2C1 (GP6/GP7) はタッチセンサで
-//! touch_task が専有する。I2C1 は Core1 で生成し、その割り込みを Core1 で処理する
+//! I2C: I2C1 (GP6/GP7) はタッチセンサで touch_task が、PIO の I2C (GP3/GP4) は OLED と
+//! スイッチの PCF8574 で ui_task が専有する。I2C1 は Core1 で生成し、その割り込みを Core1 で処理する。
+//! I2C0 (GP0/GP1) はタッチセンサの 2 系統目にする（doc/hw96_firmware261114.md §5。まだ使っていない）
 //!
 //! Core1 の touch_task はスキャン → 信号処理（touch_algo）→ 解析 → ノートイベントの生成をひと続きに行う。
 //! コアをまたぐのは MIDI_TX（キュー）と Atomic だけ

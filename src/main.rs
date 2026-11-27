@@ -27,9 +27,9 @@ use rp235x_hal::{self as hal};
 use embassy_rp::adc::InterruptHandler as AdcInterruptHandler;
 use embassy_rp::bind_interrupts;
 use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
-use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::gpio::{Level, Output, Pull};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, InterruptHandler as I2cInterruptHandler};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, I2C0, I2C1, PIO0, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, I2C0, I2C1, PIO0, PIO1, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::PioWs2812Program;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
@@ -37,6 +37,7 @@ use embassy_usb::class::midi::MidiClass;
 use embassy_usb::{Builder, Config};
 
 use crate::constants::*;
+use crate::devices::pio_i2c::{PioI2c, PioI2cProgram};
 
 bind_interrupts!(pub struct Irqs {
     ADC_IRQ_FIFO => AdcInterruptHandler;
@@ -44,6 +45,7 @@ bind_interrupts!(pub struct Irqs {
     I2C1_IRQ => I2cInterruptHandler<I2C1>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
+    PIO1_IRQ_0 => PioInterruptHandler<PIO1>;
     DMA_IRQ_0 => DmaInterruptHandler<DMA_CH0>, DmaInterruptHandler<DMA_CH1>;
 });
 
@@ -89,10 +91,6 @@ fn main() -> ! {
     // LEDピン
     // XIAO RP系の内蔵LEDは Active Low 想定: High=消灯, Low=点灯
     let led = Output::new(p.PIN_25, Level::High);
-
-    // Switchピン
-    let switch1 = Input::new(p.PIN_2, Pull::Up);
-    let switch2 = Input::new(p.PIN_4, Pull::Up);
 
     // ADC
     let (adc, adc_a1, adc_a2, adc_a3) = (
@@ -151,14 +149,35 @@ fn main() -> ! {
         CdcAcmClass::new(&mut builder, state, tasks::debug_stream::CDC_PACKET_SIZE)
     };
 
-    // I2C: 2 系統に分ける
-    // - I2C0 (SDA=GP0/D6, SCL=GP1/D7): OLED。Core0 の ui_task が使う
+    // I2C（doc/hw96_firmware261114.md §1）
     // - I2C1 (SDA=GP6, SCL=GP7): タッチセンサ。割り込みを Core1 で処理させるため、Core1 の中で生成する
     //   （embassy-rp は new_async を呼んだコアの NVIC で割り込みを有効にする）
+    // - I2C0 (SDA=GP0, SCL=GP1): タッチセンサの 2 系統目にする（§5。まだつないでいない）
+    // - PIO の I2C (SDA=GP3, SCL=GP4): OLED とスイッチの PCF8574。Core0 の ui_task が使う
     let mut i2c_config = I2cConfig::default();
     i2c_config.frequency = 400_000;
-    let i2c0 = I2c::new_async(p.I2C0, p.PIN_1, p.PIN_0, Irqs, i2c_config);
     let (i2c1_peri, i2c1_scl, i2c1_sda) = (p.I2C1, p.PIN_7, p.PIN_6);
+
+    // PIO1 / OLED とスイッチの I2C。PIO0 は NeoPixel が使い、Common<PIO0> を ringled_task に渡すので、別の PIO にする。
+    // PIO の割り込みは、Pio::new を呼んだ Core0 で処理される
+    let Pio {
+        common: mut pio1_common,
+        sm0: pio1_sm0,
+        irq_flags: pio1_irq_flags,
+        irq0: pio1_irq0,
+        ..
+    } = Pio::new(p.PIO1, Irqs);
+    let ui_i2c_program = PioI2cProgram::new(&mut pio1_common);
+    let ui_i2c = PioI2c::new(
+        &mut pio1_common,
+        pio1_sm0,
+        pio1_irq0,
+        pio1_irq_flags,
+        p.PIN_3,
+        p.PIN_4,
+        &ui_i2c_program,
+        400_000,
+    );
 
     // PIO / Neopixel
     let Pio {
@@ -210,7 +229,7 @@ fn main() -> ! {
             Ok(token) => spawner.spawn(token),
             Err(_) => error::set(error::SPAWN_PRESSURE),
         }
-        match tasks::ui::ui_task(i2c0, switch1, switch2) {
+        match tasks::ui::ui_task(ui_i2c) {
             Ok(token) => spawner.spawn(token),
             Err(_) => error::set(error::SPAWN_UI),
         }

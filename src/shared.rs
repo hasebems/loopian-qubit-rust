@@ -117,6 +117,8 @@ pub static I2C_READ_TIME: TimeStat = TimeStat::new(); // AT42QT1070 の 6 キー
 pub static I2C_DISCONNECT_TIME: TimeStat = TimeStat::new(); // PCA9544 の切断
 pub static I2C_REREAD_COUNT: AtomicU32 = AtomicU32::new(0); // hi/lo ずれの疑いで 1 キーを読み直した回数
 pub static I2C_FAIL_COUNT: AtomicU32 = AtomicU32::new(0); // 選択・読み取り・切断・読み直しの失敗（タイムアウトを含む）の回数
+// OLED・スイッチの PIO の I2C で、バスを戻した回数（NACK・打ち切られた転送の後。起動直後の 1 回を除く）: ui_task → OLED (page 6)
+pub static UI_BUS_RECOVERY_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// 診断用の最小・最大と回数をリセットする
 pub fn reset_diagnostics() {
@@ -131,6 +133,7 @@ pub fn reset_diagnostics() {
     I2C_DISCONNECT_TIME.reset();
     I2C_REREAD_COUNT.store(0, Ordering::Relaxed);
     I2C_FAIL_COUNT.store(0, Ordering::Relaxed);
+    UI_BUS_RECOVERY_COUNT.store(0, Ordering::Relaxed);
 }
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

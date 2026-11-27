@@ -36,8 +36,9 @@ pub const OLED_FLUSH: u8 = 43; // OLED転送エラー（タイムアウトを含
 pub const SPAWN_RINGLED: u8 = 44; // ringled_task の起動に失敗
 pub const RINGLED_WRITE_TIMEOUT: u8 = 45; // RingLEDへの書き込みのタイムアウト
 
-// 5x: システム
+// 5x: システム（スイッチを含む）
 pub const SPAWN_STATUS_LED: u8 = 51; // status_led_task の起動に失敗（LED では表示できない。OLED の診断ページで確認する）
+pub const SWITCH_READ: u8 = 52; // スイッチ（PCF8574）の初期化・読み込みのエラー（タイムアウトを含む）
 // panic ハンドラが書き込む。LED を点滅させる status_led_task は Core0 にあるため、
 // Core0 で panic したときは LED では表示できない（Core1 の panic は表示できる）
 pub const PANIC: u8 = 55;
